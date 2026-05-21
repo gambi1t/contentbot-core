@@ -1,0 +1,24 @@
+# Ruff config — ловим реальные баги, не придираемся к стилю
+# Запуск: ruff check bot.py
+
+# Наши файлы
+include = ["*.py"]
+exclude = ["venv", "__pycache__", ".git"]
+
+[lint]
+select = [
+    "F821",   # undefined-name — переменная не определена (поймал бы _tmp_proj)
+    "F841",   # unused-variable — присвоили но не используем
+    "F811",   # redefined-unused — переопределили переменную (поймал бы notion=)
+    "E721",   # type-comparison
+    "F401",   # unused-import
+    "W605",   # invalid-escape-sequence
+]
+
+ignore = [
+    "E501",   # line-too-long
+    "E402",   # module-import-not-at-top
+]
+
+[lint.per-file-ignores]
+"bot.py" = ["F401"]

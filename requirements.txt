@@ -1,0 +1,22 @@
+python-telegram-bot[job-queue]==21.6
+anthropic==0.42.0
+notion-client==2.2.1
+python-dotenv==1.0.1
+openai==1.58.1
+Pillow==11.1.0
+requests==2.32.3
+aiohttp==3.11.11
+# faster-whisper — для Selfie pipeline (word-level timestamps).
+# Pulls ctranslate2 + av automatically. CPU-only build is fine for our scale.
+faster-whisper==1.2.1
+# Codex review #2 fix (8 May 2026): top-level imports from bot.py/crosspost.py/
+# heygen_test_handlers.py — нужны для startup на чистом сервере.
+elevenlabs==2.40.0
+requests-toolbelt==1.0.0
+httpx==0.28.1
+# tiktokautouploader — нужен ТОЛЬКО для реальной публикации в TikTok.
+# Запускается через subprocess внутри crosspost.py (через tiktok_first_login.py
+# или из crosspost.py f-string). Bot.py стартует без него. Раскомментировать
+# когда подключим TikTok-публикацию (на v1 — отложено).
+# tiktokautouploader
+

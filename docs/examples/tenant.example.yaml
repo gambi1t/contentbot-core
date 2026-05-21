@@ -1,0 +1,95 @@
+# ПРИМЕР конфига тенанта (СИНТЕТИЧЕСКИЙ — вымышленный клиент, не реальные данные).
+#
+# Это НЕ предписание формата (yaml/json/БД — решаешь в RFC). Это иллюстрация
+# того, ЧТО должно стать данными тенанта вместо кода. Поля сгруппированы как в
+# 03_TENANT_MODEL.md. В комментариях — где это живёт в текущем коде, чтобы видеть
+# масштаб выноса.
+#
+# Приёмочный тест: чтобы добавить нового клиента, человек заполняет такой файл +
+# кладёт ассеты + проходит чек-лист. Кода не трогает.
+
+tenant_id: demo_fit            # уникальный идентификатор инстанса
+active: true
+
+# ── 1. Идентичность ───────────────────────────────────────────────────────
+identity:
+  brand_name: "Иван Тренер"                       # сейчас: BRANDS[*].description
+  author_bio: "Иван — фитнес-предприниматель, сеть студий «ВольтФит»."
+  tone: "взрослый, прямой, без инфоцыганщины"
+  audience: "предприниматели и владельцы малого бизнеса, 30+"
+  wardrobe_modes:                                  # сейчас: BRANDS[*].wardrobe_modes
+    indoor: "тёмное худи, студия"
+    outdoor: "ветровка, улица/парк"
+
+# ── 2. Лицо и голос (внешние ID + ассеты) ─────────────────────────────────
+avatar:
+  provider: heygen                                 # слой провайдера (сменяемый)
+  avatar_id: "REPLACE_HEYGEN_AVATAR_ID"            # сейчас: BRANDS[*].heygen_avatar_id
+  engine: avatar_iv                                # avatar_iv | avatar_iii
+  looks:
+    - id: "REPLACE_LOOK_ID"
+      name: "Иван — фото-аватар"
+  source_assets: "assets/demo_fit/avatar/"         # фото для регистрации
+voice:
+  provider: elevenlabs                             # слой провайдера (сменяемый)
+  voice_id: "REPLACE_ELEVEN_VOICE_ID"              # сейчас: BRANDS[*].eleven_voice_id
+  model: eleven_v3                                 # v2 | v3
+  source_assets: "assets/demo_fit/voice/"          # аудио для клона
+
+# ── 3. Соцсети и публикация (интеграции; СЕКРЕТЫ — не здесь, см. ниже) ─────
+channels:
+  telegram:
+    handle: "@demo_fit_channel"                    # сейчас: .env TELEGRAM_CHANNEL_ID
+    display: "ВольтФит | Про бизнес в фитнесе"
+  platforms_active: ["TG канал", "Instagram", "YouTube Shorts", "VK"]
+  author_block:                                    # сейчас: .env AUTHOR_*
+    name: "Иван Тренер"
+    instagram_url: "https://instagram.com/REPLACE"
+    telegram_url: "https://t.me/REPLACE"
+  dm_reply_master_url: "https://t.me/REPLACE"       # сейчас: .env DEFAULT_DM_REPLY_URL
+
+# ── 4. Контент-таксономия (ДОЛЖНА совпадать со схемой Notion клиента!) ─────
+notion:
+  database_id: "REPLACE_NOTION_DB_ID"              # сейчас: .env NOTION_DATABASE_ID
+  rubric_property: "Рубрика"                        # имя свойства (бывает с пробелом)
+  status_type: select                              # select | status
+  rubrics:                                          # = опции select «Рубрика» в Notion
+    - "Свободный формат"
+    - "Виральный ролик"
+    - "Личный мысли | Инсайты"
+    - "TG-пост"
+  rubric_rules: |                                   # правила для LLM-классификатора
+    - короткий цепляющий ролик → "Виральный ролик"
+    - личный опыт/выводы → "Личный мысли | Инсайты"
+    - текстовый лонгрид → "TG-пост"
+    - непонятно → "Свободный формат"
+  platforms: ["TG канал", "Instagram", "YouTube Shorts", "VK"]   # опции «Площадки»
+  formats: ["Short video", "Long post", "Reel"]                  # опции «Формат»
+
+# ── 5. Промпты (генеративное ядро) ────────────────────────────────────────
+prompts:
+  script: "prompts/demo_fit/script.txt"
+  cover: "prompts/demo_fit/cover.txt"
+  idea: "prompts/demo_fit/idea.txt"
+  tgpost_system: "prompts/demo_fit/tgpost.txt"
+  # классификатор рубрики собирается из notion.rubrics + notion.rubric_rules
+
+# ── 6. Сборка и дефолты ───────────────────────────────────────────────────
+assembly:
+  default_layout: pro            # pro | smart | split | dynamic | fullscreen
+  subtitles: true
+  auto_trim_sec: 5
+
+# ── 7. Провайдеры / инфра (резидентность данных!) ─────────────────────────
+providers:
+  ai: anthropic                  # anthropic | openai | gigachat | yandexgpt
+  # ↑ для РФ-контура (Max, 152-ФЗ) переключается на gigachat/yandexgpt
+  data_residency: global         # global | ru
+billing:
+  enabled: false                 # сейчас: .env BILLING_ENABLED
+
+# ── СЕКРЕТЫ ЖИВУТ ОТДЕЛЬНО ─────────────────────────────────────────────────
+# OAuth-токены, API-ключи, bot-token НЕ хранятся в этом файле. Они — в защищённом
+# секрет-сторе/реестре интеграций тенанта (как именно — решаешь в RFC). Здесь
+# только ССЫЛКИ/идентификаторы, не значения.
+secrets_ref: "secret-store://demo_fit"

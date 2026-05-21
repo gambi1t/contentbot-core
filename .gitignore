@@ -1,0 +1,73 @@
+# ============ СЕКРЕТЫ И КРЕДЫ (никогда не коммитить!) ============
+.env
+.env.*
+*.env
+**/.env
+*.session
+*.session-journal
+telethon_session*
+sessions/
+*token*.json
+*credentials*.json
+*secret*.json
+*.pem
+*.key
+id_ed25519*
+
+# ============ ПЕРСОНАЛЬНЫЕ ДАННЫЕ КЛИЕНТОВ ============
+# Аватарные фото/голос (биометрия!), рантайм-данные, библиотеки клипов
+assets/
+broll-library/
+projects/
+staging/
+clips-to-upload/
+photos-to-upload/
+pending.json
+pub_calendar.json
+stats_history.json
+*.db
+*.sqlite3
+
+# ============ ЛОГИ ============
+logs/
+*.log
+
+# ============ DEV-SCRATCH / ТЕСТ-ВЫХЛОП (папки на _) ============
+/_*/
+out/
+
+# ============ МЕДИА ============
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.wav
+*.png
+*.jpg
+*.jpeg
+*.heic
+*.gif
+
+# ============ PYTHON ============
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+node_modules/
+
+# ============ ВНУТРЕННИЕ ЗАМЕТКИ / НАСТРОЙКИ / ИССЛЕДОВАНИЕ КЛИЕНТА ============
+.claude/
+_codex_*
+_migration_audit.md
+maksim_facts_v*.md
+maksim_interview_questions.md
+maksim_context_from_gpt.md
+
+# ============ ПРОЧЕЕ ============
+.DS_Store
+.idea/
+.vscode/
+*.bak
+*.bak.*
