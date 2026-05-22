@@ -604,6 +604,23 @@ def _gather_photo_broll(
     else:
         picks = random.choices(photos, k=count)
 
+    # Copy the source library photos that we actually used into the project's
+    # photos/ folder so they land in the «Скачать материалы» ZIP. Without this
+    # the montage references library files that never reach the client bundle.
+    try:
+        dest_dir = project_dir / "photos"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for src in dict.fromkeys(picks):  # de-dup when pool < count
+            dest = dest_dir / f"broll_{src.name}"
+            if not dest.exists():
+                shutil.copy2(src, dest)
+        logger.info(
+            f"[assembler] copied {len(set(picks))} used library photo(s) into "
+            f"{dest_dir} for the download bundle"
+        )
+    except Exception as exc:  # never fail montage over a bundle-copy hiccup
+        logger.warning(f"[assembler] could not copy library photos to project: {exc}")
+
     clips = _build_ken_burns_clips(picks, tmp_dir, clip_duration, name_prefix="photo_broll")
     logger.info(
         f"[assembler] generated {len(clips)} library-photo clips "

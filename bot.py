@@ -572,22 +572,27 @@ BRANDS = {
         # Avatar/voice IDs come from .env (HEYGEN_AVATAR_ID,
         # ELEVENLABS_VOICE_ID). Hard-coded None here so the brand inherits
         # env values — same pattern as "default".
-        # Постоянный фото-аватар Максима в HeyGen — зарегистрирован
-        # 19 мая 2026 из max_1.JPG. Поддерживает только Avatar IV:
-        # при генерации выбирать версию аватара v4.
-        "heygen_avatar_id": "90610f1ac6c846aebced55f202e122e8",
-        # Лук бренда — фото-аватар Максима. Непустой heygen_looks =
-        # пикер показывает ТОЛЬКО его, без луков Артёма (HEYGEN_LOOKS).
+        # Тренированные ВИДЕО-аватары Максима в его СОБСТВЕННОМ HeyGen-аккаунте
+        # (новый ключ, 21 мая 2026). Тип avatar (digital twin), не фото —
+        # лучше лип-синк/жесты, нет «плывущих рук» фото-аватара. Старый фото-
+        # аватар (90610f1a…, в аккаунте Артёма) выведен из обращения.
+        "heygen_avatar_id": "a0bddf71c30c42aaa4cf4e4143039628",
+        # Непустой heygen_looks = пикер показывает ТОЛЬКО эти луки.
         "heygen_looks": {
-            "maksim": {
-                "id": "90610f1ac6c846aebced55f202e122e8",
-                "name": "Максим — фото-аватар",
+            "beige_nature": {
+                "id": "a0bddf71c30c42aaa4cf4e4143039628",
+                "name": "Бежевый свитер — природа",
+            },
+            "cap_closeup": {
+                "id": "f3a502ab41654a38be4717b215833fed",
+                "name": "Кепка чёрная — крупный",
             },
         },
-        # Голос Максима — клон ElevenLabs из max2.MP3 (19 мая 2026),
-        # модель eleven_v3 (чище генерит, почти без правок). Раньше тут
-        # был None → бренд наследовал голос Артёма как заглушку.
-        "eleven_voice_id": "FQ2wDmRZDDqxBjE9Kycw",
+        # Новый голос Максима — клон ElevenLabs (21 мая 2026, более похожий).
+        # eleven_model_id=eleven_v3 по умолчанию; переключатель моделей
+        # ElevenLabs v2/v3 на озвучке сохранён (это про КАЧЕСТВО голоса,
+        # не путать с версией HeyGen API).
+        "eleven_voice_id": "US0Jbp64BHwpPn0TWmOF",
         "eleven_model_id": "eleven_v3",
         "description": "Максим Юмсунов — Life Drive (картинг + глэмпинг, Тюмень)",
         # Script + cover prompts live in external files (see
@@ -3585,7 +3590,7 @@ def create_notion_card(card_data: dict, script_text: str, cover_url: str = None,
     # попали в work-queue). 9 May 2026 fix — раньше всегда оставалось пустым,
     # неудобно сортировать board. Перезаписать вручную в Notion можно всегда.
     today_iso = datetime.now().strftime("%Y-%m-%d")
-    page = notion.pages.create(
+    create_kwargs = dict(
         parent={"database_id": NOTION_DB},
         properties={
             "Name": {"title": [{"text": {"content": card_data["title"]}}]},
@@ -3610,6 +3615,11 @@ def create_notion_card(card_data: dict, script_text: str, cover_url: str = None,
         },
         children=children,
     )
+    # Page-level cover banner (shown in the /cards board/gallery view), not just
+    # the in-body «Обложка» image block above.
+    if cover_url:
+        create_kwargs["cover"] = {"type": "external", "external": {"url": cover_url}}
+    page = notion.pages.create(**create_kwargs)
     return page["url"], page["id"]
 
 
@@ -3705,35 +3715,33 @@ def create_guide_page(script_text: str, title: str, feedback: str = None) -> str
 5. callout_red с 🇷🇺 — (только если речь про зарубежные приложения)
 
 КРИТИЧЕСКИ ВАЖНО — ГЛУБИНА И ЦЕННОСТЬ:
-- Сегодня {datetime.now().strftime('%d.%m.%Y')} — НЕ используй устаревшие данные. Мир AI/tech меняется каждый месяц.
-- НИКОГДА не придумывай статистику, цифры, проценты и суммы от себя. Используй ТОЛЬКО факты и числа из сценария.
+- НИКОГДА не придумывай статистику, цифры, проценты и суммы от себя. Используй ТОЛЬКО факты и числа из сценария. Если тема может быстро устаревать — не опирайся на старые данные, держись фактов сценария.
 - Если в сценарии есть конкретные цифры — используй их. Если нет — строй аргументацию ЛОГИЧЕСКИ, через причинно-следственные связи, а не через выдуманные данные.
-- ВСТУПЛЕНИЕ должно быть СТРОГО про тему ролика, а не про смежную индустрию в целом. Если ролик про Tesla Optimus — пиши про Tesla Optimus, а не про рынок робототехники.
+- ВСТУПЛЕНИЕ и весь гайд — СТРОГО про тему ролика, а не про смежную индустрию в целом. Раскрывай конкретику сценария, не уходи в общие рассуждения об отрасли.
 - Каждый тезис из ролика РАСКРОЙ ШИРЕ: добавь контекст, причины, последствия, механизмы работы
-- Давай КОНКРЕТНЫЕ примеры через логику: "Почему именно сортировка и перемещение? Потому что это задачи с предсказуемым алгоритмом — робот выполняет одну и ту же операцию тысячи раз без усталости, а ошибка не приводит к браку всей партии"
-- Объясняй ПОЧЕМУ, а не только ЧТО: не "роботы заменят людей", а разбери механизм — какие задачи первыми уходят к роботам и почему именно они
-- Давай ПРАКТИЧЕСКИЕ РЕКОМЕНДАЦИИ: что делать читателю прямо сейчас, на что обратить внимание, как подготовиться
+- Объясняй ПОЧЕМУ, а не только ЧТО: не просто «делай так», а разбери механизм — почему это работает и при каких условиях
+- Давай ПРАКТИЧЕСКИЕ РЕКОМЕНДАЦИИ: что читателю сделать прямо сейчас, на что обратить внимание
 - Тон: дружеский, экспертный, как будто объясняешь другу за кофе — но с глубиной аналитика
 - НЕ повторяй сценарий слово в слово — используй его как отправную точку, дополни своей экспертизой
 - Каждая секция должна давать САМОСТОЯТЕЛЬНУЮ ценность — читатель должен узнать что-то новое
 
-Пример ХОРОШЕГО блока (глубокий, без выдуманных цифр):
-{"type": "paragraph", "text": "Tesla не просто тестирует роботов — она строит инфраструктуру для массового производства. 1000 Optimus на одном заводе — это не демонстрация, а стресс-тест перед масштабированием. Ключевой принцип: роботы сначала занимают позиции с повторяющимися задачами и минимальным риском ошибки — сортировка деталей, перемещение грузов, упаковка. Почему именно эти задачи? Потому что алгоритм предсказуем, ошибка не приводит к браку, а людей на такие позиции всё сложнее найти — мало кто хочет 8 часов сортировать детали на конвейере."}
+Пример ХОРОШЕГО блока (глубокий, через логику, без выдуманных цифр):
+{"type": "paragraph", "text": "Систему стоит выстраивать не когда стало тяжело, а когда процесс повторился третий раз. Почему именно третий? Первый раз — разовая задача, второй можно списать на совпадение, третий означает регулярность. А регулярное без системы каждый раз отъедает внимание собственника, и чем дальше — тем дороже его переключение. Поэтому правило простое: повторилось трижды — опиши шаги и передай."}
 
 Пример ПЛОХОГО блока (поверхностный или с выдуманными цифрами):
-{"type": "paragraph", "text": "Рынок робототехники вырос до $18.6 млрд. Tesla запустила роботов на заводе. Это важный шаг для компании."}
+{"type": "paragraph", "text": "Делегирование экономит до 70% времени. Это важный навык для бизнеса. Начните делегировать уже сегодня."}
 
 Пример ответа:
 [
-  {"type": "callout_blue", "icon": "🎁", "text": "Гайд для подписчиков. Ключевое слово: робот"},
-  {"type": "paragraph", "text": "Tesla перешла от прототипов к реальному развёртыванию — 1000+ роботов Optimus уже работают на заводах. Не как эксперимент, а как полноценная рабочая сила. Разберём, почему Маск выбрал именно такую стратегию и что это значит для тех, кто работает руками или управляет производством."},
-  {"type": "heading", "text": "Почему Маск начал именно с этих задач"},
-  {"type": "paragraph", "text": "Сортировка, перемещение, упаковка — это не случайный выбор. Это задачи с предсказуемым алгоритмом: робот делает одно и то же тысячи раз, ошибка не приводит к браку всей партии, а людей на такие позиции всё сложнее найти. Логика простая: начни с того, где риск минимален, а выгода максимальна — потом масштабируй на сложные задачи."},
-  {"type": "callout_yellow", "icon": "💡", "text": "Ключевой инсайт: роботы начинают не с замены людей, а с закрытия вакансий, которые компании не могут заполнить. Это решение проблемы дефицита кадров, а не оптимизация штата."},
+  {"type": "callout_blue", "icon": "🎁", "text": "Гайд для подписчиков. Ключевое слово: система"},
+  {"type": "paragraph", "text": "Большинство собственников берутся за процессы слишком поздно — когда уже захлёбываются в рутине. Разберём, по какому признаку понять, что задачу пора превращать в систему, и как сделать это без месяца на регламенты."},
+  {"type": "heading", "text": "Когда задачу пора систематизировать"},
+  {"type": "paragraph", "text": "Ориентир — не «когда тяжело», а «когда повторилось трижды». Третий повтор означает регулярность, а регулярное без системы каждый раз крадёт внимание собственника. Чем раньше зафиксируешь шаги, тем дешевле обходится передача и тем меньше задача держится только на тебе."},
+  {"type": "callout_yellow", "icon": "💡", "text": "Ключевой инсайт: систематизировать нужно не самые сложные задачи, а самые частые — именно они незаметно съедают день."},
   {"type": "divider"},
-  {"type": "heading", "text": "Как это применить к себе"},
-  {"type": "numbered", "text": "Составь список задач, которые ты выполняешь каждый день. Отметь те, где алгоритм одинаковый и ошибка не критична — это кандидаты на автоматизацию уже сейчас (даже без роботов — через AI-инструменты)."},
-  {"type": "bulleted", "bold_prefix": "Повторяющиеся задачи", "text": " — первые кандидаты: отчёты, шаблонные ответы, сортировка данных"}
+  {"type": "heading", "text": "Как применить у себя"},
+  {"type": "numbered", "text": "Выпиши задачи, которые повторяешь каждую неделю. Отметь те, что делаешь по одному и тому же сценарию — это первые кандидаты на регламент или передачу."},
+  {"type": "bulleted", "bold_prefix": "Частые задачи", "text": " — первые кандидаты: типовые ответы клиентам, отчёты, повторяющиеся согласования"}
 ]""",
         messages=[
             {"role": "user", "content": f"Сценарий ролика:\n{script_text}\n\n{'Правки автора: ' + feedback + chr(10) + chr(10) if feedback else ''}Создай гайд. НЕ добавляй блок об авторе — он добавляется автоматически."}
@@ -8469,6 +8477,188 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _generate_script(update, context, idea_text)
 
 
+async def _ideas_batch_stale(query) -> None:
+    """Понятный экран, когда подборка идей устарела (рестарт бота / нажат /start).
+
+    Раньше отдавали тихий toast (query.answer) — пользователь его не замечал и
+    думал, что «кнопка не работает / ничего не происходит». Теперь редактируем
+    сообщение в явное состояние с кнопкой регенерации.
+    """
+    try:
+        await query.edit_message_text(
+            "⚠️ Эта подборка идей устарела — бот перезапускался или ты нажимал "
+            "/start, и кнопки от старой подборки больше не активны.\n\n"
+            "Сгенерируй свежую:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🎰 Банк идей — сгенерировать заново",
+                    callback_data="maksim_ideas_stub",
+                ),
+            ]]),
+        )
+    except Exception:
+        await query.answer(
+            "⚠️ Подборка устарела. Открой «🎰 Банк идей» заново.", show_alert=True,
+        )
+
+
+async def _render_avatar_from_audio(context, chat_id, audio_path, look_id,
+                                    look_name, avatar_version, data):
+    """Сгенерировать HeyGen-аватар из ГОТОВОГО аудио-файла (mp3).
+
+    Общий путь фичи «свой голос»: зеркалит проверенный TTS-флоу
+    (upload-asset → heygen_generate_video(voice.type=audio) → poll → доставка +
+    сохранение avatar_*.mp4), но источник аудио — переданный файл, а не TTS.
+    Рабочий heygen_ver-флоу не трогаем — это отдельная функция.
+    """
+    import httpx
+    ver_label = "Avatar 4" if avatar_version in ("v2", "v4") else "Avatar 3"
+    status = await context.bot.send_message(
+        chat_id,
+        f"🤖 Генерирую аватар ({look_name}, {ver_label}) с твоим голосом...\n"
+        f"⏱ Обычно 1-3 минуты.",
+    )
+    try:
+        # Подрезаем длинные паузы (как в TTS-флоу)
+        try:
+            audio_path = await asyncio.to_thread(
+                trim_long_silences, audio_path, audio_path,
+                max_silence_sec=0.5, keep_silence_sec=0.3,
+            )
+        except Exception as e:
+            logger.warning(f"[selfvoice] silence trim skip: {e}")
+
+        with open(audio_path, "rb") as af:
+            up = httpx.post(
+                "https://upload.heygen.com/v1/asset",
+                headers={"X-Api-Key": HEYGEN_API_KEY, "Content-Type": "audio/mpeg"},
+                content=af.read(), timeout=120,
+            ).json()
+        if up.get("code") != 100:
+            raise RuntimeError(f"upload error: {up}")
+        audio_url = up["data"]["url"]
+
+        video_id = await asyncio.to_thread(
+            heygen_generate_video, audio_url, look_id, avatar_version,
+        )
+        logger.info(f"[selfvoice] HeyGen submitted {video_id} ({avatar_version})")
+
+        for _ in range(60):  # ~10 мин
+            await asyncio.sleep(10)
+            result = await asyncio.to_thread(heygen_check_status, video_id)
+            st = result["status"]
+            if st == "completed":
+                video_url = result["video_url"]
+                duration = result.get("duration", "?")
+                async with httpx.AsyncClient() as c:
+                    vb = (await c.get(video_url, timeout=120)).content
+                video_file = ASSETS_DIR / f"heygen_{video_id[:8]}.mp4"
+                video_file.write_bytes(vb)
+
+                new_name = f"avatar_{look_name}.mp4"
+                _cleanup_old_avatars(data, keep_filename=new_name)
+                _save_to_project(data, new_name, str(video_file))
+                if Path(audio_path).exists():
+                    _save_to_project(data, "voice_merged.mp3", audio_path)
+
+                nid = data.get("notion_page_id")
+                if nid:
+                    try:
+                        await asyncio.to_thread(
+                            update_notion_status, nid, "Аватар | генерации")
+                    except Exception as _se:
+                        logger.warning(f"[selfvoice] status advance: {_se}")
+
+                cap = (f"🤖 Аватар готов — озвучен ТВОИМ голосом! "
+                       f"({look_name}, {ver_label}, {duration}с)")
+                # 413-guard: >48 МБ → сжать; не выйдет → ссылка
+                send_file = video_file
+                if video_file.stat().st_size > 48 * 1024 * 1024:
+                    cmp = ASSETS_DIR / f"heygen_{video_id[:8]}_tg.mp4"
+                    try:
+                        await asyncio.to_thread(
+                            subprocess.run,
+                            ["ffmpeg", "-y", "-i", str(video_file),
+                             "-vf", "scale=720:-2",  # превью: даунскейл, чтобы влезть в 50МБ
+                             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+                             str(cmp)], capture_output=True, timeout=300,
+                        )
+                        if cmp.exists() and 0 < cmp.stat().st_size <= 48 * 1024 * 1024:
+                            send_file = cmp
+                    except Exception as _ce:
+                        logger.warning(f"[selfvoice] compress: {_ce}")
+                try:
+                    with open(send_file, "rb") as vf:
+                        await context.bot.send_video(
+                            chat_id=chat_id, video=vf, caption=cap,
+                            supports_streaming=True,
+                        )
+                except Exception as _se:
+                    logger.warning(f"[selfvoice] send_video: {_se}")
+                    link = None
+                    try:
+                        link = await asyncio.to_thread(
+                            save_media_permanent, str(video_file), "avatar_selfvoice")
+                    except Exception:
+                        pass
+                    tail = (f"\n⚠️ Крупный файл — ссылка:\n{link}" if link
+                            else "\n⚠️ Файл крупный, забери из «📥 Скачать материалы».")
+                    await context.bot.send_message(chat_id, cap + tail)
+                await status.edit_text(
+                    f"✅ {cap}\n\nДальше — собери ролик на карточке "
+                    f"(B-roll / монтаж).")
+                return
+            if st == "failed":
+                await status.edit_text(
+                    f"❌ HeyGen не сгенерил аватар: {result.get('error')}")
+                return
+        await status.edit_text("❌ Таймаут генерации аватара (>10 мин).")
+    except Exception as e:
+        logger.error(f"[selfvoice] render failed: {e}", exc_info=True)
+        await status.edit_text(f"❌ Ошибка генерации аватара: {e}")
+
+
+async def _consume_selfvoice_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принять голосовое Максима для фичи «свой голос» → конвертнуть → аватар."""
+    user_id = update.effective_user.id
+    data = pending.get(user_id, {})
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        await update.message.reply_text("Пришли голосовое сообщение (запись).")
+        return
+    msg = await update.message.reply_text("🎤 Принял голосовое, конвертирую…")
+    tg_file = await context.bot.get_file(voice.file_id)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        await tg_file.download_to_drive(tmp.name)
+        ogg = tmp.name
+    mp3 = str(ASSETS_DIR / f"selfvoice_{user_id}.mp3")
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-y", "-i", ogg, "-c:a", "libmp3lame", "-b:a", "128k", mp3],
+            capture_output=True, timeout=120,
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Не смог конвертировать аудио: {e}")
+        return
+    if not Path(mp3).exists() or Path(mp3).stat().st_size == 0:
+        await msg.edit_text("❌ Конвертация аудио не удалась — пришли голосовое ещё раз.")
+        return
+    # Сбрасываем состояние, чтобы следующее голосовое шло как обычно
+    data["state"] = None
+    pending[user_id] = data
+    _save_pending(pending)
+    await msg.edit_text("🎤 Голос принят. Запускаю генерацию аватара под твою запись…")
+    await _render_avatar_from_audio(
+        context, update.effective_chat.id, mp3,
+        data.get("selfvoice_look_id"),
+        data.get("selfvoice_look_name", "Аватар"),
+        data.get("selfvoice_version", "v4"),
+        data,
+    )
+
+
 async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle voice messages — transcribe then generate script."""
     user_id = update.effective_user.id
@@ -8481,6 +8671,12 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = pending.get(user_id, {}).get("state")
     if state == HEYGEN_TEST_STATE_AUDIO:
         await consume_heygen_test_audio(update, context)
+        return
+
+    # Фича «свой голос»: Максим записал голосовое для озвучки аватара.
+    # Перехватываем ДО Whisper — нам нужен сам аудиофайл, не транскрипция.
+    if state == "awaiting_selfvoice":
+        await _consume_selfvoice_audio(update, context)
         return
 
     logger.info(f"[user:{user_id}] Голосовое сообщение")
@@ -9105,6 +9301,130 @@ async def _generate_cover_options(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         logger.error(f"Ошибка: {e}", exc_info=True)
         await msg.edit_text(f"Ошибка: {e}")
+
+
+async def _show_cover_photo_picker(bot, chat_id: int, data: dict, *, count: int = 3) -> bool:
+    """Show ``count`` random pool photos as an album + [1][2][3] + reload buttons.
+
+    Replaces the old single-photo «✅ Использовать это фото / 🎲 Другое фото»
+    screen so the user picks a cover background from a small spread instead of
+    re-rolling one at a time. The chosen file paths are cached in
+    ``data["cover_photo_choices"]`` so the ``cover_photo:N`` callback can map a
+    button index back to a path. Returns ``True`` if the picker was shown,
+    ``False`` if the brand pool has nothing usable (caller falls back).
+    """
+    pool_dir = _avatars_dir_for_brand(_get_active_brand_name())
+    avatars = []
+    if pool_dir.exists():
+        avatars = sorted(
+            f.name for f in pool_dir.iterdir()
+            if f.suffix.lower() in (".jpg", ".jpeg", ".png")
+        )
+    if not avatars:
+        return False
+
+    n = min(count, len(avatars))
+    picks = random.sample(avatars, n)
+    data["cover_photo_choices"] = [str(pool_dir / name) for name in picks]
+    data["state"] = "cover_approval"
+    _save_pending(pending)
+
+    # Album (media group can't carry inline buttons → buttons go in a follow-up).
+    try:
+        from contextlib import ExitStack
+        from telegram import InputMediaPhoto
+        if n >= 2:
+            with ExitStack() as stack:
+                media = [
+                    InputMediaPhoto(
+                        media=stack.enter_context(open(p, "rb")),
+                        caption=(f"Фото для обложки — варианты 1–{n}" if i == 0 else None),
+                    )
+                    for i, p in enumerate(data["cover_photo_choices"])
+                ]
+                await bot.send_media_group(chat_id=chat_id, media=media)
+        else:
+            with open(data["cover_photo_choices"][0], "rb") as f:
+                await bot.send_photo(chat_id=chat_id, photo=f)
+    except Exception as e:
+        logger.error(f"[cover_picker] send album failed: {e}", exc_info=True)
+        return False
+
+    num_row = [
+        InlineKeyboardButton(str(i + 1), callback_data=f"cover_photo:{i}")
+        for i in range(n)
+    ]
+    buttons = InlineKeyboardMarkup([
+        num_row,
+        [InlineKeyboardButton("🔄 Другие фото", callback_data="cover_photo:reload")],
+        [InlineKeyboardButton("📤 Загрузить своё фото в библиотеку", callback_data="cover_pool_upload")],
+    ])
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📷 Выбери фото для обложки — нажми 1–{n}.\n"
+            f"Не нравятся — «🔄 Другие фото» подберёт ещё."
+        ),
+        reply_markup=buttons,
+    )
+    return True
+
+
+async def _send_cover_text_options(bot, chat_id: int, data: dict, status_msg=None):
+    """Generate 5 viral cover-text options and show them as pick buttons.
+
+    Shared by the photo-picker step and other entry points so the cover-text
+    generation lives in one place. If ``status_msg`` is given it is edited in
+    place; otherwise a fresh message is sent.
+    """
+    if status_msg is None:
+        status_msg = await bot.send_message(
+            chat_id=chat_id, text="🖼 Генерирую варианты обложки..."
+        )
+    try:
+        _brand = _get_active_brand()
+        _cover_system = _brand_cover_prompt(COVER_TEXT_PROMPT)
+        prev_options = data.get("all_cover_options", [])
+        exclude_text = ""
+        if prev_options:
+            exclude_text = (
+                f"\n\nУже предлагались (НЕ ПОВТОРЯЙ и не используй те же слова): "
+                f"{', '.join(prev_options)}"
+            )
+        response = claude.messages.create(
+            model=COVER_MODEL,
+            max_tokens=300,
+            system=_cover_system,
+            messages=[
+                {"role": "user", "content": f"Сценарий:\n{data['script']}\n\nПридумай 5 вирусных текстов для обложки. Найди в сценарии самый шокирующий факт или цифру — и построй обложку вокруг него. Каждый текст должен ИНТРИГОВАТЬ. Каждый на новой строке, только текст, без нумерации.{exclude_text}"},
+            ],
+        )
+        options_text = response.content[0].text.strip()
+        options = [line.strip().strip('"').strip("«»").strip("-").strip() for line in options_text.split("\n") if line.strip()]
+        options = [o for o in options if 10 <= len(o) <= 50 and len(o.split()) >= 2][:5]
+
+        data.setdefault("all_cover_options", []).extend(options)
+        if not options:
+            await status_msg.edit_text("Не получилось сгенерировать. Напиши свой вариант.")
+            return
+
+        buttons = [[InlineKeyboardButton(opt, callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+        buttons.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data="cover_options")])
+        buttons.append([InlineKeyboardButton("◀️ Сменить фото", callback_data="cover_photo:reload")])
+        buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+
+        data["cover_options"] = options
+        data["state"] = "cover_approval"
+        _save_pending(pending)
+
+        await status_msg.edit_text(
+            "🖼 Выбери текст для обложки или напиши свой:\n\n"
+            + "\n".join(f"• {opt}" for opt in options),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except Exception as e:
+        logger.error(f"[cover_text] Ошибка: {e}", exc_info=True)
+        await status_msg.edit_text(f"Ошибка: {e}")
 
 
 async def _edit_script(
@@ -9914,7 +10234,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session_data = pending.get(user_id) or {}
         batch = session_data.get("ideas_batch") or []
         if idx < 0 or idx >= len(batch):
-            await query.answer("⚠️ Идея не найдена (партия устарела?)", show_alert=True)
+            await _ideas_batch_stale(query)
             return
 
         saved_idx = set(session_data.get("ideas_saved_idx") or [])
@@ -10088,7 +10408,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session_data = pending.get(user_id) or {}
         batch = session_data.get("ideas_batch") or []
         if idx < 0 or idx >= len(batch):
-            await query.answer("Идея вне партии — открой /notion")
+            await _ideas_batch_stale(query)
             return
         idea = batch[idx]
         title = (idea.get("title") or "").strip() or "Без названия"
@@ -10148,7 +10468,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session_data = pending.get(user_id) or {}
         batch = session_data.get("ideas_batch") or []
         if idx < 0 or idx >= len(batch):
-            await query.answer("⚠️ Идея вне партии (партия истекла?)", show_alert=True)
+            await _ideas_batch_stale(query)
             return
         idea = batch[idx]
         title = (idea.get("title") or "").strip() or "Без названия"
@@ -11485,6 +11805,31 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.copy2(str(final_path), str(final_video_path))
             logger.info(f"[assembler] Saved as final_video.mp4 ({size_mb:.1f} MB)")
 
+            # Себестоимость — логируем РЕАЛЬНЫЕ драйверы стоимости ролика (без
+            # выдуманных ставок). Чтобы получить $: умножь на свои тарифы —
+            # HeyGen $/сек (Avatar IV ~дороже III), ElevenLabs $/символ.
+            # Claude-стоимость B-roll логируется отдельно в auto_broll.py.
+            try:
+                _av = sorted(proj_dir.glob("avatar_*.mp4"),
+                             key=lambda f: f.stat().st_mtime, reverse=True)
+                _av_sec = 0.0
+                if _av:
+                    _p = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-show_entries",
+                         "format=duration", "-of", "csv=p=0", str(_av[0])],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    _av_sec = float(_p.stdout.strip() or 0)
+                _vo_chars = len(script_text or "")
+                _n_broll = len(list(proj_dir.glob("broll_*.mp4")))
+                logger.info(
+                    f"[cost] драйверы ролика «{card.get('title', '')[:40]}»: "
+                    f"аватар {_av_sec:.0f}с | озвучка {_vo_chars} симв | "
+                    f"B-roll {_n_broll} клип(ов) | финал {size_mb:.1f} МБ"
+                )
+            except Exception as _ce:
+                logger.warning(f"[cost] не смог посчитать драйверы: {_ce}")
+
             # Auto-advance Notion status to "Готово к публикации" — карточка
             # больше не зависает на "Подбор скринкаст". Делаем безусловно после
             # успешной сборки финального видео (`final_video.mp4` создан).
@@ -11722,6 +12067,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "noop":
         return
 
+    # «Автосборка (нужен: …)» — кнопка-заглушка, когда не хватает аватара/B-roll.
+    # Раньше она была noop без ответа → крутился мёртвый спиннер. Теперь —
+    # внятный попап, что сделать, чтобы сборка ожила.
+    if query.data == "asm_blocked":
+        await query.answer(
+            "Сначала сгенерируй аватар (или хотя бы подбери B-roll/фото) — "
+            "после этого «Автосборка» заработает.",
+            show_alert=True,
+        )
+        return
+
     # --- Publication tracking callbacks (manual entry flow) ---
     # Entry: "➕ Отметить публикацию" button under /calendar.
     if query.data == "pub_add":
@@ -11897,7 +12253,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     missing.append("аватар")
                 if not _has_broll:
                     missing.append("B-roll или фото")
-                buttons.append([InlineKeyboardButton(f"🎬 Автосборка (нужен: {', '.join(missing)})", callback_data="noop")])
+                buttons.append([InlineKeyboardButton(f"🎬 Автосборка (нужен: {', '.join(missing)})", callback_data="asm_blocked")])
             buttons.append([InlineKeyboardButton("📢 Кросс-постинг", callback_data=f"crosspost:{full_id[:20]}")])
             buttons.append([InlineKeyboardButton("📊 Сменить статус ▼", callback_data=f"card_statuses:{full_id[:20]}")])
             buttons.append([InlineKeyboardButton("📝 Добавить заметку", callback_data="notion_note")])
@@ -15329,14 +15685,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _get_active_brand_name() == "maksim":
             buttons = [
                 [InlineKeyboardButton(
-                    "✨ Сгенерировать (Avatar IV — мимика, жесты)",
+                    "⚡ Avatar 3 — дешевле (~$1/мин, тест/рутина)",
+                    callback_data="heygen_ver:v3")],
+                [InlineKeyboardButton(
+                    "✨ Avatar IV — качество (мимика, жесты, ~$4/мин)",
                     callback_data="heygen_ver:v4")],
+                [InlineKeyboardButton(
+                    "🎤 Озвучить своим голосом",
+                    callback_data="heygen_selfvoice:v4")],
                 [InlineKeyboardButton("◀️ Назад к лукам", callback_data="heygen_looks")],
             ]
             ver_text = (
                 f"👤 Лук: {look_name}\n\n"
-                f"Фото-аватар Максима работает на Avatar IV — полная мимика "
-                f"и жесты рук. Жми генерацию:"
+                f"Выбери модель аватара:\n"
+                f"• ⚡ Avatar 3 — дешевле, для теста и рутины.\n"
+                f"• ✨ Avatar IV — реалистичнее (мимика, жесты рук), дороже.\n"
+                f"• 🎤 Своим голосом — пришлёшь голосовое, озвучу им (Avatar IV)."
             )
         else:
             buttons = [
@@ -15352,6 +15716,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         await query.edit_message_text(
             ver_text, reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    # Фича «свой голос»: тот же шаг версии, но озвучка — записью Максима,
+    # а не TTS. Резолвим лук так же, как heygen_ver, и ждём голосовое.
+    if query.data.startswith("heygen_selfvoice:"):
+        avatar_version = query.data.split(":", 1)[1]
+        look_key = data.get("heygen_look_key", "look1")
+        _brand = _get_active_brand()
+        _brand_looks = _brand.get("heygen_looks") or {}
+        if look_key in _brand_looks:
+            look_id = _brand_looks[look_key].get("id")
+            look_name = _brand_looks[look_key].get("name", "Аватар")
+        elif look_key != "default" and look_key in HEYGEN_LOOKS:
+            look_id = HEYGEN_LOOKS[look_key].get("id")
+            look_name = HEYGEN_LOOKS[look_key].get("name", "Аватар")
+        else:
+            look_id = _brand.get("heygen_avatar_id")
+            look_name = _brand.get("description", "Аватар")
+        data["selfvoice_look_id"] = look_id
+        data["selfvoice_look_name"] = look_name
+        data["selfvoice_version"] = avatar_version
+        data["state"] = "awaiting_selfvoice"
+        pending[user_id] = data
+        _save_pending(pending)
+        await query.edit_message_text(
+            f"🎤 Озвучка своим голосом — {look_name}\n\n"
+            f"Пришли ОДНО голосовое сообщение на весь ролик. Я озвучу им аватар "
+            f"(без синтеза голоса), субтитры сниму с твоей записи на монтаже.\n\n"
+            f"⏱ После записи аватар сгенерится автоматически (1-3 мин)."
         )
         return
 
@@ -15387,7 +15781,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # (via heygen_generate_video's own fallback when look_id is None).
             look_id = _brand.get("heygen_avatar_id")
             look_name = _brand.get("description", "Дефолтный")
-        ver_label = "Avatar 4" if avatar_version == "v2" else "Avatar 3"
+        ver_label = {"v4": "Avatar IV", "v2": "Avatar 4", "v3": "Avatar 3"}.get(avatar_version, "Avatar 3")
 
         await query.edit_message_text(f"🤖 Генерирую видео аватара ({look_name}, {ver_label})...\n\n⏱ Обычно занимает 1-3 минуты.")
 
@@ -15600,8 +15994,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await asyncio.to_thread(
                                 subprocess.run,
                                 ["ffmpeg", "-y", "-i", str(video_file),
+                                 "-vf", "scale=720:-2",  # превью: даунскейл под лимит 50МБ
                                  "-c:v", "libx264", "-preset", "veryfast",
-                                 "-crf", "26", "-c:a", "aac", "-b:a", "128k",
+                                 "-crf", "28", "-c:a", "aac", "-b:a", "128k",
                                  "-movflags", "+faststart", str(_tg_compressed)],
                                 capture_output=True, timeout=300,
                             )
@@ -15716,7 +16111,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Нет сценария. Сначала создай сценарий.")
             return
 
-        await query.edit_message_text("📝 Пишу описание для публикации...")
+        await query.answer()
+        # Статус шлём НОВЫМ сообщением (внизу чата), а НЕ edit старого с
+        # кнопкой — иначе «описание» висит над свежими аудио-частями озвучки.
+        status_msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="📝 Пишу описание для публикации...",
+        )
 
         try:
             # Бренд-зависимые подстановки. Раньше промпт жёстко вшивал
@@ -15876,9 +16277,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=btn,
                 )
 
-            # Neutralize the OLD "Пишу описание..." message (it's above the variants).
+            # Статус (внизу, над вариантами) → указатель «варианты ниже».
             try:
-                await query.edit_message_text("✅ Описание готово — 3 варианта ниже 👇")
+                await status_msg.edit_text("✅ Описание готово — 3 варианта ниже 👇")
             except Exception:
                 pass
 
@@ -15905,7 +16306,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔄 Попробовать снова", callback_data="gen_description")],
                 [InlineKeyboardButton("✅ Готово", callback_data="finish")],
             ]
-            await query.edit_message_text(f"❌ Ошибка: {e}", reply_markup=InlineKeyboardMarkup(buttons))
+            await status_msg.edit_text(f"❌ Ошибка: {e}", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     if query.data.startswith("desc_pick:"):
@@ -16469,7 +16870,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 missing.append("аватар")
             if not _has_broll:
                 missing.append("B-roll")
-            buttons.append([InlineKeyboardButton(f"🎬 Автосборка (нужен: {', '.join(missing)})", callback_data="noop")])
+            buttons.append([InlineKeyboardButton(f"🎬 Автосборка (нужен: {', '.join(missing)})", callback_data="asm_blocked")])
         if card_id_prefix:
             buttons.append([InlineKeyboardButton("📢 Кросс-постинг", callback_data=f"crosspost:{card_id_prefix}")])
 
@@ -16544,6 +16945,48 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка: {e}", exc_info=True)
             await query.edit_message_text(f"Ошибка: {e}")
+        return
+
+    if query.data.startswith("cover_photo:"):
+        # 3-photo cover picker: [1][2][3] choose a background, reload re-rolls.
+        arg = query.data.split(":", 1)[1]
+        if arg == "reload":
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            shown = await _show_cover_photo_picker(
+                query.get_bot(), query.message.chat_id, data
+            )
+            if not shown:
+                await query.get_bot().send_message(
+                    chat_id=query.message.chat_id,
+                    text="В пуле нет фото для обложки. Загрузи фото кнопкой ниже.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📤 Загрузить фото", callback_data="cover_pool_upload")
+                    ]]),
+                )
+            return
+        # Numeric pick → lock in that photo, move on to cover-text options.
+        try:
+            idx = int(arg)
+        except ValueError:
+            await query.answer("Не понял выбор фото")
+            return
+        choices = data.get("cover_photo_choices", [])
+        if not (0 <= idx < len(choices)):
+            await query.answer("Это фото больше недоступно — нажми «🔄 Другие фото»", show_alert=True)
+            return
+        data["chosen_avatar"] = choices[idx]
+        _save_pending(pending)
+        try:
+            await query.message.edit_text(f"📷 Фото для обложки выбрано (вариант {idx + 1}).")
+        except Exception:
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        await _send_cover_text_options(query.get_bot(), query.message.chat_id, data)
         return
 
     if query.data == "avatar_confirm":
@@ -16940,6 +17383,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logger.warning(f"Не удалось обновить обложку в Notion: {e}")
 
+                    # Also set the page-level cover banner (board/gallery view).
+                    # Pre-saved cards (incl. all «Банк идей» ones, which create
+                    # the page at `approve` before any cover exists) never got a
+                    # banner otherwise.
+                    try:
+                        await asyncio.to_thread(
+                            lambda: notion.pages.update(
+                                page_id=existing_page_id,
+                                cover={"type": "external", "external": {"url": cover_url}},
+                            )
+                        )
+                        logger.info(f"Баннер-обложка установлен в Notion: {existing_page_id}")
+                    except Exception as e:
+                        logger.warning(f"Не удалось установить баннер-обложку: {e}")
+
                 notion_page_id = existing_page_id
                 notion_url = f"https://www.notion.so/{existing_page_id.replace('-', '')}"
 
@@ -17153,11 +17611,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             avatars = sorted([f.name for f in pool_dir.iterdir() if f.suffix.lower() in (".jpg", ".jpeg", ".png")])
 
         if len(avatars) > 1:
-            # Pick a random avatar and show preview
+            # Show 3 random pool photos as an album + [1][2][3] + reload, so the
+            # user picks a cover background from a spread instead of re-rolling
+            # one photo at a time.
+            shown = await _show_cover_photo_picker(
+                query.get_bot(), query.message.chat_id, data
+            )
+            if shown:
+                return
+            # Fallback: picker couldn't render → keep the old single-photo screen.
             chosen = random.choice(avatars)
             data["chosen_avatar"] = str(pool_dir / chosen)
             _save_pending(pending)
-
             buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Использовать это фото", callback_data="avatar_confirm")],
                 [InlineKeyboardButton("🎲 Другое фото", callback_data="avatar_pick:random")],
