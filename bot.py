@@ -8512,7 +8512,7 @@ async def _render_avatar_from_audio(context, chat_id, audio_path, look_id,
     Рабочий heygen_ver-флоу не трогаем — это отдельная функция.
     """
     import httpx
-    ver_label = "Avatar 4" if avatar_version in ("v2", "v4") else "Avatar 3"
+    ver_label = {"v4": "Avatar IV", "v2": "Avatar 4", "v3": "Avatar 3"}.get(avatar_version, "Avatar 3")
     status = await context.bot.send_message(
         chat_id,
         f"🤖 Генерирую аватар ({look_name}, {ver_label}) с твоим голосом...\n"
@@ -16949,6 +16949,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("cover_photo:"):
         # 3-photo cover picker: [1][2][3] choose a background, reload re-rolls.
+        # Guard against lost session (bot restart / /start cleared pending):
+        # a stale button would otherwise crash on None data and die silently.
+        if not data:
+            await query.answer(
+                "Подборка устарела — открой карточку заново и сгенерируй сценарий.",
+                show_alert=True,
+            )
+            return
         arg = query.data.split(":", 1)[1]
         if arg == "reload":
             try:
