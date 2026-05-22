@@ -8,12 +8,15 @@ Safe to re-run — idempotent via ``name=="Бренд"`` check.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import httpx
 
-NOTION_TOKEN = "ntn_g40169881503p24aMkhc5C7ZqnSH0EiYTAtsJ1QSMIq6Sf"
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN") or os.environ.get("NOTION_API_KEY", "")
+if not NOTION_TOKEN:
+    raise SystemExit("Set NOTION_TOKEN env var before running this one-off script.")
 DB_ID = "3220ef6e5ff6808b84fde8167a6c79c0"
 BRAND_PROP_NAME = "Бренд"
 
