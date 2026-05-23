@@ -16,7 +16,9 @@ Real voice-message intake and the HeyGen call are 1c.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 
 from content_pipeline.core import PipelineSpine, EffectExecutor, drive
 from content_pipeline.models import (
@@ -93,10 +95,25 @@ _SPINE: PipelineSpine | None = None
 _STORE: PipelineStore | None = None
 _EXECUTOR: EffectExecutor | None = None
 _STATUS_FN = None  # heygen_check_status(video_id) -> dict, injected for the poller
+# Serializes ALL store access: drive() runs off the event loop (to_thread) so its
+# blocking provider calls don't stall the live bot; the lock keeps the single
+# SQLite connection used by one thread at a time.
+_DRIVE_LOCK = threading.Lock()
 
 
 def _ready() -> bool:
     return _SPINE is not None and _EXECUTOR is not None
+
+
+def _drive_locked(event):
+    """Run a spine event to completion under the global drive lock (sync)."""
+    with _DRIVE_LOCK:
+        return drive(_SPINE, _EXECUTOR, event)
+
+
+async def _drive_async(event):
+    """Drive off the event loop so blocking provider HTTP doesn't stall the bot."""
+    return await asyncio.to_thread(_drive_locked, event)
 
 
 async def _render(bot, chat_id, intents) -> None:
@@ -140,7 +157,7 @@ async def poll_jobs(context) -> None:
         return
     for run in runs:
         try:
-            st = _STATUS_FN(run.current_job_id)
+            st = await asyncio.to_thread(_STATUS_FN, run.current_job_id)
         except Exception as e:
             logger.warning(f"[spine] status check failed run={run.run_id[:8]}: {e}")
             continue
@@ -155,7 +172,7 @@ async def poll_jobs(context) -> None:
         else:
             continue  # still processing
         try:
-            res = drive(_SPINE, _EXECUTOR, ev)
+            res = await _drive_async(ev)
             if run.chat_id:
                 await _render(context.bot, int(run.chat_id), res.intents)
         except Exception as e:
@@ -183,7 +200,7 @@ async def cmd_spine(update, context) -> None:
         payload={"idea_text": idea},
     )
     try:
-        res = drive(_SPINE, _EXECUTOR, ev)
+        res = await _drive_async(ev)
     except Exception as e:  # never crash the live bot from the experimental track
         logger.error(f"[spine] cmd_spine drive failed: {e}", exc_info=True)
         await update.message.reply_text(f"Спайн: ошибка — {e}")
@@ -199,7 +216,7 @@ async def cmd_spine_resume(update, context) -> None:
     user_id = str(update.effective_user.id)
     ev = PipelineEvent(kind=EV_RESUME, owner_user_id=user_id, actor_user_id=user_id,
                        chat_id=str(update.effective_chat.id))
-    res = drive(_SPINE, _EXECUTOR, ev)
+    res = await _drive_async(ev)
     await _render(update.get_bot(), update.effective_chat.id, res.intents)
 
 
@@ -231,7 +248,7 @@ async def on_spine_voice(update, context) -> None:
         payload={"audio_path": str(dest)},
     )
     try:
-        res = drive(_SPINE, _EXECUTOR, ev)
+        res = await _drive_async(ev)
     except Exception as e:
         logger.error(f"[spine] voice drive failed: {e}", exc_info=True)
         await update.message.reply_text(f"Спайн: ошибка — {e}")
@@ -257,7 +274,7 @@ async def on_spine_callback(update, context) -> None:
         payload={"audio_path": None} if parsed["action"] == "upload" else {},
     )
     try:
-        res = drive(_SPINE, _EXECUTOR, ev)
+        res = await _drive_async(ev)
     except Exception as e:
         logger.error(f"[spine] callback drive failed: {e}", exc_info=True)
         await query.get_bot().send_message(chat_id=query.message.chat_id,

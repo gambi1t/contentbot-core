@@ -242,18 +242,21 @@ class PipelineSpine:
         if run.stage != STAGE_AVATAR or run.status != ST_RUNNING_JOB:
             # Already delivered / not in a job → ignore duplicate poller hit.
             return Decision()
-        self.store.add_artifact(
-            run.run_id, "avatar_video",
-            path=ev.payload.get("path"), url=ev.payload.get("url"),
-            meta={"duration": ev.payload.get("duration"),
-                  "job_id": run.current_job_id},
-        )
+        # M1 fix: win the transition FIRST, then store the artifact. Otherwise a
+        # racing duplicate completion could insert a second avatar_video before
+        # the CAS rejects it.
         ok = self.store.cas_transition(
             run.run_id, expect_stage=STAGE_AVATAR, expect_version=run.stage_version,
             new_stage=STAGE_DONE, new_status=ST_COMPLETED,
         )
         if not ok:
             return Decision()  # raced with another transition — ignore
+        self.store.add_artifact(
+            run.run_id, "avatar_video",
+            path=ev.payload.get("path"), url=ev.payload.get("url"),
+            meta={"duration": ev.payload.get("duration"),
+                  "job_id": run.current_job_id},
+        )
         self.store.add_event(run.run_id, "job_completed", from_stage=STAGE_AVATAR,
                              to_stage=STAGE_DONE,
                              payload={"job_id": run.current_job_id})
@@ -475,7 +478,17 @@ class EffectExecutor:
                 "look_id": eff.payload.get("look_id"),
                 "avatar_version": eff.payload.get("avatar_version", "v3"),
             })
-            job_id = self.steps.start_paid_job(eff.run_id, eff.payload.get("stage", ""), job_cfg)
+            try:
+                job_id = self.steps.start_paid_job(eff.run_id, eff.payload.get("stage", ""), job_cfg)
+            except Exception as e:
+                # C1 fix: submit failed AFTER the confirm CAS. No job exists, so
+                # the poller (filters current_job_id NOT NULL) would never see
+                # this run → it would wedge in running_job forever. Fail it
+                # explicitly so the user gets feedback and isn't money-locked.
+                self.store.add_event(eff.run_id, "job_start_failed",
+                                     payload={"error": str(e)})
+                return [PipelineEvent(kind=EV_JOB_FAILED, run_id=eff.run_id,
+                                      payload={"error": f"submit: {e}"})]
             self.store.set_current_job(eff.run_id, job_id, paid_gate=GATE_SPENT)
             self.store.add_event(eff.run_id, "job_started",
                                  payload={"job_id": job_id, "key": eff.idempotency_key})

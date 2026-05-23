@@ -108,5 +108,30 @@ class TestJobCompletion(JobBase):
         self.assertTrue([i for i in res.intents if i.kind == UI_SHOW_ERROR])
 
 
+class TestPaidSubmitFailure(JobBase):
+    """C1: if start_paid_job raises AFTER the confirm CAS, the run must fail
+    cleanly (not wedge forever in running_job with no job id)."""
+
+    class _FailingRunner(MockStepRunner):
+        def start_paid_job(self, run_id, kind, config):
+            raise RuntimeError("heygen upload exploded")
+
+    def setUp(self):
+        super().setUp()
+        self.steps = self._FailingRunner()
+        self.executor = EffectExecutor(self.store, self.steps)
+
+    def test_submit_failure_fails_run_not_wedged(self):
+        rid = self._to_confirmed()  # confirm_paid → start_paid_job raises
+        run = self.store.get_run(rid)
+        self.assertEqual(run.status, ST_FAILED, "run must be failed, not stuck running_job")
+        self.assertIsNone(run.current_job_id)
+        # not picked up by the poller (would loop forever otherwise)
+        self.assertNotIn(rid, [r.run_id for r in self.store.get_runs_awaiting_job()])
+        types = [e["event_type"] for e in self.store.get_events(rid)]
+        self.assertIn("job_start_failed", types)
+        self.assertIn("job_failed", types)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

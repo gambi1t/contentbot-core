@@ -39,7 +39,11 @@ def _new_run_id() -> str:
 class PipelineStore:
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
+        # check_same_thread=False so the connection can be used from worker
+        # threads (the adapter runs drive() via asyncio.to_thread to keep the
+        # event loop free). All access is serialized by the adapter's drive lock,
+        # so a single connection across threads stays safe.
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         # WAL + busy_timeout matter for the real file db (concurrent callbacks /
         # future Mini App requests); harmless for :memory:.

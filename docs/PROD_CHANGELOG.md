@@ -71,6 +71,17 @@
   - **31 unit-тест зелёный** (+ job-completion, real start_paid_job) + Telethon
     `12_spine_to_gate` (до запроса голоса, без трат). ⚠️ Реальный HeyGen-рендер
     (голос→gate→«Запустить платно»→видео) проверяет Артём вручную через `/spine`.
+- **Ревью-фиксы 1c** (внутренний субагент-ревьюер, money-critical код):
+  - **C1:** если `start_paid_job` упал ПОСЛЕ confirm-CAS — run больше не зависает
+    в `running_job` без job_id; executor ловит исключение → `EV_JOB_FAILED`
+    (статус failed, юзер получает фидбэк, не money-lock).
+  - **C2:** синхронный `httpx` (status/upload/generate) больше не блокирует
+    event-loop живого бота: `drive()` гоняется через `asyncio.to_thread` под
+    общим lock; статус-проверка poller — тоже `to_thread`;
+    SQLite `check_same_thread=False` (доступ сериализован lock'ом).
+  - **M1:** артефакт `avatar_video` пишется ПОСЛЕ успешного CAS (без дубля на гонке).
+  - 32 unit-теста (+ тест C1: submit-fail → run failed, не wedged) + Telethon
+    зелёные.
 - **Следующее:** планы selfie/broll + каскад пропусков, сборка/публикация,
   Notion-зеркало, Mini App-адаптер.
 
