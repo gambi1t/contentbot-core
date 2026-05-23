@@ -8,11 +8,18 @@ The key primitive is :meth:`cas_transition` — a compare-and-swap on
 ``(stage, stage_version)``. It is BOTH the stage-advance mechanism and the
 stale-button / concurrency guard: an action carrying an out-of-date
 ``stage_version`` simply doesn't match and changes nothing.
+
+Thread-safety: a single connection is shared, but EVERY public method takes an
+internal ``RLock``. The adapter runs ``drive()`` via ``asyncio.to_thread`` (so
+blocking provider HTTP doesn't stall the event loop) AND reads the store from
+the loop thread (poller/voice-filter). The store-level lock makes that safe
+regardless of caller discipline (review C6).
 """
 from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +29,10 @@ from .models import (
     Run,
     Artifact,
     GATE_NONE,
+    GATE_PENDING,
+    GATE_CONFIRMED,
     ST_RUNNING_JOB,
+    ST_WAITING_CONFIRM,
 )
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
@@ -39,14 +49,11 @@ def _new_run_id() -> str:
 class PipelineStore:
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
-        # check_same_thread=False so the connection can be used from worker
-        # threads (the adapter runs drive() via asyncio.to_thread to keep the
-        # event loop free). All access is serialized by the adapter's drive lock,
-        # so a single connection across threads stays safe.
+        # check_same_thread=False because access comes from both the event loop
+        # thread and asyncio.to_thread workers; the RLock below serializes it.
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        # WAL + busy_timeout matter for the real file db (concurrent callbacks /
-        # future Mini App requests); harmless for :memory:.
+        self._lock = threading.RLock()
         if db_path != ":memory:":
             self.conn.execute("PRAGMA journal_mode=WAL;")
             self.conn.execute("PRAGMA busy_timeout=5000;")
@@ -60,10 +67,13 @@ class PipelineStore:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(pipeline_runs)")}
         if "chat_id" not in cols:
             self.conn.execute("ALTER TABLE pipeline_runs ADD COLUMN chat_id TEXT")
+        if "job_started_at" not in cols:
+            self.conn.execute("ALTER TABLE pipeline_runs ADD COLUMN job_started_at TEXT")
         self.conn.commit()
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self.conn.close()
 
     # ── runs ────────────────────────────────────────────────────────────────
     def create_run(
@@ -80,40 +90,44 @@ class PipelineStore:
     ) -> Run:
         run_id = _new_run_id()
         now = _utcnow()
-        self.conn.execute(
-            """INSERT INTO pipeline_runs
-               (run_id, notion_page_id, tenant, owner_user_id, actor_user_id,
-                chat_id, plan, stage, status, stage_version, active, paid_gate,
-                created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (run_id, notion_page_id, tenant, owner_user_id, actor_user_id,
-             chat_id, plan, stage, status, 1, 1, GATE_NONE, now, now),
-        )
-        self.conn.commit()
-        return self.get_run(run_id)  # type: ignore[return-value]
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO pipeline_runs
+                   (run_id, notion_page_id, tenant, owner_user_id, actor_user_id,
+                    chat_id, plan, stage, status, stage_version, active, paid_gate,
+                    created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (run_id, notion_page_id, tenant, owner_user_id, actor_user_id,
+                 chat_id, plan, stage, status, 1, 1, GATE_NONE, now, now),
+            )
+            self.conn.commit()
+            return self.get_run(run_id)  # type: ignore[return-value]
 
     def get_run(self, run_id: str) -> Optional[Run]:
-        row = self.conn.execute(
-            "SELECT * FROM pipeline_runs WHERE run_id=?", (run_id,)
-        ).fetchone()
-        return _row_to_run(row) if row else None
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM pipeline_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            return _row_to_run(row) if row else None
 
     def get_active_runs(self, owner_user_id: str) -> list[Run]:
-        rows = self.conn.execute(
-            "SELECT * FROM pipeline_runs WHERE owner_user_id=? AND active=1 "
-            "ORDER BY updated_at DESC",
-            (owner_user_id,),
-        ).fetchall()
-        return [_row_to_run(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM pipeline_runs WHERE owner_user_id=? AND active=1 "
+                "ORDER BY updated_at DESC",
+                (owner_user_id,),
+            ).fetchall()
+            return [_row_to_run(r) for r in rows]
 
     def get_runs_awaiting_job(self) -> list[Run]:
         """Runs with a submitted provider job still rendering — for the poller."""
-        rows = self.conn.execute(
-            "SELECT * FROM pipeline_runs WHERE active=1 AND status=? "
-            "AND current_job_id IS NOT NULL ORDER BY updated_at",
-            (ST_RUNNING_JOB,),
-        ).fetchall()
-        return [_row_to_run(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM pipeline_runs WHERE active=1 AND status=? "
+                "AND current_job_id IS NOT NULL ORDER BY updated_at",
+                (ST_RUNNING_JOB,),
+            ).fetchall()
+            return [_row_to_run(r) for r in rows]
 
     def cas_transition(
         self,
@@ -148,44 +162,83 @@ class PipelineStore:
             where.append("paid_gate=?")
             params.append(expect_paid_gate)
 
-        cur = self.conn.execute(
-            f"UPDATE pipeline_runs SET {', '.join(sets)} WHERE {' AND '.join(where)}",
-            params,
-        )
-        self.conn.commit()
-        return cur.rowcount == 1
+        with self._lock:
+            cur = self.conn.execute(
+                f"UPDATE pipeline_runs SET {', '.join(sets)} WHERE {' AND '.join(where)}",
+                params,
+            )
+            self.conn.commit()
+            return cur.rowcount == 1
 
-    def set_status(self, run_id: str, status: str) -> None:
+    def set_status(self, run_id: str, status: str, *, active: Optional[int] = None) -> None:
         """Status change WITHOUT a version bump (e.g. running_job → waiting_user
-        after a step finishes — not a user action, must not invalidate buttons)."""
-        self.conn.execute(
-            "UPDATE pipeline_runs SET status=?, updated_at=? WHERE run_id=?",
-            (status, _utcnow(), run_id),
-        )
-        self.conn.commit()
+        after a step finishes — not a user action, must not invalidate buttons).
+        Pass ``active=0`` to also close a terminal run."""
+        with self._lock:
+            if active is None:
+                self.conn.execute(
+                    "UPDATE pipeline_runs SET status=?, updated_at=? WHERE run_id=?",
+                    (status, _utcnow(), run_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE pipeline_runs SET status=?, active=?, updated_at=? WHERE run_id=?",
+                    (status, active, _utcnow(), run_id),
+                )
+            self.conn.commit()
 
     def set_current_job(self, run_id: str, job_id: str, paid_gate: str) -> None:
-        self.conn.execute(
-            "UPDATE pipeline_runs SET current_job_id=?, paid_gate=?, updated_at=? WHERE run_id=?",
-            (job_id, paid_gate, _utcnow(), run_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE pipeline_runs SET current_job_id=?, paid_gate=?, "
+                "job_started_at=?, updated_at=? WHERE run_id=?",
+                (job_id, paid_gate, _utcnow(), _utcnow(), run_id),
+            )
+            self.conn.commit()
+
+    def reset_paid_gate(self, run_id: str) -> None:
+        """Roll a run back to the cost-gate so the user can retry (C3): used when
+        a paid submit failed BEFORE any money was spent. No version bump — the
+        re-shown gate carries the current version."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE pipeline_runs SET paid_gate=?, status=?, current_job_id=NULL, "
+                "job_started_at=NULL, updated_at=? WHERE run_id=?",
+                (GATE_PENDING, ST_WAITING_CONFIRM, _utcnow(), run_id),
+            )
+            self.conn.commit()
+
+    def recover_wedged_paid_runs(self) -> int:
+        """Startup recovery (C1): a crash between the confirm CAS and the provider
+        submit leaves runs as confirmed+running_job with no job id — invisible to
+        the poller and un-retryable. Roll them back to the cost-gate. Returns the
+        count recovered."""
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE pipeline_runs SET paid_gate=?, status=?, updated_at=? "
+                "WHERE active=1 AND status=? AND paid_gate=? AND current_job_id IS NULL",
+                (GATE_PENDING, ST_WAITING_CONFIRM, _utcnow(),
+                 ST_RUNNING_JOB, GATE_CONFIRMED),
+            )
+            self.conn.commit()
+            return cur.rowcount
 
     def record_notion_sync(self, run_id: str, ok: bool, notion_status: Optional[str] = None) -> None:
         """Best-effort Notion mirror result. On failure flag for later resync;
         a cron is deliberately deferred — `sync_notion_pending` script handles it."""
-        if ok:
-            self.conn.execute(
-                "UPDATE pipeline_runs SET notion_sync_pending=0, notion_synced_at=?, "
-                "notion_status=COALESCE(?, notion_status), updated_at=? WHERE run_id=?",
-                (_utcnow(), notion_status, _utcnow(), run_id),
-            )
-        else:
-            self.conn.execute(
-                "UPDATE pipeline_runs SET notion_sync_pending=1, updated_at=? WHERE run_id=?",
-                (_utcnow(), run_id),
-            )
-        self.conn.commit()
+        with self._lock:
+            if ok:
+                self.conn.execute(
+                    "UPDATE pipeline_runs SET notion_sync_pending=0, notion_synced_at=?, "
+                    "notion_status=COALESCE(?, notion_status), updated_at=? WHERE run_id=?",
+                    (_utcnow(), notion_status, _utcnow(), run_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE pipeline_runs SET notion_sync_pending=1, updated_at=? WHERE run_id=?",
+                    (_utcnow(), run_id),
+                )
+            self.conn.commit()
 
     # ── artifacts ─────────────────────────────────────────────────────────────
     def add_artifact(
@@ -198,20 +251,22 @@ class PipelineStore:
         text_content: Optional[str] = None,
         meta: Optional[dict] = None,
     ) -> None:
-        self.conn.execute(
-            """INSERT INTO pipeline_artifacts
-               (run_id, kind, path, url, text_content, meta_json, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
-            (run_id, kind, path, url, text_content,
-             json.dumps(meta or {}, ensure_ascii=False), _utcnow()),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO pipeline_artifacts
+                   (run_id, kind, path, url, text_content, meta_json, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (run_id, kind, path, url, text_content,
+                 json.dumps(meta or {}, ensure_ascii=False), _utcnow()),
+            )
+            self.conn.commit()
 
     def get_artifacts(self, run_id: str) -> list[Artifact]:
-        rows = self.conn.execute(
-            "SELECT * FROM pipeline_artifacts WHERE run_id=? ORDER BY id", (run_id,)
-        ).fetchall()
-        return [_row_to_artifact(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM pipeline_artifacts WHERE run_id=? ORDER BY id", (run_id,)
+            ).fetchall()
+            return [_row_to_artifact(r) for r in rows]
 
     # ── events (audit log) ─────────────────────────────────────────────────────
     def add_event(
@@ -224,23 +279,26 @@ class PipelineStore:
         actor_user_id: Optional[str] = None,
         payload: Optional[dict] = None,
     ) -> None:
-        self.conn.execute(
-            """INSERT INTO pipeline_events
-               (run_id, event_type, from_stage, to_stage, actor_user_id, payload_json, created_at)
-               VALUES (?,?,?,?,?,?,?)""",
-            (run_id, event_type, from_stage, to_stage, actor_user_id,
-             json.dumps(payload or {}, ensure_ascii=False), _utcnow()),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO pipeline_events
+                   (run_id, event_type, from_stage, to_stage, actor_user_id, payload_json, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (run_id, event_type, from_stage, to_stage, actor_user_id,
+                 json.dumps(payload or {}, ensure_ascii=False), _utcnow()),
+            )
+            self.conn.commit()
 
     def get_events(self, run_id: str) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT * FROM pipeline_events WHERE run_id=? ORDER BY id", (run_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM pipeline_events WHERE run_id=? ORDER BY id", (run_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
 
 
 def _row_to_run(row: sqlite3.Row) -> Run:
+    keys = row.keys()
     return Run(
         run_id=row["run_id"],
         tenant=row["tenant"],
@@ -255,6 +313,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         chat_id=row["chat_id"],
         notion_page_id=row["notion_page_id"],
         current_job_id=row["current_job_id"],
+        job_started_at=(row["job_started_at"] if "job_started_at" in keys else None),
         notion_status=row["notion_status"],
         notion_synced_at=row["notion_synced_at"],
         notion_sync_pending=row["notion_sync_pending"],

@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 
   paid_gate           TEXT NOT NULL DEFAULT 'none', -- none | pending | confirmed | spent
   current_job_id      TEXT,                       -- external provider job id (HeyGen etc.)
+  job_started_at      TEXT,                       -- when the provider job was submitted (TTL)
 
   notion_status       TEXT,
   notion_synced_at    TEXT,

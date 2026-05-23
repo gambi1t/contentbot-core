@@ -94,8 +94,9 @@ class TestBotStepRunner(unittest.TestCase):
         self.assertTrue(all(10 <= len(o) <= 50 for o in opts))
 
     def test_start_paid_job_not_implemented_without_hooks(self):
+        from content_pipeline.steps import PreSubmitError
         runner = _runner(_FakeClaude())  # no provider hooks injected
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(PreSubmitError):
             runner.start_paid_job("r1", "avatar", {"audio_path": "/v.mp3"})
 
     def test_start_paid_job_real_uploads_and_generates(self):
@@ -121,10 +122,11 @@ class TestBotStepRunner(unittest.TestCase):
         self.assertEqual(calls["generate"], ("https://heygen/audio/abc", "look9", "v3"))
 
     def test_start_paid_job_requires_audio(self):
+        from content_pipeline.steps import PreSubmitError
         runner = BotStepRunner(
             _FakeClaude(), script_system_fn=lambda: "S", cover_system_fn=lambda: "C",
             upload_audio_fn=lambda p: "u", generate_fn=lambda *a: "v")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(PreSubmitError):
             runner.start_paid_job("r1", "avatar", {"audio_path": None})
 
     def test_drives_spine_with_real_runner_to_cover(self):

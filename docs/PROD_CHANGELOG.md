@@ -82,8 +82,29 @@
   - **M1:** артефакт `avatar_video` пишется ПОСЛЕ успешного CAS (без дубля на гонке).
   - 32 unit-теста (+ тест C1: submit-fail → run failed, не wedged) + Telethon
     зелёные.
+- **Внешнее ревью (ChatGPT) — укрепление перед первым реальным рендером
+  (🔴+🟡):** независимый ревьюер прошёл по money/concurrency и нашёл, в т.ч.,
+  баг в нашем же C2-фиксе. Закрыто:
+  - **C6/M2:** lock перенесён ВНУТРЬ `PipelineStore` (RLock на метод) — coarse
+    drive-lock убран; store thread-safe сам, внешние вызовы больше не держат
+    общий lock.
+  - **C3:** падение submit ДО трат (нет аудио / сеть до запроса) → `PreSubmitError`
+    → run откатывается к cost-gate (retryable), а не «уже запущено» навсегда.
+    Ambiguous-после-submit → не авто-ретраим (без двойного списания).
+  - **C1:** recovery-скан на старте (`recover_wedged_paid_runs`) для зависших
+    confirmed+running_job без job_id.
+  - **C4:** owner/tenant-проверка user-действий (в группе чужой не нажмёт чужой
+    «Запустить платно»).
+  - **M1:** skip озвучки в avatar-плане → отмена run (а не падение платного шага).
+  - **M3:** TTL на зависший HeyGen-job (poll'ится не вечно).
+  - **M5:** terminal-статусы закрывают `active=0` (resume не показывает завершённые).
+  - **M7:** voice-фильтр только `VOICE` (AUDIO больше не крашит хендлер).
+  - 38 unit-тестов (+ owner/skip/retryable/recovery/active) + Telethon зелёные.
+  - Отложено в бэклог (для продукта/мультиюзера, не для скрытого трека):
+    durable effect-outbox, delivery-outbox, submit-ledger, parallel poller,
+    tenant-aware queries. Пакет ревью — `REVIEW_FOR_CODEX_spine_1c.md`.
 - **Следующее:** планы selfie/broll + каскад пропусков, сборка/публикация,
-  Notion-зеркало, Mini App-адаптер.
+  Notion-зеркало, Mini App-адаптер; + бэклог-пункты выше при выходе в мультиюзер.
 
 ---
 

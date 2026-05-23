@@ -34,6 +34,7 @@ from .models import (
     ST_WAITING_CONFIRM,
     ST_COMPLETED,
     ST_FAILED,
+    ST_CANCELLED,
     # gates
     GATE_NONE,
     GATE_PENDING,
@@ -65,6 +66,7 @@ from .models import (
     EFF_GENERATE_COVER,
     EFF_START_PAID_JOB,
 )
+from .steps import PreSubmitError
 from .store import PipelineStore
 
 
@@ -129,6 +131,10 @@ class PipelineSpine:
         run = self._require_run(ev.run_id)
         if run is None:
             return _err("run not found")
+        # m2: ignore a completion that no longer matches the run's current stage
+        # (matters once steps run async — a late script-done must not stomp cover).
+        if ev.stage and ev.stage != run.stage:
+            return Decision()
         stage = ev.stage or run.stage
         if stage == STAGE_VOICE:
             self.store.set_status(run.run_id, ST_WAITING_INPUT)
@@ -138,9 +144,9 @@ class PipelineSpine:
         return Decision(intents=[self._step_intent(run)])
 
     def _on_approve(self, ev: PipelineEvent) -> Decision:
-        run = self._require_run(ev.run_id)
+        run = self._require_run_owned(ev)
         if run is None:
-            return _err("run not found")
+            return _err("Этот ролик недоступен.")
         nxt = plans.next_stage(run.plan, run.stage)
         new_status = self._status_for_stage(nxt)
         ok = self.store.cas_transition(
@@ -157,9 +163,25 @@ class PipelineSpine:
         return self._enter_stage(self.store.get_run(run.run_id))
 
     def _on_skip(self, ev: PipelineEvent) -> Decision:
-        run = self._require_run(ev.run_id)
+        run = self._require_run_owned(ev)
         if run is None:
-            return _err("run not found")
+            return _err("Этот ролик недоступен.")
+        # M1: skipping voice in the avatar plan can't proceed — the avatar render
+        # REQUIRES audio. Don't advance into the paid gate with no voice; cancel
+        # the run instead (clean exit, no broken paid step).
+        if run.stage == STAGE_VOICE:
+            ok = self.store.cas_transition(
+                run.run_id, expect_stage=STAGE_VOICE, expect_version=ev.stage_version or -1,
+                new_stage=STAGE_VOICE, new_status=ST_CANCELLED, set_active=0,
+            )
+            if not ok:
+                return self._stale(run.run_id, ev)
+            self.store.add_event(run.run_id, "run_cancelled", from_stage=STAGE_VOICE,
+                                 actor_user_id=ev.actor_user_id,
+                                 payload={"reason": "voice_skipped_avatar_needs_audio"})
+            return Decision(intents=[UIIntent(
+                kind=UI_SHOW_STATUS, run_id=run.run_id,
+                body="Ролик отменён: для аватара нужна озвучка. Пришли /spine заново.")])
         nxt = plans.next_stage(run.plan, run.stage)
         new_status = self._status_for_stage(nxt)
         ok = self.store.cas_transition(
@@ -177,9 +199,9 @@ class PipelineSpine:
         return self._enter_stage(self.store.get_run(run.run_id))
 
     def _on_upload_voice(self, ev: PipelineEvent) -> Decision:
-        run = self._require_run(ev.run_id)
+        run = self._require_run_owned(ev)
         if run is None:
-            return _err("run not found")
+            return _err("Этот ролик недоступен.")
         if run.stage != STAGE_VOICE:
             return self._stale(run.run_id, ev)
         nxt = plans.next_stage(run.plan, run.stage)  # → avatar
@@ -202,9 +224,9 @@ class PipelineSpine:
         return self._enter_stage(self.store.get_run(run.run_id))
 
     def _on_confirm_paid(self, ev: PipelineEvent) -> Decision:
-        run = self._require_run(ev.run_id)
+        run = self._require_run_owned(ev)
         if run is None:
-            return _err("run not found")
+            return _err("Этот ролик недоступен.")
         # Single atomic guard does double duty:
         #   * version mismatch (stale / double-click)  → no change
         #   * paid_gate already not 'pending' (already confirmed/spent) → no change
@@ -247,7 +269,7 @@ class PipelineSpine:
         # the CAS rejects it.
         ok = self.store.cas_transition(
             run.run_id, expect_stage=STAGE_AVATAR, expect_version=run.stage_version,
-            new_stage=STAGE_DONE, new_status=ST_COMPLETED,
+            new_stage=STAGE_DONE, new_status=ST_COMPLETED, set_active=0,  # M5: close
         )
         if not ok:
             return Decision()  # raced with another transition — ignore
@@ -274,21 +296,32 @@ class PipelineSpine:
             return _err("run not found")
         if run.stage != STAGE_AVATAR or run.status != ST_RUNNING_JOB:
             return Decision()
-        self.store.set_status(run.run_id, ST_FAILED)
+        phase = ev.payload.get("phase")
+        err = ev.payload.get("error") or "неизвестно"
+        if phase == "pre_submit":
+            # C3: submit failed BEFORE any money was spent (no audio / transient
+            # network before the provider call). Roll back to the cost-gate so the
+            # user can simply retry — don't brick the run as "already running".
+            self.store.add_event(run.run_id, "job_failed", from_stage=STAGE_AVATAR,
+                                 payload={"phase": phase, "error": err})
+            self.store.reset_paid_gate(run.run_id)
+            return Decision(intents=[self._cost_gate_intent(self.store.get_run(run.run_id),
+                                     note=f"Не удалось запустить ({err}). Попробуй ещё раз.")])
+        # Terminal failure (provider failed / unknown after submit). Close the run.
+        self.store.set_status(run.run_id, ST_FAILED, active=0)
         self.store.add_event(run.run_id, "job_failed", from_stage=STAGE_AVATAR,
                              payload={"job_id": run.current_job_id,
-                                      "error": ev.payload.get("error")})
+                                      "phase": phase, "error": err})
         return Decision(intents=[UIIntent(
             kind=UI_SHOW_ERROR, run_id=run.run_id,
             title="Генерация аватара не удалась",
-            body=f"Ошибка провайдера: {ev.payload.get('error') or 'неизвестно'}. "
-                 "Открой карточку и попробуй ещё раз.",
+            body=f"Ошибка провайдера: {err}. Открой /spine и попробуй заново.",
         )])
 
     def _on_open_materials(self, ev: PipelineEvent) -> Decision:
-        run = self._require_run(ev.run_id)
+        run = self._require_run_owned(ev)
         if run is None:
-            return _err("run not found")
+            return _err("Этот ролик недоступен.")
         arts = self.store.get_artifacts(run.run_id)
         ready = [a.kind for a in arts]
         return Decision(intents=[UIIntent(
@@ -378,12 +411,14 @@ class PipelineSpine:
             ],
         )
 
-    def _cost_gate_intent(self, run: Run) -> UIIntent:
+    def _cost_gate_intent(self, run: Run, note: str = "") -> UIIntent:
+        body = "Готов запустить генерацию аватара (HeyGen) — это платно.\nЗапустить?"
+        if note:
+            body = f"{note}\n\n{body}"
         return UIIntent(
             kind=UI_SHOW_COST_GATE, run_id=run.run_id,
             title="Платная генерация",
-            body=("Готов запустить генерацию аватара (HeyGen) — это платно.\n"
-                  "Запустить?"),
+            body=body,
             actions=[
                 UIAction("💳 Запустить платно", "confirm_paid", run.run_id,
                          run.stage, run.stage_version, style="paid"),
@@ -414,7 +449,28 @@ class PipelineSpine:
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _require_run(self, run_id):
+        """Load a run by id — for SYSTEM events (step/job completion) that carry
+        no actor and are inherently trusted."""
         return self.store.get_run(run_id) if run_id else None
+
+    def _require_run_owned(self, ev: PipelineEvent):
+        """Load a run for a USER action, enforcing ownership/tenant (C4).
+
+        A ``run_id`` in a callback is otherwise a capability token — in a group
+        chat anyone seeing the inline button could act on someone else's run
+        (incl. the paid confirm). Returns None if the run is missing or the actor
+        isn't its owner / tenant mismatches.
+        """
+        if not ev.run_id:
+            return None
+        run = self.store.get_run(ev.run_id)
+        if run is None:
+            return None
+        if ev.owner_user_id and run.owner_user_id and run.owner_user_id != ev.owner_user_id:
+            return None
+        if ev.tenant and run.tenant and run.tenant != ev.tenant:
+            return None
+        return run
 
     @staticmethod
     def _status_for_stage(stage: str) -> str:
@@ -480,15 +536,22 @@ class EffectExecutor:
             })
             try:
                 job_id = self.steps.start_paid_job(eff.run_id, eff.payload.get("stage", ""), job_cfg)
-            except Exception as e:
-                # C1 fix: submit failed AFTER the confirm CAS. No job exists, so
-                # the poller (filters current_job_id NOT NULL) would never see
-                # this run → it would wedge in running_job forever. Fail it
-                # explicitly so the user gets feedback and isn't money-locked.
+            except PreSubmitError as e:
+                # C3: failed BEFORE any spend → retryable (roll back to gate).
                 self.store.add_event(eff.run_id, "job_start_failed",
-                                     payload={"error": str(e)})
+                                     payload={"phase": "pre_submit", "error": str(e)})
                 return [PipelineEvent(kind=EV_JOB_FAILED, run_id=eff.run_id,
-                                      payload={"error": f"submit: {e}"})]
+                                      payload={"phase": "pre_submit", "error": str(e)})]
+            except Exception as e:
+                # C1/C2: failed AFTER the confirm CAS, possibly after the provider
+                # already created a job → DON'T auto-retry (could double-charge).
+                # Mark terminal/unknown; recovery is manual. Either way the run is
+                # not wedged in running_job (it goes failed via _on_job_failed).
+                self.store.add_event(eff.run_id, "job_start_failed",
+                                     payload={"phase": "unknown_after_submit", "error": str(e)})
+                return [PipelineEvent(kind=EV_JOB_FAILED, run_id=eff.run_id,
+                                      payload={"phase": "unknown_after_submit",
+                                               "error": f"submit: {e}"})]
             self.store.set_current_job(eff.run_id, job_id, paid_gate=GATE_SPENT)
             self.store.add_event(eff.run_id, "job_started",
                                  payload={"job_id": job_id, "key": eff.idempotency_key})

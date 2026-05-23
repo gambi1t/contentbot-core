@@ -147,6 +147,7 @@ class Run:
     chat_id: Optional[str] = None
     notion_page_id: Optional[str] = None
     current_job_id: Optional[str] = None
+    job_started_at: Optional[str] = None
     notion_status: Optional[str] = None
     notion_synced_at: Optional[str] = None
     notion_sync_pending: int = 0

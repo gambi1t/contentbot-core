@@ -14,6 +14,14 @@ from __future__ import annotations
 from typing import Protocol
 
 
+class PreSubmitError(Exception):
+    """Raised by ``StepRunner.start_paid_job`` when the paid submit fails BEFORE
+    any money is spent — missing audio, hooks not injected, or a network error
+    that happened before the provider request went out. It tells the spine the
+    run is safely retryable (roll back to the cost-gate), as opposed to an
+    ambiguous failure that may have already created a paid job (review C2/C3)."""
+
+
 class StepRunner(Protocol):
     """Interface the spine depends on. Implementations are headless."""
 

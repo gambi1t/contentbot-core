@@ -12,13 +12,16 @@ Design rules (so the spine core stays pure and this stays portable):
   * brand-awareness is honoured at call time via injected resolver callables, so
     the right system prompt is used without baking any client into this module.
 
-Slice 1b ships script + cover generation. The avatar (paid) provider call stays
-out: the 1b flow stops at the cost-gate, so ``start_paid_job`` raises until 1c
-wires the real provider.
+Script + cover run via Claude. ``start_paid_job`` submits a real HeyGen render
+when the provider hooks are injected (own voice → asset upload → generate); the
+background poller tracks completion. Without the hooks injected it raises (a
+safety no-go used by the unit tests / a hooks-less deployment).
 """
 from __future__ import annotations
 
 from typing import Callable, Optional
+
+from content_pipeline.steps import PreSubmitError
 
 
 class BotStepRunner:
@@ -100,14 +103,20 @@ class BotStepRunner:
         Requires the provider hooks to be injected (1c); without them this is a
         no-go (1b safety).
         """
+        # Pre-spend failures → PreSubmitError so the spine rolls back to the
+        # cost-gate (retryable), instead of treating it as a maybe-charged job.
         if self.upload_audio_fn is None or self.generate_fn is None:
-            raise NotImplementedError(
-                "start_paid_job: provider hooks not injected (1b stops at the gate)"
-            )
+            raise PreSubmitError("provider hooks not injected")
         audio_path = config.get("audio_path")
         if not audio_path:
-            raise ValueError("start_paid_job: no voice audio for the run")
-        audio_url = self.upload_audio_fn(audio_path)
+            raise PreSubmitError("no voice audio for the run")
+        try:
+            audio_url = self.upload_audio_fn(audio_path)
+        except Exception as e:  # upload failed → no render job created yet
+            raise PreSubmitError(f"audio upload failed: {e}") from e
+        # A failure in generate_fn is AMBIGUOUS (HeyGen may have created the job)
+        # → let it propagate as a plain Exception; the spine treats it as
+        # unknown-after-submit and does NOT auto-retry (no double-charge).
         return self.generate_fn(
             audio_url,
             config.get("look_id"),

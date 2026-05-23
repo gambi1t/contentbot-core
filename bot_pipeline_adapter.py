@@ -10,15 +10,15 @@ existing handlers. ``content_pipeline`` stays pure: this module imports it, not
 the other way round. ``telegram`` is imported lazily inside handlers so the pure
 codec/keyboard helpers (and their unit tests) work without telegram installed.
 
-Slice 1b scope: idea → script → cover → voice(button stub) → avatar cost-gate.
-No real provider call (the gate is the finish line; ``start_paid_job`` raises).
-Real voice-message intake and the HeyGen call are 1c.
+Full flow wired: idea → script → cover → voice (real voice message) → avatar
+cost-gate → confirm → real HeyGen render (submitted by start_paid_job, delivered
+by the background poller). The cost-gate still requires an explicit confirm —
+auto-advance never spends money.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 
 from content_pipeline.core import PipelineSpine, EffectExecutor, drive
 from content_pipeline.models import (
@@ -95,25 +95,36 @@ _SPINE: PipelineSpine | None = None
 _STORE: PipelineStore | None = None
 _EXECUTOR: EffectExecutor | None = None
 _STATUS_FN = None  # heygen_check_status(video_id) -> dict, injected for the poller
-# Serializes ALL store access: drive() runs off the event loop (to_thread) so its
-# blocking provider calls don't stall the live bot; the lock keeps the single
-# SQLite connection used by one thread at a time.
-_DRIVE_LOCK = threading.Lock()
+_JOB_TTL_SEC = 45 * 60  # stuck-render deadline (M3): fail a job that never finishes
 
 
 def _ready() -> bool:
     return _SPINE is not None and _EXECUTOR is not None
 
 
-def _drive_locked(event):
-    """Run a spine event to completion under the global drive lock (sync)."""
-    with _DRIVE_LOCK:
-        return drive(_SPINE, _EXECUTOR, event)
-
-
 async def _drive_async(event):
-    """Drive off the event loop so blocking provider HTTP doesn't stall the bot."""
-    return await asyncio.to_thread(_drive_locked, event)
+    """Drive off the event loop so blocking provider HTTP doesn't stall the bot.
+
+    No coarse lock is needed: thread-safety lives inside ``PipelineStore`` (its
+    own RLock) and correctness inside the CAS transitions, so concurrent drives
+    interleave safely and a slow provider call no longer blocks the whole spine
+    (review M2/C6)."""
+    return await asyncio.to_thread(drive, _SPINE, _EXECUTOR, event)
+
+
+def _job_overdue(run) -> bool:
+    """True if a submitted render has been running past the TTL (M3)."""
+    started = getattr(run, "job_started_at", None)
+    if not started:
+        return False
+    from datetime import datetime, timezone
+    try:
+        ts = datetime.fromisoformat(started)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds() > _JOB_TTL_SEC
+    except (ValueError, TypeError):
+        return False
 
 
 async def _render(bot, chat_id, intents) -> None:
@@ -168,7 +179,12 @@ async def poll_jobs(context) -> None:
                                         "duration": st.get("duration")})
         elif status == "failed":
             ev = PipelineEvent(kind=EV_JOB_FAILED, run_id=run.run_id,
-                               payload={"error": st.get("error")})
+                               payload={"error": st.get("error"), "phase": "provider_failed"})
+        elif _job_overdue(run):
+            # M3: render never finishes → fail it instead of polling forever.
+            logger.warning(f"[spine] job TTL exceeded run={run.run_id[:8]} → timeout")
+            ev = PipelineEvent(kind=EV_JOB_FAILED, run_id=run.run_id,
+                               payload={"error": "provider timeout", "phase": "provider_failed"})
         else:
             continue  # still processing
         try:
@@ -327,6 +343,16 @@ def register_pipeline_spine(
     _EXECUTOR = EffectExecutor(_STORE, runner)
     _STATUS_FN = heygen_status_fn
 
+    # C1 recovery: a crash between the confirm CAS and the provider submit can
+    # leave runs confirmed+running_job with no job id (invisible to the poller,
+    # un-retryable). Roll them back to the cost-gate on startup.
+    try:
+        n = _STORE.recover_wedged_paid_runs()
+        if n:
+            logger.warning(f"[spine] recovered {n} wedged paid run(s) → back to cost-gate")
+    except Exception as e:
+        logger.error(f"[spine] paid-run recovery failed: {e}", exc_info=True)
+
     # Voice intake — a custom filter that matches ONLY when the sender has an
     # active spine run awaiting voice. Registered in group 0 BEFORE the live
     # process_voice (one handler per group runs), so ordinary voice messages
@@ -342,9 +368,10 @@ def register_pipeline_spine(
             except Exception:
                 return False
 
+    # VOICE only (M7): on_spine_voice reads message.voice, which is None for
+    # AUDIO documents — matching AUDIO here would crash.
     application.add_handler(
-        MessageHandler((_filters.VOICE | _filters.AUDIO) & _SpineAwaitingVoiceFilter(),
-                       on_spine_voice)
+        MessageHandler(_filters.VOICE & _SpineAwaitingVoiceFilter(), on_spine_voice)
     )
     application.add_handler(CommandHandler("spine", cmd_spine))
     application.add_handler(CommandHandler("spine_resume", cmd_spine_resume))
