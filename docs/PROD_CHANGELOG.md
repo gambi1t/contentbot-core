@@ -58,8 +58,21 @@
   `/spine`→сценарий→Дальше→обложка→Дальше→озвучка→Загрузить голос→**avatar
   cost-gate**, деньги не потрачены. Run персистится (stage=avatar,
   paid_gate=pending). `/spine` намеренно скрыт (не в меню) — экспериментальный трек.
-- **Следующее (1c):** реальный HeyGen на gate (start_paid_job) + реальный приём
-  голосового; затем планы selfie/broll + каскад пропусков, публикация, Mini App.
+- **Срез 1c — СДЕЛАН (тот же день, на моках; реальный рендер — вручную):**
+  - реальный `start_paid_job` (`BotStepRunner` + инъекция HeyGen upload+generate):
+    свой голос → upload asset → `heygen_generate_video` → video_id;
+  - **фоновый poller** (`poll_jobs` на job_queue, каждые 20с): `heygen_check_status`
+    → completed: доставка видео в чат (UIIntent `show_result` → `send_video`) +
+    стадия avatar→done; failed: статус failed;
+  - **реальный приём голосового**: кастомный фильтр ловит голос ТОЛЬКО когда у
+    юзера есть spine-run на стадии voice → не задевает живой `process_voice`;
+  - `pipeline.db` миграция: колонка `chat_id` (доставка async-результата);
+  - идемпотентность сохранена (дубль completion игнорируется).
+  - **31 unit-тест зелёный** (+ job-completion, real start_paid_job) + Telethon
+    `12_spine_to_gate` (до запроса голоса, без трат). ⚠️ Реальный HeyGen-рендер
+    (голос→gate→«Запустить платно»→видео) проверяет Артём вручную через `/spine`.
+- **Следующее:** планы selfie/broll + каскад пропусков, сборка/публикация,
+  Notion-зеркало, Mini App-адаптер.
 
 ---
 

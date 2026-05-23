@@ -23,7 +23,9 @@ from content_pipeline.models import (
     PipelineEvent,
     UIIntent, UIAction,
     EV_IDEA_RECEIVED, EV_APPROVE, EV_SKIP, EV_UPLOAD_VOICE, EV_CONFIRM_PAID,
-    EV_OPEN_MATERIALS, EV_RESUME,
+    EV_OPEN_MATERIALS, EV_RESUME, EV_JOB_COMPLETED, EV_JOB_FAILED,
+    UI_SHOW_RESULT,
+    STAGE_VOICE, ST_WAITING_INPUT,
 )
 from content_pipeline.store import PipelineStore
 from pipeline_step_services import BotStepRunner
@@ -90,6 +92,7 @@ def intent_text(intent: UIIntent) -> str:
 _SPINE: PipelineSpine | None = None
 _STORE: PipelineStore | None = None
 _EXECUTOR: EffectExecutor | None = None
+_STATUS_FN = None  # heygen_check_status(video_id) -> dict, injected for the poller
 
 
 def _ready() -> bool:
@@ -97,7 +100,10 @@ def _ready() -> bool:
 
 
 async def _render(bot, chat_id, intents) -> None:
-    """Send each UIIntent as its own Telegram message (+ inline buttons)."""
+    """Send each UIIntent as its own Telegram message (+ inline buttons).
+
+    UI_SHOW_RESULT carries the finished video — deliver it as a video by URL.
+    """
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup  # lazy
     for intent in intents:
         spec = intent_to_keyboard_spec(intent)
@@ -107,7 +113,54 @@ async def _render(bot, chat_id, intents) -> None:
                 [[InlineKeyboardButton(lbl, callback_data=cb) for (lbl, cb) in row]
                  for row in spec]
             )
+        if intent.kind == UI_SHOW_RESULT and (intent.data.get("url") or intent.data.get("path")):
+            try:
+                src = intent.data.get("url") or intent.data.get("path")
+                await bot.send_video(chat_id=chat_id, video=src,
+                                     caption=intent_text(intent), reply_markup=markup)
+                continue
+            except Exception as e:
+                logger.warning(f"[spine] send_video failed, falling back to text: {e}")
         await bot.send_message(chat_id=chat_id, text=intent_text(intent), reply_markup=markup)
+
+
+async def poll_jobs(context) -> None:
+    """Background poller: track submitted avatar renders → completion/failure.
+
+    Runs on the job_queue. For each run with a pending provider job it asks the
+    injected status fn; on completion/failure it feeds the spine the matching
+    event and delivers the result to the run's chat. Never raises (a poll error
+    must not kill the job queue)."""
+    if not _ready() or _STATUS_FN is None or _STORE is None:
+        return
+    try:
+        runs = _STORE.get_runs_awaiting_job()
+    except Exception as e:
+        logger.error(f"[spine] poll_jobs: store query failed: {e}", exc_info=True)
+        return
+    for run in runs:
+        try:
+            st = _STATUS_FN(run.current_job_id)
+        except Exception as e:
+            logger.warning(f"[spine] status check failed run={run.run_id[:8]}: {e}")
+            continue
+        status = (st or {}).get("status")
+        if status == "completed":
+            ev = PipelineEvent(kind=EV_JOB_COMPLETED, run_id=run.run_id,
+                               payload={"url": st.get("video_url"),
+                                        "duration": st.get("duration")})
+        elif status == "failed":
+            ev = PipelineEvent(kind=EV_JOB_FAILED, run_id=run.run_id,
+                               payload={"error": st.get("error")})
+        else:
+            continue  # still processing
+        try:
+            res = drive(_SPINE, _EXECUTOR, ev)
+            if run.chat_id:
+                await _render(context.bot, int(run.chat_id), res.intents)
+        except Exception as e:
+            logger.error(f"[spine] poll_jobs deliver failed run={run.run_id[:8]}: {e}",
+                         exc_info=True)
 
 
 # ── handlers ────────────────────────────────────────────────────────────────
@@ -150,6 +203,42 @@ async def cmd_spine_resume(update, context) -> None:
     await _render(update.get_bot(), update.effective_chat.id, res.intents)
 
 
+async def on_spine_voice(update, context) -> None:
+    """A voice message while a spine run awaits voice → upload_voice with the
+    real downloaded audio. Only reached when ``_SpineAwaitingVoiceFilter`` passed,
+    so the live ``process_voice`` is untouched for everything else."""
+    from pathlib import Path as _Path
+    user_id = str(update.effective_user.id)
+    runs = [r for r in _STORE.get_active_runs(user_id)
+            if r.stage == STAGE_VOICE and r.status == ST_WAITING_INPUT]
+    if not runs:
+        return
+    run = runs[0]
+    media_dir = _Path(_STORE.db_path).parent / "spine_media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    dest = media_dir / f"{run.run_id}_voice.ogg"
+    try:
+        tg_file = await update.message.voice.get_file()
+        await tg_file.download_to_drive(str(dest))
+    except Exception as e:
+        logger.error(f"[spine] voice download failed: {e}", exc_info=True)
+        await update.message.reply_text("Спайн: не удалось скачать голосовое.")
+        return
+    ev = PipelineEvent(
+        kind=EV_UPLOAD_VOICE, tenant="maksim", owner_user_id=user_id,
+        actor_user_id=user_id, chat_id=str(update.effective_chat.id),
+        run_id=run.run_id, stage=run.stage, stage_version=run.stage_version,
+        payload={"audio_path": str(dest)},
+    )
+    try:
+        res = drive(_SPINE, _EXECUTOR, ev)
+    except Exception as e:
+        logger.error(f"[spine] voice drive failed: {e}", exc_info=True)
+        await update.message.reply_text(f"Спайн: ошибка — {e}")
+        return
+    await _render(update.get_bot(), update.effective_chat.id, res.intents)
+
+
 async def on_spine_callback(update, context) -> None:
     """Inline-button presses with the ``sp:`` prefix."""
     query = update.callback_query
@@ -187,15 +276,24 @@ def register_pipeline_spine(
     script_model: str = "claude-opus-4-7",
     cover_model: str = "claude-opus-4-7",
     force_shorten=None,
+    heygen_upload_fn=None,
+    heygen_generate_fn=None,
+    heygen_status_fn=None,
+    poll_interval: int = 20,
 ) -> None:
     """Wire the hidden spine track into the live bot. Called once at startup.
 
     Dependency direction: bot.py → this adapter → content_pipeline. The Claude
-    client and brand-aware prompt resolvers are injected so neither this module
-    nor the core imports bot.py.
+    client, brand-aware prompt resolvers and HeyGen hooks are injected so neither
+    this module nor the core imports bot.py.
+
+    If the HeyGen hooks are omitted the track still runs up to the cost-gate
+    (1b behaviour); with them, ``confirm_paid`` submits a real render and the
+    poller delivers the finished video (1c).
     """
-    global _SPINE, _STORE, _EXECUTOR
-    from telegram.ext import CommandHandler, CallbackQueryHandler  # lazy
+    global _SPINE, _STORE, _EXECUTOR, _STATUS_FN
+    from telegram.ext import CommandHandler, CallbackQueryHandler, MessageHandler  # lazy
+    from telegram.ext import filters as _filters
 
     _STORE = PipelineStore(db_path)
     runner = BotStepRunner(
@@ -205,11 +303,39 @@ def register_pipeline_spine(
         script_model=script_model,
         cover_model=cover_model,
         force_shorten=force_shorten,
+        upload_audio_fn=heygen_upload_fn,
+        generate_fn=heygen_generate_fn,
     )
     _SPINE = PipelineSpine(_STORE)
     _EXECUTOR = EffectExecutor(_STORE, runner)
+    _STATUS_FN = heygen_status_fn
 
+    # Voice intake — a custom filter that matches ONLY when the sender has an
+    # active spine run awaiting voice. Registered in group 0 BEFORE the live
+    # process_voice (one handler per group runs), so ordinary voice messages
+    # fall through to the live flow untouched. Ultra-defensive: any error → False.
+    class _SpineAwaitingVoiceFilter(_filters.MessageFilter):
+        def filter(self, message) -> bool:
+            try:
+                if _STORE is None or message.from_user is None:
+                    return False
+                runs = _STORE.get_active_runs(str(message.from_user.id))
+                return any(r.stage == STAGE_VOICE and r.status == ST_WAITING_INPUT
+                           for r in runs)
+            except Exception:
+                return False
+
+    application.add_handler(
+        MessageHandler((_filters.VOICE | _filters.AUDIO) & _SpineAwaitingVoiceFilter(),
+                       on_spine_voice)
+    )
     application.add_handler(CommandHandler("spine", cmd_spine))
     application.add_handler(CommandHandler("spine_resume", cmd_spine_resume))
     application.add_handler(CallbackQueryHandler(on_spine_callback, pattern=r"^sp:"))
+
+    # Background poller for async provider renders (only if status hook present).
+    if heygen_status_fn is not None and getattr(application, "job_queue", None):
+        application.job_queue.run_repeating(poll_jobs, interval=poll_interval, first=poll_interval)
+        logger.info(f"[spine] job poller registered (every {poll_interval}s)")
+
     logger.info(f"[spine] hidden pipeline track registered (db={db_path})")

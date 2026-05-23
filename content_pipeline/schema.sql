@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   tenant              TEXT NOT NULL,
   owner_user_id       TEXT NOT NULL,              -- who owns the card
   actor_user_id       TEXT,                       -- who acted last (SMM vs owner)
+  chat_id             TEXT,                       -- where to deliver async results
   plan                TEXT NOT NULL,              -- avatar | selfie | broll
   stage               TEXT NOT NULL,              -- script | cover | voice | avatar | done
   status              TEXT NOT NULL,              -- running_job | waiting_user | waiting_input | waiting_confirm | completed | cancelled | failed

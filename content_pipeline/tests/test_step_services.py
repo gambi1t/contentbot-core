@@ -93,10 +93,39 @@ class TestBotStepRunner(unittest.TestCase):
         self.assertNotIn("x", opts)  # too-short line filtered
         self.assertTrue(all(10 <= len(o) <= 50 for o in opts))
 
-    def test_start_paid_job_not_implemented_in_1b(self):
-        runner = _runner(_FakeClaude())
+    def test_start_paid_job_not_implemented_without_hooks(self):
+        runner = _runner(_FakeClaude())  # no provider hooks injected
         with self.assertRaises(NotImplementedError):
-            runner.start_paid_job("r1", "avatar", {})
+            runner.start_paid_job("r1", "avatar", {"audio_path": "/v.mp3"})
+
+    def test_start_paid_job_real_uploads_and_generates(self):
+        calls = {}
+
+        def fake_upload(path):
+            calls["upload"] = path
+            return "https://heygen/audio/abc"
+
+        def fake_generate(audio_url, look_id, avatar_version):
+            calls["generate"] = (audio_url, look_id, avatar_version)
+            return "video-123"
+
+        runner = BotStepRunner(
+            _FakeClaude(),
+            script_system_fn=lambda: "S", cover_system_fn=lambda: "C",
+            upload_audio_fn=fake_upload, generate_fn=fake_generate,
+        )
+        job_id = runner.start_paid_job("r1", "avatar", {
+            "audio_path": "/tmp/voice.mp3", "look_id": "look9", "avatar_version": "v3"})
+        self.assertEqual(job_id, "video-123")
+        self.assertEqual(calls["upload"], "/tmp/voice.mp3")
+        self.assertEqual(calls["generate"], ("https://heygen/audio/abc", "look9", "v3"))
+
+    def test_start_paid_job_requires_audio(self):
+        runner = BotStepRunner(
+            _FakeClaude(), script_system_fn=lambda: "S", cover_system_fn=lambda: "C",
+            upload_audio_fn=lambda p: "u", generate_fn=lambda *a: "v")
+        with self.assertRaises(ValueError):
+            runner.start_paid_job("r1", "avatar", {"audio_path": None})
 
     def test_drives_spine_with_real_runner_to_cover(self):
         """The real runner plugs into the spine exactly like the mock."""

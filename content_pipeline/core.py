@@ -22,6 +22,7 @@ from .models import (
     Run,
     UIAction,
     UIIntent,
+    InputField,
     # stages
     STAGE_VOICE,
     STAGE_AVATAR,
@@ -32,6 +33,7 @@ from .models import (
     ST_WAITING_INPUT,
     ST_WAITING_CONFIRM,
     ST_COMPLETED,
+    ST_FAILED,
     # gates
     GATE_NONE,
     GATE_PENDING,
@@ -46,6 +48,8 @@ from .models import (
     EV_OPEN_MATERIALS,
     EV_RESUME,
     EV_STEP_COMPLETED,
+    EV_JOB_COMPLETED,
+    EV_JOB_FAILED,
     # UI kinds
     UI_SHOW_STEP,
     UI_SHOW_RESUME_LIST,
@@ -55,6 +59,7 @@ from .models import (
     UI_SHOW_MATERIALS,
     UI_SHOW_STALE_STATE,
     UI_SHOW_ERROR,
+    UI_SHOW_RESULT,
     # effect kinds
     EFF_GENERATE_SCRIPT,
     EFF_GENERATE_COVER,
@@ -84,6 +89,10 @@ class PipelineSpine:
             return self._on_upload_voice(ev)
         if ev.kind == EV_CONFIRM_PAID:
             return self._on_confirm_paid(ev)
+        if ev.kind == EV_JOB_COMPLETED:
+            return self._on_job_completed(ev)
+        if ev.kind == EV_JOB_FAILED:
+            return self._on_job_failed(ev)
         if ev.kind == EV_OPEN_MATERIALS:
             return self._on_open_materials(ev)
         return Decision(intents=[UIIntent(kind=UI_SHOW_ERROR, body=f"unknown event: {ev.kind}")])
@@ -96,6 +105,7 @@ class PipelineSpine:
             tenant=ev.tenant,
             owner_user_id=ev.owner_user_id,
             actor_user_id=ev.actor_user_id or ev.owner_user_id,
+            chat_id=ev.chat_id,
             plan=plan,
             stage=stage,
             status=ST_RUNNING_JOB,
@@ -222,6 +232,56 @@ class PipelineSpine:
                           body="Запускаю генерацию аватара…")
         return Decision(intents=[intent], effects=[eff])
 
+    def _on_job_completed(self, ev: PipelineEvent) -> Decision:
+        """Provider render finished (fed by the poller). Store the avatar video,
+        advance avatar→done, deliver the result. Idempotent: a duplicate
+        completion (poller raced) is ignored once the run is already done."""
+        run = self._require_run(ev.run_id)
+        if run is None:
+            return _err("run not found")
+        if run.stage != STAGE_AVATAR or run.status != ST_RUNNING_JOB:
+            # Already delivered / not in a job → ignore duplicate poller hit.
+            return Decision()
+        self.store.add_artifact(
+            run.run_id, "avatar_video",
+            path=ev.payload.get("path"), url=ev.payload.get("url"),
+            meta={"duration": ev.payload.get("duration"),
+                  "job_id": run.current_job_id},
+        )
+        ok = self.store.cas_transition(
+            run.run_id, expect_stage=STAGE_AVATAR, expect_version=run.stage_version,
+            new_stage=STAGE_DONE, new_status=ST_COMPLETED,
+        )
+        if not ok:
+            return Decision()  # raced with another transition — ignore
+        self.store.add_event(run.run_id, "job_completed", from_stage=STAGE_AVATAR,
+                             to_stage=STAGE_DONE,
+                             payload={"job_id": run.current_job_id})
+        return Decision(intents=[UIIntent(
+            kind=UI_SHOW_RESULT, run_id=run.run_id,
+            title="Аватар готов ✅",
+            body="Видео аватара сгенерировано.",
+            data={"path": ev.payload.get("path"), "url": ev.payload.get("url"),
+                  "duration": ev.payload.get("duration")},
+        )])
+
+    def _on_job_failed(self, ev: PipelineEvent) -> Decision:
+        run = self._require_run(ev.run_id)
+        if run is None:
+            return _err("run not found")
+        if run.stage != STAGE_AVATAR or run.status != ST_RUNNING_JOB:
+            return Decision()
+        self.store.set_status(run.run_id, ST_FAILED)
+        self.store.add_event(run.run_id, "job_failed", from_stage=STAGE_AVATAR,
+                             payload={"job_id": run.current_job_id,
+                                      "error": ev.payload.get("error")})
+        return Decision(intents=[UIIntent(
+            kind=UI_SHOW_ERROR, run_id=run.run_id,
+            title="Генерация аватара не удалась",
+            body=f"Ошибка провайдера: {ev.payload.get('error') or 'неизвестно'}. "
+                 "Открой карточку и попробуй ещё раз.",
+        )])
+
     def _on_open_materials(self, ev: PipelineEvent) -> Decision:
         run = self._require_run(ev.run_id)
         if run is None:
@@ -290,11 +350,11 @@ class PipelineSpine:
             return UIIntent(
                 kind=UI_REQUEST_INPUT, run_id=run.run_id,
                 title="Озвучка",
-                body="Запиши голосовое для аватара или пропусти этот шаг.",
-                fields=[],
+                body="🎤 Пришли голосовое сообщение для озвучки аватара "
+                     "(или пропусти этот шаг).",
+                fields=[InputField(name="voice", kind="voice",
+                                   prompt="голосовое для аватара")],
                 actions=[
-                    UIAction("📤 Загрузить голос", "upload", run.run_id,
-                             run.stage, run.stage_version, style="primary"),
                     UIAction("⏭ Пропустить", "skip", run.run_id,
                              run.stage, run.stage_version),
                     UIAction("📥 Скачать материалы", "open_materials", run.run_id,
@@ -405,11 +465,21 @@ class EffectExecutor:
             self.store.add_artifact(eff.run_id, "cover", meta=res.get("meta"))
             return [PipelineEvent(kind=EV_STEP_COMPLETED, run_id=eff.run_id, stage="cover")]
         if eff.kind == EFF_START_PAID_JOB:
-            job_id = self.steps.start_paid_job(eff.run_id, eff.payload.get("stage", ""), self.config)
+            # Enrich with the artifacts/params the provider needs (voice audio +
+            # avatar look/version). Defaults: Avatar 3 (cheapest), brand look.
+            arts = {a.kind: a for a in self.store.get_artifacts(eff.run_id)}
+            voice = arts.get("voice")
+            job_cfg = dict(self.config)
+            job_cfg.update({
+                "audio_path": voice.path if voice else None,
+                "look_id": eff.payload.get("look_id"),
+                "avatar_version": eff.payload.get("avatar_version", "v3"),
+            })
+            job_id = self.steps.start_paid_job(eff.run_id, eff.payload.get("stage", ""), job_cfg)
             self.store.set_current_job(eff.run_id, job_id, paid_gate=GATE_SPENT)
             self.store.add_event(eff.run_id, "job_started",
                                  payload={"job_id": job_id, "key": eff.idempotency_key})
-            return []  # provider polling / completion is a 1b concern
+            return []  # completion arrives async via the poller → EV_JOB_COMPLETED
         return []
 
 

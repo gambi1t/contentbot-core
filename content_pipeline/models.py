@@ -45,6 +45,9 @@ EV_OPEN_MATERIALS = "open_materials"
 EV_RESUME = "resume"
 # internal follow-up (emitted by the effect executor):
 EV_STEP_COMPLETED = "step_completed"
+# async provider-job outcomes (fed back by the poller, 1c):
+EV_JOB_COMPLETED = "job_completed"
+EV_JOB_FAILED = "job_failed"
 
 # ── UIIntent kinds (transport-agnostic) ─────────────────────────────────────
 UI_SHOW_STEP = "show_step"
@@ -55,6 +58,7 @@ UI_SHOW_STATUS = "show_status"
 UI_SHOW_MATERIALS = "show_materials"
 UI_SHOW_STALE_STATE = "show_stale_state"
 UI_SHOW_ERROR = "show_error"
+UI_SHOW_RESULT = "show_result"  # deliver the finished video (1c)
 
 # ── EffectCommand kinds (side effects; some cost money) ──────────────────────
 EFF_GENERATE_SCRIPT = "generate_script"
@@ -140,6 +144,7 @@ class Run:
     active: int = 1
     paid_gate: str = GATE_NONE
     actor_user_id: Optional[str] = None
+    chat_id: Optional[str] = None
     notion_page_id: Optional[str] = None
     current_job_id: Optional[str] = None
     notion_status: Optional[str] = None

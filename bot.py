@@ -2485,6 +2485,27 @@ def heygen_generate_video(audio_url: str, look_id: str = None, avatar_version: s
     return data["data"]["video_id"]
 
 
+def heygen_upload_audio_asset(audio_path: str) -> str:
+    """Upload a local audio file to HeyGen's asset store → return its audio_url.
+
+    Headless helper (no Telegram) reused by the pipeline-spine paid-job step
+    (``pipeline_step_services.BotStepRunner.start_paid_job`` via injection).
+    Mirrors the inline upload used in the live selfvoice flow.
+    """
+    import httpx
+    if not HEYGEN_API_KEY:
+        raise RuntimeError("HEYGEN_API_KEY не настроен")
+    with open(audio_path, "rb") as af:
+        up = httpx.post(
+            "https://upload.heygen.com/v1/asset",
+            headers={"X-Api-Key": HEYGEN_API_KEY, "Content-Type": "audio/mpeg"},
+            content=af.read(), timeout=120,
+        ).json()
+    if up.get("code") != 100:
+        raise RuntimeError(f"HeyGen audio upload error: {up}")
+    return up["data"]["url"]
+
+
 def heygen_register_photo_avatar(image_url: str, name: str = "Photo Avatar") -> str:
     """Register a user-uploaded photo as a reusable HeyGen Photo Avatar.
 
@@ -18939,6 +18960,12 @@ def main():
             cover_system_fn=lambda: _brand_cover_prompt(COVER_TEXT_PROMPT),
             db_path=str(_Path(__file__).parent / "pipeline.db"),
             cover_model=COVER_MODEL,
+            # 1c: real HeyGen provider hooks (own-voice → avatar). The poller
+            # delivers the finished render. Real renders cost money — only fired
+            # when the user explicitly confirms the cost-gate.
+            heygen_upload_fn=heygen_upload_audio_asset,
+            heygen_generate_fn=heygen_generate_video,
+            heygen_status_fn=heygen_check_status,
         )
     except Exception as _spine_e:
         logger.error(f"[spine] registration failed (live bot unaffected): {_spine_e}",

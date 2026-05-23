@@ -48,6 +48,14 @@ class PipelineStore:
             self.conn.execute("PRAGMA busy_timeout=5000;")
         self.conn.execute("PRAGMA foreign_keys=ON;")
         self.conn.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate()
+        self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Lightweight forward migrations for existing db files (no ORM)."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(pipeline_runs)")}
+        if "chat_id" not in cols:
+            self.conn.execute("ALTER TABLE pipeline_runs ADD COLUMN chat_id TEXT")
         self.conn.commit()
 
     def close(self) -> None:
@@ -63,6 +71,7 @@ class PipelineStore:
         stage: str,
         status: str,
         actor_user_id: Optional[str] = None,
+        chat_id: Optional[str] = None,
         notion_page_id: Optional[str] = None,
     ) -> Run:
         run_id = _new_run_id()
@@ -70,11 +79,11 @@ class PipelineStore:
         self.conn.execute(
             """INSERT INTO pipeline_runs
                (run_id, notion_page_id, tenant, owner_user_id, actor_user_id,
-                plan, stage, status, stage_version, active, paid_gate,
+                chat_id, plan, stage, status, stage_version, active, paid_gate,
                 created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (run_id, notion_page_id, tenant, owner_user_id, actor_user_id,
-             plan, stage, status, 1, 1, GATE_NONE, now, now),
+             chat_id, plan, stage, status, 1, 1, GATE_NONE, now, now),
         )
         self.conn.commit()
         return self.get_run(run_id)  # type: ignore[return-value]
@@ -90,6 +99,15 @@ class PipelineStore:
             "SELECT * FROM pipeline_runs WHERE owner_user_id=? AND active=1 "
             "ORDER BY updated_at DESC",
             (owner_user_id,),
+        ).fetchall()
+        return [_row_to_run(r) for r in rows]
+
+    def get_runs_awaiting_job(self) -> list[Run]:
+        """Runs with a submitted provider job still rendering — for the poller."""
+        rows = self.conn.execute(
+            "SELECT * FROM pipeline_runs WHERE active=1 AND status=? "
+            "AND current_job_id IS NOT NULL ORDER BY updated_at",
+            (ST_RUNNING_JOB,),
         ).fetchall()
         return [_row_to_run(r) for r in rows]
 
@@ -230,6 +248,7 @@ def _row_to_run(row: sqlite3.Row) -> Run:
         active=row["active"],
         paid_gate=row["paid_gate"],
         actor_user_id=row["actor_user_id"],
+        chat_id=row["chat_id"],
         notion_page_id=row["notion_page_id"],
         current_job_id=row["current_job_id"],
         notion_status=row["notion_status"],

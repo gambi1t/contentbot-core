@@ -41,6 +41,8 @@ class BotStepRunner:
         script_model: str = "claude-opus-4-7",
         cover_model: str = "claude-opus-4-7",
         force_shorten: Optional[Callable[[str], str]] = None,
+        upload_audio_fn: Optional[Callable[[str], str]] = None,
+        generate_fn: Optional[Callable[..., str]] = None,
     ) -> None:
         self.claude = claude_client
         self.script_system_fn = script_system_fn
@@ -48,6 +50,10 @@ class BotStepRunner:
         self.script_model = script_model
         self.cover_model = cover_model
         self.force_shorten = force_shorten
+        # Injected provider hooks (1c). When absent → start_paid_job stays a
+        # no-go (1b behaviour). bot.py wires real HeyGen upload + generate here.
+        self.upload_audio_fn = upload_audio_fn
+        self.generate_fn = generate_fn
 
     # ── StepRunner protocol ───────────────────────────────────────────────────
     def generate_script(self, run_id: str, idea_text: str, config: dict) -> dict:
@@ -87,8 +93,23 @@ class BotStepRunner:
         return {"meta": {"options": options}}
 
     def start_paid_job(self, run_id: str, kind: str, config: dict) -> str:
-        # Slice 1b deliberately stops at the cost-gate. The real HeyGen/provider
-        # call is wired in 1c. If we ever reach here in 1b it's a logic error.
-        raise NotImplementedError(
-            "start_paid_job: real provider is a Slice 1c concern; 1b stops at the gate"
+        """Submit the paid avatar render and return the provider job id.
+
+        Headless: uploads the voice audio + submits generation, returns
+        immediately (the render takes minutes — the poller tracks completion).
+        Requires the provider hooks to be injected (1c); without them this is a
+        no-go (1b safety).
+        """
+        if self.upload_audio_fn is None or self.generate_fn is None:
+            raise NotImplementedError(
+                "start_paid_job: provider hooks not injected (1b stops at the gate)"
+            )
+        audio_path = config.get("audio_path")
+        if not audio_path:
+            raise ValueError("start_paid_job: no voice audio for the run")
+        audio_url = self.upload_audio_fn(audio_path)
+        return self.generate_fn(
+            audio_url,
+            config.get("look_id"),
+            config.get("avatar_version", "v3"),
         )
