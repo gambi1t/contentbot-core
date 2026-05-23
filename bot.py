@@ -18923,6 +18923,27 @@ def main():
     except Exception as e:
         logger.error(f"Billing module failed to register: {e}", exc_info=True)
 
+    # ── Hidden pipeline-spine track (experimental, parallel to live flow) ──
+    # New state-machine pipeline (content_pipeline): commands /spine,
+    # /spine_resume + sp: callbacks. Deliberately NOT in the menu/help — it's an
+    # experimental parallel track, not a user feature yet. Registered BEFORE the
+    # general CallbackQueryHandler below so its sp:-callbacks aren't swallowed.
+    # Fully isolated: any failure here must never break the live bot.
+    try:
+        from pathlib import Path as _Path
+        from bot_pipeline_adapter import register_pipeline_spine
+        register_pipeline_spine(
+            app,
+            claude_client=claude,
+            script_system_fn=lambda: _brand_script_prompt(SCRIPT_PROMPT),
+            cover_system_fn=lambda: _brand_cover_prompt(COVER_TEXT_PROMPT),
+            db_path=str(_Path(__file__).parent / "pipeline.db"),
+            cover_model=COVER_MODEL,
+        )
+    except Exception as _spine_e:
+        logger.error(f"[spine] registration failed (live bot unaffected): {_spine_e}",
+                     exc_info=True)
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_idea))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.MimeType("video/mp4"), process_idea))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, process_voice))

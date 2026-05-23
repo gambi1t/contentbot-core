@@ -50,9 +50,16 @@
   импортирует `bot.py` и не содержит клиент-специфики.
 - **Контракт для конструктора:** `docs/pipeline_spine/CONTRACT.md` (события на
   вход, UIIntent/EffectCommand на выход, схема store, 10 инвариантов).
-- **Следующее (1b):** Telegram-адаптер (скрытая точка входа) + извлечение
-  реальных `ScriptService`/`CoverService`/voice из `bot.py` + Telethon-смок до
-  gate. Реальный HeyGen, планы selfie/broll, публикация — дальше.
+- **Срез 1b — СДЕЛАН (тот же день):** реальный headless `BotStepRunner`
+  (script+cover, инъекция claude+промптов, без импорта `bot.py`) +
+  `bot_pipeline_adapter` — **скрытая команда `/spine`** (+ `/spine_resume`, `sp:`
+  callbacks), параллельно живому боту, изолированно (сбой не роняет прод).
+  Состояние в `pipeline.db` (SQLite). 24 unit-теста + **Telethon-смок зелёный**:
+  `/spine`→сценарий→Дальше→обложка→Дальше→озвучка→Загрузить голос→**avatar
+  cost-gate**, деньги не потрачены. Run персистится (stage=avatar,
+  paid_gate=pending). `/spine` намеренно скрыт (не в меню) — экспериментальный трек.
+- **Следующее (1c):** реальный HeyGen на gate (start_paid_job) + реальный приём
+  голосового; затем планы selfie/broll + каскад пропусков, публикация, Mini App.
 
 ---
 
