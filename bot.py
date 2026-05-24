@@ -576,16 +576,17 @@ BRANDS = {
         # (новый ключ, 21 мая 2026). Тип avatar (digital twin), не фото —
         # лучше лип-синк/жесты, нет «плывущих рук» фото-аватара. Старый фото-
         # аватар (90610f1a…, в аккаунте Артёма) выведен из обращения.
-        "heygen_avatar_id": "a0bddf71c30c42aaa4cf4e4143039628",
+        # Новые аватары Максима (24 мая 2026) — старые a0bddf71 / f3a502ab сняты.
+        "heygen_avatar_id": "89408fde1ded426dbadee1dbe9357e01",
         # Непустой heygen_looks = пикер показывает ТОЛЬКО эти луки.
         "heygen_looks": {
-            "beige_nature": {
-                "id": "a0bddf71c30c42aaa4cf4e4143039628",
-                "name": "Бежевый свитер — природа",
+            "max_outdoor": {
+                "id": "89408fde1ded426dbadee1dbe9357e01",
+                "name": "Улица",
             },
-            "cap_closeup": {
-                "id": "f3a502ab41654a38be4717b215833fed",
-                "name": "Кепка чёрная — крупный",
+            "office_kepka": {
+                "id": "f5e69972c9b5430fbda5fe00b2e4f234",
+                "name": "Офис (кепка)",
             },
         },
         # Новый голос Максима — клон ElevenLabs (21 мая 2026, более похожий).
@@ -8680,6 +8681,69 @@ async def _consume_selfvoice_audio(update: Update, context: ContextTypes.DEFAULT
     )
 
 
+async def _consume_voiceover_ownvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принять голосовое как ОЗВУЧКУ ролика (своим голосом вместо TTS).
+
+    В отличие от `_consume_selfvoice_audio` (который шлёт запись сразу в аватар),
+    здесь запись становится `voice_part_0.mp3` проекта/карточки — единственной
+    частью озвучки. Дальше обычная генерация аватара (Avatar 3/IV) и сборка берут
+    эту запись (мёрджат voice_part по числу voice_parts). Заменяет ИИ-голос.
+    """
+    user_id = update.effective_user.id
+    data = pending.get(user_id, {})
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        await update.message.reply_text("Пришли голосовое сообщение (запись).")
+        return
+    msg = await update.message.reply_text("🎤 Принял голосовое, сохраняю как озвучку…")
+    tg_file = await context.bot.get_file(voice.file_id)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        await tg_file.download_to_drive(tmp.name)
+        ogg = tmp.name
+    mp3 = str(ASSETS_DIR / "voice_part_0.mp3")
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-y", "-i", ogg, "-c:a", "libmp3lame", "-b:a", "128k", mp3],
+            capture_output=True, timeout=120,
+        )
+    except Exception as e:
+        await msg.edit_text(f"❌ Не смог конвертировать аудио: {e}")
+        return
+    if not Path(mp3).exists() or Path(mp3).stat().st_size == 0:
+        await msg.edit_text("❌ Конвертация не удалась — пришли голосовое ещё раз.")
+        return
+
+    # Своя запись = ОДНА часть озвучки целиком, заменяет TTS.
+    text = (data.get("script") or "Своя озвучка (запись)").strip()[:300]
+    data["voice_parts"] = [text]
+    data["voice_approved"] = [True]
+    data["state"] = None
+    notion_id = data.get("notion_page_id")
+    if notion_id:
+        try:
+            _save_voice_file(notion_id, 0, mp3)
+            _save_voice_meta(notion_id, data["voice_parts"], data["voice_approved"])
+        except Exception as e:
+            logger.warning(f"[voiceover_ownvoice] save to card failed: {e}")
+    try:
+        _save_to_project(data, "voice_part_0.mp3", mp3)
+    except Exception as e:
+        logger.warning(f"[voiceover_ownvoice] save to project failed: {e}")
+    pending[user_id] = data
+    _save_pending(pending)
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Сгенерировать аватар", callback_data="heygen_looks")],
+        [InlineKeyboardButton("✅ Готово", callback_data="finish")],
+    ])
+    await msg.edit_text(
+        "✅ Своя озвучка сохранена — она заменила ИИ-голос для этого ролика.\n"
+        "Дальше генерируй аватар: он будет говорить твоим голосом.",
+        reply_markup=kb,
+    )
+
+
 async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle voice messages — transcribe then generate script."""
     user_id = update.effective_user.id
@@ -8698,6 +8762,11 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Перехватываем ДО Whisper — нам нужен сам аудиофайл, не транскрипция.
     if state == "awaiting_selfvoice":
         await _consume_selfvoice_audio(update, context)
+        return
+
+    # «Свой голос» на шаге ОЗВУЧКИ: запись становится озвучкой ролика (вместо TTS).
+    if state == "awaiting_voiceover_ownvoice":
+        await _consume_voiceover_ownvoice(update, context)
         return
 
     logger.info(f"[user:{user_id}] Голосовое сообщение")
@@ -9777,6 +9846,8 @@ def _voice_panel_keyboard(data: dict) -> InlineKeyboardMarkup:
         row.append(InlineKeyboardButton(f"🔧 {i+1}", callback_data=f"voice_cfg:{i}"))
         buttons.append(row)
     buttons.append([InlineKeyboardButton("🔄 Переозвучить всё", callback_data="voiceover")])
+    # Альтернатива TTS: озвучить ролик СВОИМ голосом (запись заменяет ИИ-голос).
+    buttons.append([InlineKeyboardButton("🎤 Озвучить своим голосом", callback_data="voiceover_ownvoice")])
     if all(approved):
         buttons.append([InlineKeyboardButton("✅ Всё утверждено — готово", callback_data="finish")])
     return InlineKeyboardMarkup(buttons)
@@ -16854,6 +16925,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка отправки: {e}")
             except Exception:
                 pass
+        return
+
+    if query.data == "voiceover_ownvoice":
+        # Озвучить ролик своим голосом вместо TTS (с шага озвучки).
+        data["state"] = "awaiting_voiceover_ownvoice"
+        _save_pending(pending)
+        await query.answer()
+        await query.message.reply_text(
+            "🎤 Пришли голосовое сообщение — оно станет озвучкой ролика и заменит "
+            "ИИ-голос. Запиши весь текст одним сообщением (как хочешь, чтобы аватар "
+            "это сказал)."
+        )
         return
 
     if query.data == "finish":

@@ -11,7 +11,7 @@ import os, sys, time, subprocess
 import httpx
 
 KEY = os.environ["HEYGEN_KEY"]
-AVATAR = "a0bddf71c30c42aaa4cf4e4143039628"  # «Бежевый свитер — природа»
+AVATAR = "89408fde1ded426dbadee1dbe9357e01"  # max_outdoor (новый, 24 мая 2026)
 SRC = "_video_analysis/audio.mp3"
 CLIP = "_smoke_own_voice_6s.mp3"
 H = {"X-Api-Key": KEY}
