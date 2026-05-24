@@ -44,6 +44,19 @@ MAX_BROLL_SEC = 5  # max duration of each B-roll insert in dynamic mode
 # 1.025 = 2.5% overscan, eats ~13px from each side, keeps head centered.
 AVATAR_OVERSCAN = 1.025
 
+# Vertical crop offset (px) for the avatar in the bottom-half / split layout.
+# The avatar is overscan-scaled, then a 1080×960 window is cropped starting at
+# this Y. SMALLER = window starts higher in the source → more headroom (the head
+# isn't clipped) and the avatar sits a touch LOWER in the panel. Per-brand
+# because avatar framing differs: Maksim's new avatars (24 May 2026) are framed
+# higher → the legacy 280 clipped the top of his head. Tune per avatar framing.
+DEFAULT_AVATAR_CROP_Y = 280
+_AVATAR_CROP_Y_BY_BRAND = {"maksim": 120}
+
+
+def _avatar_crop_y(brand_name: str) -> int:
+    return _AVATAR_CROP_Y_BY_BRAND.get(brand_name, DEFAULT_AVATAR_CROP_Y)
+
 # Font directory on the server (Montserrat Black etc.)
 FONT_DIR = Path(__file__).parent / "assets" / "fonts"
 
@@ -639,6 +652,7 @@ def _assemble_split(
     avatar_duration: float,
     tmp_dir: Path,
     output_path: Path,
+    avatar_crop_y: int = DEFAULT_AVATAR_CROP_Y,
 ) -> Path:
     """Build split-screen: B-roll top + avatar bottom.
 
@@ -731,10 +745,9 @@ def _assemble_split(
 
     # ── 3. Normalize avatar → 1080×avatar_h with overscan ──────────────────
     # Overscan (~2.5%) eats HeyGen's 1-3px edge borders before cropping.
-    # AVATAR_CROP_Y=280 keeps the framing consistent across both modes: in
-    # compact mode the crop window just extends further down the torso,
-    # which reads naturally because the avatar is standing/seated upright.
-    AVATAR_CROP_Y = 280
+    # avatar_crop_y is per-brand (see _avatar_crop_y) — smaller = more headroom
+    # so the head isn't clipped in the bottom half.
+    AVATAR_CROP_Y = avatar_crop_y
     overscan_w = int(CANVAS_W * AVATAR_OVERSCAN)    # 1107
     overscan_h = int(avatar_h * AVATAR_OVERSCAN)
     avatar_bot = tmp_dir / "avatar_bot.mp4"
@@ -972,6 +985,7 @@ def _assemble_pro(
     tmp_dir: Path,
     output_path: Path,
     split_anchor_offsets: dict[int, float] | None = None,
+    avatar_crop_y: int = DEFAULT_AVATAR_CROP_Y,
 ) -> Path:
     """Script-driven pro montage with mixed layouts per segment.
 
@@ -1000,7 +1014,7 @@ def _assemble_pro(
         raise AssemblyError("Пустой монтажный план.")
 
     n_broll = len(broll_paths)
-    AVATAR_CROP_Y = 280  # same as split mode
+    AVATAR_CROP_Y = avatar_crop_y  # per-brand (see _avatar_crop_y); was fixed 280
 
     # ── 1. Prepare avatar: full-screen version (with HeyGen edge overscan) ──
     avatar_full = tmp_dir / "pro_avatar_full.mp4"
@@ -1645,11 +1659,13 @@ def assemble_auto_montage(
     final_out = project_dir / "final_auto.mp4"
 
     try:
+        _crop_y = _avatar_crop_y(brand_name)
         if layout == "pro" and montage_plan:
             _assemble_pro(
                 avatar_path, broll_paths, avatar_duration,
                 montage_plan, tmp_dir, final_out,
                 split_anchor_offsets=smart_anchor_offsets,
+                avatar_crop_y=_crop_y,
             )
         elif layout == "dynamic":
             _assemble_dynamic(
@@ -1660,6 +1676,7 @@ def assemble_auto_montage(
             _assemble_split(
                 avatar_path, broll_paths, avatar_duration,
                 tmp_dir, final_out,
+                avatar_crop_y=_crop_y,
             )
 
         final_size = final_out.stat().st_size / 1024 / 1024
