@@ -57,6 +57,84 @@ _AVATAR_CROP_Y_BY_BRAND = {"maksim": 120}
 def _avatar_crop_y(brand_name: str) -> int:
     return _AVATAR_CROP_Y_BY_BRAND.get(brand_name, DEFAULT_AVATAR_CROP_Y)
 
+
+# ── Automatic avatar head framing (avatar-agnostic) ─────────────────────────
+# Instead of a hand-tuned crop_y per avatar, detect the head on a sampled frame
+# and compute the crop so the head always has the same headroom in the bottom
+# half — works for any new avatar (5, 6, 7…). Falls back to the per-brand/default
+# constant if OpenCV is missing or no face is found.
+_HEAD_HEADROOM_FRAC = 0.10  # fraction of the half-panel kept as air above the head
+
+
+def _crop_y_from_head_fraction(head_top_frac: float) -> int:
+    """Pure geometry: head-top (0..1 of the 1080×1920 frame) → crop_y for the
+    overscan-scaled avatar so the head keeps ~10% headroom in the 960 window."""
+    scaled_h = int(round(CANVAS_H * AVATAR_OVERSCAN))   # 1968
+    headroom = int(round(_HEAD_HEADROOM_FRAC * HALF_H)) # ~96
+    cy = int(round(head_top_frac * scaled_h)) - headroom
+    return max(0, min(cy, scaled_h - HALF_H))           # clamp [0, 1008]
+
+
+def _detect_head_top_fraction(avatar_path: Path, tmp_dir: Path | None = None) -> float | None:
+    """Detect the top of the head as a fraction (0..1) of the avatar frame height.
+
+    Samples one frame ~1s in and runs OpenCV Haar frontal-face detection, then
+    lifts the box top by ~35% of face height to include forehead/hair. Returns
+    ``None`` if OpenCV is unavailable or no face is found (caller falls back)."""
+    try:
+        import cv2
+    except Exception:
+        logger.info("[assembler] OpenCV not installed → head-detect skipped")
+        return None
+    out_dir = tmp_dir or avatar_path.parent
+    frame_png = out_dir / f"_headdet_{avatar_path.stem}.png"
+    try:
+        _run(
+            ["ffmpeg", "-y", "-ss", "1", "-i", str(avatar_path),
+             "-frames:v", "1", str(frame_png)],
+            "headdet: extract frame",
+        )
+        if not frame_png.exists():
+            return None
+        img = cv2.imread(str(frame_png))
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        faces = cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=5,
+            minSize=(int(w * 0.10), int(w * 0.10)),
+        )
+        if len(faces) == 0:
+            logger.info("[assembler] head-detect: no face found")
+            return None
+        fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])  # largest face
+        head_top = max(0, fy - int(0.35 * fh))  # crown/hair sits above the box
+        return head_top / float(h)
+    except Exception as e:
+        logger.warning(f"[assembler] head-detect failed: {e}")
+        return None
+    finally:
+        try:
+            frame_png.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _resolve_avatar_crop_y(avatar_path: Path, brand_name: str,
+                           tmp_dir: Path | None = None) -> int:
+    """Auto head-detect → crop_y; fall back to per-brand/default on failure."""
+    frac = _detect_head_top_fraction(avatar_path, tmp_dir)
+    if frac is None:
+        cy = _avatar_crop_y(brand_name)
+        logger.info(f"[assembler] crop_y fallback (brand={brand_name}) = {cy}")
+        return cy
+    cy = _crop_y_from_head_fraction(frac)
+    logger.info(f"[assembler] crop_y auto (head_top_frac={frac:.3f}) = {cy}")
+    return cy
+
 # Font directory on the server (Montserrat Black etc.)
 FONT_DIR = Path(__file__).parent / "assets" / "fonts"
 
@@ -1659,7 +1737,9 @@ def assemble_auto_montage(
     final_out = project_dir / "final_auto.mp4"
 
     try:
-        _crop_y = _avatar_crop_y(brand_name)
+        # Auto head-detect → consistent headroom for ANY avatar; falls back to
+        # the per-brand/default constant if OpenCV/face-detect is unavailable.
+        _crop_y = _resolve_avatar_crop_y(avatar_path, brand_name, tmp_dir)
         if layout == "pro" and montage_plan:
             _assemble_pro(
                 avatar_path, broll_paths, avatar_duration,
