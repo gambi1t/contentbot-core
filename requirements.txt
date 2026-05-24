@@ -20,3 +20,6 @@ httpx==0.28.1
 # когда подключим TikTok-публикацию (на v1 — отложено).
 # tiktokautouploader
 
+
+# Face detection for auto avatar head-framing in 50/50 montage (video_assembler)
+opencv-python-headless
