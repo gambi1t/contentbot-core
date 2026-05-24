@@ -15706,11 +15706,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         brand_tag = f" [{_brand_now}]" if _brand_now != "default" else ""
-        await query.edit_message_text(
+        _looks_text = (
             f"🤖 Выбери лук аватара для генерации{brand_tag}:\n\n"
-            f"💰 Баланс HeyGen: {quota} кредитов",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            f"💰 Баланс HeyGen: {quota} кредитов"
         )
+        _looks_kb = InlineKeyboardMarkup(buttons)
+        # «Другой лук / версия» приходит с ВИДЕО-сообщения (доставка аватара) —
+        # edit_message_text на медиа падает, поэтому шлём новым сообщением.
+        try:
+            await query.edit_message_text(_looks_text, reply_markup=_looks_kb)
+        except Exception:
+            await query.get_bot().send_message(
+                chat_id=query.message.chat_id, text=_looks_text, reply_markup=_looks_kb,
+            )
         return
 
     # Handler: запрос фото для регистрации custom photo avatar.
