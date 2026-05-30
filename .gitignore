@@ -71,3 +71,7 @@ maksim_context_from_gpt.md
 .vscode/
 *.bak
 *.bak.*
+
+# secrets (never commit)
+token_insta.txt
+instagram_token.json

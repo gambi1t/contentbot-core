@@ -223,11 +223,20 @@ def _render(comp_id: str, out_path: Path) -> tuple[bool, str]:
 
 
 def _render_all(out_dir: Path) -> tuple[list[Path], list[str]]:
-    """Рендерит все 6. → (готовые_клипы, ошибки)."""
+    """Рендерит все 6 AutoBroll-композиций. → (готовые_клипы, ошибки).
+
+    W1 (27 May 2026): namespace separation. Раньше писал в
+    `out_dir/broll_NN.mp4` — тот же namespace что и SMM-загрузки через
+    «📥 Готовые материалы». При сборке всё бралось в кучу. Теперь AI-вставки
+    идут в `out_dir/autobroll/auto_NN.mp4` — отдельная папка, `_find_broll`
+    в video_assembler.py выбирает источник по mode.
+    """
+    autobroll_dir = out_dir / "autobroll"
+    autobroll_dir.mkdir(parents=True, exist_ok=True)
     clips: list[Path] = []
     errors: list[str] = []
     for i, comp_id in enumerate(COMP_IDS, start=1):
-        out_path = out_dir / f"broll_{i:02d}.mp4"
+        out_path = autobroll_dir / f"auto_{i:02d}.mp4"
         ok, err = _render(comp_id, out_path)
         if ok:
             clips.append(out_path)

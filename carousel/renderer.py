@@ -183,7 +183,7 @@ def render_m2(t: dict) -> str:
 <div class="eyebrow">{t['kicker']}</div>
 <div class="counter">{t['counter']}</div>
 <div class="hero">{t['hero']}</div>
-<div class="stacked"><div class="top">ТОП</div><div class="word">{t['hero_word'] or ''}</div></div>
+<div class="stacked"><div class="word">{t['hero_word'] or ''}</div></div>
 <div class="maintitle">{t['title_main']}<span class="l2">{t['title_accent']}</span></div>
 <div class="subtitle">{t['subtitle']} · {t['handle']}</div>
 <div class="check"></div>

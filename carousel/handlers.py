@@ -37,6 +37,213 @@ from . import renderer as carousel_renderer
 logger = logging.getLogger(__name__)
 
 
+# ─── Persistent draft storage (F1 fix, 26 мая 2026) ──────────────────────
+# Раньше: late-import `bot` внутри `_pending_io` → когда bot.py запущен как
+# `python bot.py` (под __main__), `import bot` грузил файл второй раз →
+# два экземпляра `pending`, тихие расхождения. Симптом: carousel.llm logger
+# не попадал в journalctl (второй module instance, свой logger handler).
+#
+# Решение: pending живёт в bot_state.py, импортируется один раз и в bot.py,
+# и здесь. Python кэширует module в sys.modules — повторных загрузок нет.
+from bot_state import pending, save_pending
+
+
+def _user_id_from_update(update: Update) -> int:
+    """Извлечь user_id из любого типа update (callback or message)."""
+    if update.callback_query and update.callback_query.from_user:
+        return update.callback_query.from_user.id
+    if update.effective_user:
+        return update.effective_user.id
+    raise RuntimeError("cannot resolve user_id from update")
+
+
+def _load_carousel_draft(user_id: int) -> dict | None:
+    return (pending.get(user_id) or {}).get("carousel_draft")
+
+
+def _save_carousel_draft(user_id: int, draft: dict) -> None:
+    pending.setdefault(user_id, {})["carousel_draft"] = draft
+    save_pending(pending)
+
+
+def _drop_carousel_draft(user_id: int) -> None:
+    p = pending.get(user_id)
+    if p and "carousel_draft" in p:
+        del p["carousel_draft"]
+        save_pending(pending)
+
+
+def _persist_carousel_pngs(png_paths, project_dir):
+    """Копирует PNG-слайды карусели из temp-папки в `<project_dir>/carousel/`.
+
+    Раньше PNG жили только в /tmp/ и пропадали после рестарта/cleanup OS.
+    Теперь — в проекте карточки, попадают в zip-архив, переживают рестарт.
+    Если project_dir = None — возвращает None (карусель не из карточки).
+    """
+    if not project_dir or not png_paths:
+        return None
+    import shutil as _sh
+    from pathlib import Path as _Path
+    dest_dir = _Path(project_dir) / "carousel"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for src in png_paths:
+        src_p = _Path(src)
+        if not src_p.exists():
+            continue
+        dest = dest_dir / src_p.name
+        try:
+            _sh.copy2(str(src_p), str(dest))
+        except Exception as e:
+            logger.warning(f"[carousel] persist PNG failed for {src_p.name}: {e}")
+    return dest_dir
+
+
+# ─── A: Publish PNG via nginx + Notion (28 May 2026) ─────────────────────
+# nginx config (см. /etc/nginx/sites-available/maksim-bot.panferov-ai.ru):
+#   /media/ → /srv/bot-media-maksim/
+# Кладём PNG в /srv/bot-media-maksim/carousel/<card_id_short>/slide_NN.png
+# → отдаётся https://maksim-bot.panferov-ai.ru/media/carousel/<id>/slide_NN.png
+# → Notion вставляет image-блок с этим external URL прямо в страницу карточки.
+
+_CAROUSEL_MEDIA_ROOT_BY_BRAND = {
+    "maksim": Path("/srv/bot-media-maksim"),
+}
+_CAROUSEL_URL_BASE_BY_BRAND = {
+    "maksim": "https://maksim-bot.panferov-ai.ru/media",
+}
+_CAROUSEL_NOTION_HEADING_MARKER = "🎨 Карусель"
+
+
+def _carousel_media_path_for_brand(brand: str | None):
+    """Корень media-папки для бренда. None если для бренда не настроено."""
+    if not brand:
+        return None
+    return _CAROUSEL_MEDIA_ROOT_BY_BRAND.get(brand)
+
+
+def _carousel_media_url_base_for_brand(brand: str | None) -> str | None:
+    """Базовый URL nginx-раздачи для бренда (без trailing slash)."""
+    if not brand:
+        return None
+    return _CAROUSEL_URL_BASE_BY_BRAND.get(brand)
+
+
+def _publish_carousel_pngs_to_media(
+    png_paths,
+    card_id_short: str,
+    brand: str,
+) -> list[str]:
+    """Копирует PNG в nginx-media папку, возвращает list of public URLs.
+
+    Возвращает [] если бренд не настроен или ошибка копирования.
+    Имена сохраняются (slide_NN.png).
+    """
+    media_root = _carousel_media_path_for_brand(brand)
+    url_base = _carousel_media_url_base_for_brand(brand)
+    if not media_root or not url_base or not png_paths:
+        return []
+    import shutil as _sh
+    target_dir = media_root / "carousel" / card_id_short
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"[carousel/media] mkdir failed: {e}")
+        return []
+    urls: list[str] = []
+    for src in png_paths:
+        src_p = Path(src)
+        if not src_p.exists():
+            continue
+        dest = target_dir / src_p.name
+        try:
+            _sh.copy2(str(src_p), str(dest))
+            urls.append(f"{url_base}/carousel/{card_id_short}/{src_p.name}")
+        except Exception as e:
+            logger.warning(f"[carousel/media] copy failed for {src_p.name}: {e}")
+    return urls
+
+
+def _build_carousel_notion_blocks(image_urls: list[str]) -> list[dict]:
+    """Список Notion-блоков для добавления карусели в страницу карточки.
+
+    Структура: heading_2 (с MARKER) + N image-блоков (external URL) + divider.
+    Marker нужен для поиска и удаления старых блоков при re-render.
+    """
+    n = len(image_urls)
+    heading_content = f"{_CAROUSEL_NOTION_HEADING_MARKER} — {n} слайдов"
+    blocks: list[dict] = [
+        {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [{"type": "text", "text": {"content": heading_content}}],
+            },
+        },
+    ]
+    for url in image_urls:
+        blocks.append({
+            "object": "block",
+            "type": "image",
+            "image": {"type": "external", "external": {"url": url}},
+        })
+    blocks.append({"object": "block", "type": "divider", "divider": {}})
+    return blocks
+
+
+def _delete_old_carousel_blocks_from_notion(notion_client, page_id: str) -> int:
+    """Найти и удалить старые carousel-блоки (heading + следующие image/divider).
+
+    Поиск по marker в heading_2. Возвращает количество удалённых блоков.
+    Делает один pass — если в странице несколько старых каруселей, чистит все.
+    """
+    deleted = 0
+    try:
+        resp = notion_client.blocks.children.list(block_id=page_id, page_size=100)
+        children = resp.get("results", [])
+    except Exception as e:
+        logger.warning(f"[carousel/notion] list children failed: {e}")
+        return 0
+    # Линейный проход: при каждом heading_2 с marker → удаляем его +
+    # следующие подряд image/divider пока не встретим другой heading или конец.
+    in_carousel_section = False
+    for blk in children:
+        btype = blk.get("type")
+        if btype == "heading_2":
+            heading_text = ""
+            try:
+                heading_text = blk["heading_2"]["rich_text"][0]["text"]["content"]
+            except (KeyError, IndexError):
+                pass
+            in_carousel_section = _CAROUSEL_NOTION_HEADING_MARKER in heading_text
+            if in_carousel_section:
+                try:
+                    notion_client.blocks.delete(block_id=blk["id"])
+                    deleted += 1
+                except Exception as e:
+                    logger.warning(f"[carousel/notion] delete heading failed: {e}")
+        elif in_carousel_section and btype in ("image", "divider"):
+            try:
+                notion_client.blocks.delete(block_id=blk["id"])
+                deleted += 1
+            except Exception as e:
+                logger.warning(f"[carousel/notion] delete {btype} failed: {e}")
+        else:
+            # Любой другой block-type закрывает carousel-секцию.
+            in_carousel_section = False
+    return deleted
+
+
+def _existing_carousel_for_card_detect(draft, notion_url) -> bool:
+    """True если в pending уже есть draft карусели для этой же карточки.
+
+    Используется в card_to_carousel — перед перезаписью спрашиваем юзера
+    «Открыть существующий / Заново». notion_url — из card.url.
+    """
+    if not draft or not notion_url:
+        return False
+    return draft.get("notion_url") == notion_url
+
+
 def _build_script_preview(slides: list[dict]) -> str:
     """Format slide JSON list as a readable script preview for Telegram.
 
@@ -116,6 +323,7 @@ async def generate_carousel_preview(
     chat_id: int | None = None,
     notion_url: str | None = None,
     template: str | None = None,    # "M1" / "M2" / None (let LLM pick)
+    seed_card_id: str | None = None,  # card_id из карточки (для PNG-persist + status-update)
 ) -> None:
     """Phase 1: generate JSON via Opus, show script preview with approve buttons.
 
@@ -159,15 +367,16 @@ async def generate_carousel_preview(
             pass
         return
 
-    # Store draft for phase 2
-    context.user_data["carousel_draft"] = {
+    # Store draft for phase 2 — persistent (bot.pending), переживает рестарт.
+    _save_carousel_draft(_user_id_from_update(update), {
         "slides": slides,
         "theme": theme,
         "n_slides": n_slides,
         "notion_url": notion_url,
         "chat_id": chat_id,
         "template": template,
-    }
+        "seed_card_id": seed_card_id,
+    })
 
     preview_text = _build_script_preview(slides)
     preview_text += (
@@ -204,11 +413,12 @@ async def render_carousel_from_draft(
 
     Idempotent: clears draft from user_data on success or hard failure.
     """
-    draft = context.user_data.get("carousel_draft")
+    uid = _user_id_from_update(update)
+    draft = _load_carousel_draft(uid)
     if not draft:
         await context.bot.send_message(
             chat_id=chat_id or update.effective_chat.id,
-            text="⚠️ Сценарий потерян (бот мог рестартнуть). Сделай карусель заново.",
+            text="⚠️ Сценарий потерян. Сделай карусель заново.",
         )
         return
 
@@ -288,24 +498,122 @@ async def render_carousel_from_draft(
     except Exception:
         pass
 
+    # ─── A (26 May 2026): сохранить PNG в projects/<card_id>/carousel/ ──
+    # Карусель собранная из карточки — её PNG живут в /tmp/ и пропадают.
+    # Копируем в persistent папку проекта чтобы попали в zip-архив, доступны
+    # через «📥 Скачать материалы», переживают рестарт сервера.
+    persisted_dir = None
+    notion_published = False
+    notion_status_updated = False
+    seed_card_id = draft.get("seed_card_id") or draft.get("notion_page_id")
+    if seed_card_id:
+        try:
+            # F1 fix: project_dir из bot_state (нет import bot — нет риска
+            # повторного import bot.py под __main__).
+            from bot_state import project_dir as _project_dir_fn
+            _tmp_data = {"notion_page_id": seed_card_id}
+            proj_dir = _project_dir_fn(_tmp_data)
+            persisted_dir = _persist_carousel_pngs(png_paths, proj_dir)
+            if persisted_dir:
+                logger.info(f"[carousel] {len(png_paths)} PNGs persisted → {persisted_dir}")
+        except Exception as e:
+            logger.warning(f"[carousel] PNG persist failed (non-fatal): {e}")
+
+        # A (28 May 2026): публикация PNG в nginx-media + image-блоки в Notion-страницу
+        # карточки. Юзер открывает страницу в Notion → видит готовые PNG inline,
+        # не лезет в Telegram скачивать.
+        try:
+            import bot as _bot
+            _brand = _bot._get_active_brand_name()
+            media_urls = _publish_carousel_pngs_to_media(
+                png_paths, card_id_short=seed_card_id[:20], brand=_brand,
+            )
+            if media_urls:
+                logger.info(
+                    f"[carousel/notion] {len(media_urls)} PNGs published → "
+                    f"{media_urls[0]}"
+                )
+                _notion = _bot.notion
+                # Удалим старые carousel-блоки если есть (re-render идемпотентен).
+                deleted = _delete_old_carousel_blocks_from_notion(_notion, seed_card_id)
+                if deleted:
+                    logger.info(f"[carousel/notion] removed {deleted} old carousel blocks")
+                # Добавим свежие.
+                _notion.blocks.children.append(
+                    block_id=seed_card_id,
+                    children=_build_carousel_notion_blocks(media_urls),
+                )
+                notion_published = True
+                logger.info(f"[carousel/notion] {len(media_urls)} image blocks added to {seed_card_id}")
+        except Exception as e:
+            logger.warning(f"[carousel/notion] publish failed (non-fatal): {e}", exc_info=True)
+
+        # B (28 May 2026): авто-обновление Notion-статуса карточки на
+        # «Готово к публикации». Кнопка submenu «📊 Сменить статус ▼»
+        # остаётся как override.
+        try:
+            import bot as _bot
+            await asyncio.to_thread(
+                _bot.update_notion_status,
+                seed_card_id,
+                "Готово к публикации",
+                _bot._get_active_brand_name(),
+            )
+            notion_status_updated = True
+            logger.info(f"[carousel/notion] status → «Готово к публикации» for {seed_card_id}")
+        except Exception as e:
+            logger.warning(f"[carousel/notion] status update failed (non-fatal): {e}")
+
     cover = slides[0]
     title = (cover.get("title_main") or "") + " " + (cover.get("title_accent") or "")
+    persist_line = (
+        f"\n💾 PNG сохранены в проект карточки (доступны через «📥 Скачать материалы»).\n"
+        if persisted_dir else ""
+    )
+    notion_line = (
+        f"📝 Слайды добавлены в Notion-страницу карточки.\n"
+        if notion_published else ""
+    )
+    status_line = (
+        f"✅ Статус карточки → <b>Готово к публикации</b>.\n"
+        if notion_status_updated else ""
+    )
     caption = (
         f"✅ <b>Карусель готова</b> — {len(slides)} слайдов\n\n"
         f"<i>{title.strip()}</i>\n"
-        f"<i>{cover.get('subtitle', '')}</i>\n\n"
+        f"<i>{cover.get('subtitle', '')}</i>\n"
+        f"{persist_line}{notion_line}{status_line}\n"
         f"📌 Для публикации в Instagram — скачать PNG (long-press на любом → Save) "
         f"и постить через @livedrive.tmn.\n\n"
         f"<i>(автопостинг в IG в MVP не подключён)</i>"
     )
+    # Draft НЕ удаляем сразу — оставляем чтобы юзер мог «✏️ Поправить ещё»
+    # (вернуться к точечной правке прямо из финального сообщения).
+    # Удалится при carousel_cancel / idea_back_to_menu / новой генерации.
     action_kb_rows = [
         [InlineKeyboardButton(
-            "🔄 Ещё карусель",
+            "✏️ Поправить ещё (вернуться к сценарию)",
+            callback_data="carousel_back_to_preview",
+        )],
+        [InlineKeyboardButton(
+            "🔄 Ещё карусель (новая)",
             callback_data="carousel_regen",
         )],
     ]
+    # B4 (26 May 2026): кнопка смены статуса карточки — ТОЛЬКО если карусель
+    # сделана из карточки (seed_card_id есть). Открывает submenu со списком
+    # PIPELINE_STATUSES, юзер сам решает куда передвинуть.
+    if seed_card_id:
+        action_kb_rows.append([InlineKeyboardButton(
+            "📊 Сменить статус карточки ▼",
+            callback_data="carousel_status_menu",
+        )])
     if notion_url:
         action_kb_rows.append([InlineKeyboardButton("📋 К карточке", url=notion_url)])
+    action_kb_rows.append([InlineKeyboardButton(
+        "✅ Готово — закрыть сценарий",
+        callback_data="carousel_finalize",
+    )])
     action_kb_rows.append([InlineKeyboardButton(
         "◀️ В главное меню", callback_data="idea_back_to_menu",
     )])
@@ -317,8 +625,75 @@ async def render_carousel_from_draft(
         reply_markup=InlineKeyboardMarkup(action_kb_rows),
     )
 
-    # Draft consumed
-    context.user_data.pop("carousel_draft", None)
+
+async def back_to_carousel_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    requested_card_id: str | None = None,
+) -> None:
+    """Возврат к текстовому preview из финального меню после рендера PNG.
+
+    Триггерится кнопкой «✏️ Поправить ещё». Берёт draft (он persistent в
+    pending), показывает _build_script_preview + _approval_keyboard.
+
+    F6 fix (ChatGPT review M8): если передан `requested_card_id` —
+    проверяем что draft принадлежит ИМЕННО этой карточке. Без проверки
+    юзер из C-диалога по карточке B мог открыть draft карточки A — и потом
+    смена статуса/persist PNG ушли бы в чужую карточку.
+    """
+    uid = _user_id_from_update(update)
+    draft = _load_carousel_draft(uid)
+    if not draft:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="⚠️ Сценарий потерян — стартуй карусель заново через 🎨 в меню.",
+        )
+        return
+    if requested_card_id:
+        draft_card = draft.get("seed_card_id") or ""
+        # Сравниваем по prefix 20 — callback_data truncate, но в draft full id.
+        if not (draft_card and draft_card.startswith(requested_card_id[:20])
+                or draft_card[:20] == requested_card_id[:20]):
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=(
+                    "⚠️ Этот черновик принадлежит другой карточке. "
+                    "Открой нужную карточку и нажми «🎨 В карусель» заново."
+                ),
+            )
+            return
+    slides = draft["slides"]
+    notion_url = draft.get("notion_url")
+    preview_text = _build_script_preview(slides)
+    preview_text += (
+        "\n\n━━━━━━━━━━━━━━━━━━━━━\n"
+        "✏️ Готов поправить. Жми «<b>Точечная правка</b>» и опиши изменение, "
+        "потом снова «<b>Делаем PNG</b>» — карусель перерисуется."
+    )
+    if len(preview_text) > 4000:
+        preview_text = preview_text[:3900] + "\n\n<i>… (обрезано)</i>"
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=preview_text,
+        parse_mode="HTML",
+        reply_markup=_approval_keyboard(notion_url),
+        disable_web_page_preview=True,
+    )
+
+
+async def finalize_carousel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Явное закрытие draft карусели — кнопка «✅ Готово»."""
+    try:
+        _drop_carousel_draft(_user_id_from_update(update))
+    except Exception:
+        pass
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="✅ Сценарий карусели закрыт. PNG остались выше — копируй и постируй.",
+    )
 
 
 async def regenerate_carousel_preview(
@@ -330,7 +705,8 @@ async def regenerate_carousel_preview(
 
     Triggered by `carousel_regen` callback. If no draft → tell user to start over.
     """
-    draft = context.user_data.get("carousel_draft")
+    uid = _user_id_from_update(update)
+    draft = _load_carousel_draft(uid)
     if not draft:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -344,6 +720,7 @@ async def regenerate_carousel_preview(
         chat_id=draft.get("chat_id"),
         notion_url=draft.get("notion_url"),
         template=draft.get("template"),
+        seed_card_id=draft.get("seed_card_id"),
     )
 
 
@@ -352,7 +729,10 @@ async def cancel_carousel(
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
     """Drop draft and send «отменено». Triggered by `carousel_cancel`."""
-    context.user_data.pop("carousel_draft", None)
+    try:
+        _drop_carousel_draft(_user_id_from_update(update))
+    except Exception:
+        pass
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="✖️ Карусель отменена.",
@@ -373,7 +753,8 @@ async def apply_carousel_surgical_edit(
 
     Hard cap: 10 surgical iterations per draft.
     """
-    draft = context.user_data.get("carousel_draft")
+    uid = _user_id_from_update(update)
+    draft = _load_carousel_draft(uid)
     if not draft:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -416,9 +797,87 @@ async def apply_carousel_surgical_edit(
             pass
         return
 
+    # ─── F2 failure path: явный _surg_error от Sonnet (26 May 2026) ────
+    # Если Sonnet добавил `_surg_error` в первый слайд — это конкретная
+    # причина «не нашёл/не понял». Чистим служебные поля и НЕ обновляем
+    # draft. Проверяется ДО no-op detect (без этого equality бы сломалась
+    # на разном set ключей).
+    surg_error_msg = carousel_llm._extract_surg_error(new_slides)
+    if surg_error_msg:
+        logger.info(f"[carousel-surg] iter #{iters + 1}: _surg_error from Sonnet: {surg_error_msg!r}")
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚠️ <b>Правка не применена</b> — модель не нашла что менять.\n\n"
+                f"Причина: <i>{surg_error_msg[:200]}</i>\n\n"
+                "Переформулируй точнее (укажи слайд или поле):\n"
+                "• <i>«заголовок слайда 3 поменяй на …»</i>\n"
+                "• <i>«в кикере 2-го слайда замени X на Y»</i>"
+            ),
+            parse_mode="HTML",
+            reply_markup=_approval_keyboard(notion_url),
+            disable_web_page_preview=True,
+        )
+        # Counter НЕ инкрементим — failure не съедает лимит правок.
+        return
+
+    # ─── NO-OP detect (26 мая 2026) ────────────────────────────────────
+    # Sonnet иногда возвращает JSON байт-в-байт (не нашёл подстроку и не
+    # вернул _surg_error). Это generic no-op — даём общее сообщение.
+    is_noop = carousel_llm._slides_equal_normalized(slides, new_slides)
+    # P2: лог diff для будущей диагностики
+    changed_slides_count = sum(
+        1 for i, sl in enumerate(slides)
+        if not carousel_llm._slides_equal_normalized([sl], [new_slides[i]])
+    )
+    logger.info(
+        f"[carousel-surg] iter #{iters + 1}: no_op={is_noop}, "
+        f"changed_slides={changed_slides_count}/{len(slides)}"
+    )
+
+    if is_noop:
+        # Проверка: была ли это REPLACE-инструкция — если да, дать конкретный совет.
+        replace_pat = carousel_llm._extract_replace_pattern(instruction)
+        if replace_pat:
+            x, y = replace_pat
+            hint = (
+                f"Похоже, я не нашёл в сценарии подстроку <code>{x[:60]}</code>. "
+                f"Проверь точное написание (буквы, пробелы) и переформулируй — "
+                f"можно указать слайд: «<i>слайд 2: {x[:30]} → {y[:30]}</i>»."
+            )
+        else:
+            hint = (
+                "Модель не нашла что менять по этой инструкции. Переформулируй "
+                "поконкретнее: укажи слайд или поле "
+                "(«<i>заголовок слайда 3 поменяй на …</i>», "
+                "«<i>в кикере 2-го слайда замени X на Y</i>»)."
+            )
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "⚠️ <b>Правка не применена</b> — сценарий не изменился.\n\n"
+                f"{hint}\n\n"
+                "Можно ещё раз нажать «✏️ Точечная правка» или вернуться к "
+                "одобрению / переписать полностью."
+            ),
+            parse_mode="HTML",
+            reply_markup=_approval_keyboard(notion_url),
+            disable_web_page_preview=True,
+        )
+        # Counter НЕ инкрементим — это не успешная итерация.
+        return
+
     draft["slides"] = new_slides
     draft["surg_iterations"] = iters + 1
-    context.user_data["carousel_draft"] = draft
+    _save_carousel_draft(uid, draft)
 
     preview_text = _build_script_preview(new_slides)
     preview_text += (
@@ -458,6 +917,8 @@ __all__ = [
     "generate_carousel_preview",
     "render_carousel_from_draft",
     "regenerate_carousel_preview",
+    "back_to_carousel_preview",
+    "finalize_carousel",
     "cancel_carousel",
     "apply_carousel_surgical_edit",
     "render_and_send_carousel",  # alias

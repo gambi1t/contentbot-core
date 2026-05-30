@@ -33,6 +33,12 @@ YOUTUBE_TOKEN_FILE = Path(__file__).parent / "youtube_token.json"
 META_APP_ID = os.getenv("META_APP_ID", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")
 INSTAGRAM_ACCESS_TOKEN_FILE = Path(__file__).parent / "instagram_token.json"
+# Целевой IG-аккаунт для подключения (без @). У владельца может быть несколько
+# FB-Страниц с привязанным Instagram (напр. картинг @livedrive_karting +
+# личный бренд @yumsunov86). Без этого код брал ПЕРВУЮ Страницу с IG из
+# /me/accounts — мог подключить не тот аккаунт. Если задан — выбираем строго
+# Страницу, чей IG.username совпадает. Пусто → старое поведение (первая).
+INSTAGRAM_TARGET_USERNAME = os.getenv("INSTAGRAM_TARGET_USERNAME", "").strip().lstrip("@").lower()
 
 # VK Clips
 VK_APP_ID = os.getenv("VK_APP_ID", "")
@@ -313,6 +319,12 @@ def _save_instagram_token(token_data: dict):
 
 def _refresh_instagram_token(token_data: dict) -> dict | None:
     """Refresh Facebook long-lived token (valid 60 days, refreshable)."""
+    # System User page-токены НЕ растухают и НЕ рефрешатся через user-флоу
+    # fb_exchange_token. Попытка рефреша вернула бы None / сломала бы токен
+    # (баг C1: тихо отвалился бы ~через 50 дней). Просто отдаём как есть.
+    if token_data.get("source") == "system_user":
+        return token_data
+
     access_token = token_data.get("access_token")
     if not access_token:
         return None
@@ -332,10 +344,10 @@ def _refresh_instagram_token(token_data: dict) -> dict | None:
         return None
 
     new_data = resp.json()
-    # Preserve our stored metadata
-    new_data["ig_user_id"] = token_data.get("ig_user_id")
-    new_data["page_id"] = token_data.get("page_id")
-    new_data["page_access_token"] = token_data.get("page_access_token")
+    # Preserve our stored metadata (включая source/ig_username — M3)
+    for k in ("ig_user_id", "page_id", "page_access_token", "source", "ig_username"):
+        if token_data.get(k) is not None:
+            new_data[k] = token_data.get(k)
     new_data["obtained_at"] = time.time()
     _save_instagram_token(new_data)
     logger.info("Instagram/FB token refreshed")
@@ -347,6 +359,11 @@ def _get_instagram_access_token() -> str | None:
     token_data = _load_instagram_token()
     if not token_data:
         return None
+
+    # System User page-токен бессрочный — НЕ рефрешим (баг C1: иначе через
+    # 50 дней user-флоу refresh тихо сломал бы постинг Максима).
+    if token_data.get("source") == "system_user":
+        return token_data.get("page_access_token") or token_data.get("access_token")
 
     # Refresh user token if older than 50 days
     obtained = token_data.get("obtained_at", 0)
@@ -371,6 +388,65 @@ def instagram_is_connected() -> bool:
     """Check if Instagram token exists with ig_user_id."""
     data = _load_instagram_token()
     return data is not None and data.get("ig_user_id") is not None
+
+
+def ensure_page_subscribed() -> bool:
+    """Гарантировать, что Страница подписана на webhook-поле `feed` (комментарии).
+
+    Корень нестабильности Comment-to-DM воронки («то работало, то слетало»):
+    подписка Страницы (`subscribed_apps`) делалась ОДИН раз в OAuth-флоу
+    (instagram_exchange_code) и не восстанавливалась. При перевыдаче токена /
+    смене прав / операциях Meta она обнулялась → Meta переставала слать
+    comment-вебхуки → воронка тихо умирала. Эта функция вызывается при старте
+    webhook-сервера и пере-подписывает, если `feed` пропал.
+
+    Подписываемся ТОЛЬКО на `feed` — этого достаточно для Comment-to-DM
+    (комментарии), а DM шлётся через instagram_manage_messages. messaging-поля
+    требуют pages_messaging и для воронки не нужны.
+
+    Идемпотентно. Не бросает. Возвращает True, если в итоге `feed` подписан.
+    """
+    token_data = _load_instagram_token()
+    if not token_data:
+        logger.info("[ig-subscribe] нет instagram_token.json — пропуск")
+        return False
+    page_id = token_data.get("page_id")
+    page_token = token_data.get("page_access_token") or token_data.get("access_token")
+    if not page_id or not page_token:
+        logger.warning("[ig-subscribe] нет page_id/page_access_token — пропуск")
+        return False
+
+    try:
+        cur = requests.get(
+            f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
+            params={"access_token": page_token}, timeout=15,
+        )
+        already = False
+        if cur.status_code == 200:
+            for app in cur.json().get("data", []):
+                if "feed" in (app.get("subscribed_fields") or []):
+                    already = True
+                    break
+        if already:
+            logger.info("[ig-subscribe] подписка на feed уже активна")
+            return True
+
+        sub = requests.post(
+            f"https://graph.facebook.com/v21.0/{page_id}/subscribed_apps",
+            data={"subscribed_fields": "feed", "access_token": page_token}, timeout=15,
+        )
+        if sub.status_code == 200 and sub.json().get("success"):
+            logger.info("[ig-subscribe] подписка на feed восстановлена ✅")
+            return True
+        # Часто: токен без pages_manage_metadata (нужен перевыпуск) — логируем, не падаем
+        logger.warning(
+            f"[ig-subscribe] не удалось подписаться на feed: "
+            f"{sub.status_code} {sub.text[:200]}"
+        )
+        return False
+    except Exception as e:
+        logger.warning(f"[ig-subscribe] ошибка проверки/подписки: {e}")
+        return False
 
 
 def instagram_auth_url() -> str:
@@ -446,33 +522,69 @@ def instagram_exchange_code(code: str) -> dict | None:
         logger.error("No Facebook Pages found. Instagram must be connected to a Facebook Page.")
         return None
 
-    # Step 4: Find page with Instagram business account
-    ig_user_id = None
-    page_id = None
-    page_access_token = None
-
+    # Step 4: Find the Facebook Page whose connected Instagram we want.
+    # Собираем ВСЕ Страницы с привязанным IG (id + username), затем:
+    #   - если задан INSTAGRAM_TARGET_USERNAME → берём строго совпадающий IG;
+    #   - иначе → первый найденный (старое поведение).
+    # Запрашиваем username, чтобы различить картинг (@livedrive_karting) и
+    # личный бренд (@yumsunov86) — раньше брался первый попавшийся.
+    ig_candidates: list[dict] = []  # {ig_user_id, username, page_id, page_token, page_name}
     for page in pages:
-        page_id = page["id"]
-        page_access_token = page["access_token"]
-
+        _pid = page["id"]
+        _ptoken = page["access_token"]
         ig_resp = requests.get(
-            f"https://graph.facebook.com/v21.0/{page_id}",
+            f"https://graph.facebook.com/v21.0/{_pid}",
             params={
-                "fields": "instagram_business_account",
-                "access_token": page_access_token,
+                "fields": "instagram_business_account{id,username}",
+                "access_token": _ptoken,
             },
             timeout=15,
         )
         if ig_resp.status_code == 200:
             ig_account = ig_resp.json().get("instagram_business_account")
             if ig_account:
-                ig_user_id = ig_account["id"]
-                logger.info(f"Found Instagram business account: {ig_user_id} (page: {page.get('name')})")
-                break
+                ig_candidates.append({
+                    "ig_user_id": ig_account["id"],
+                    "username": (ig_account.get("username") or "").lower(),
+                    "page_id": _pid,
+                    "page_access_token": _ptoken,
+                    "page_name": page.get("name", ""),
+                })
 
-    if not ig_user_id:
+    if not ig_candidates:
         logger.error("No Instagram business account found on any Facebook Page")
         return None
+
+    logger.info(
+        "IG-кандидаты: " + ", ".join(
+            f"@{c['username']}(page:{c['page_name']})" for c in ig_candidates
+        )
+    )
+
+    chosen = None
+    if INSTAGRAM_TARGET_USERNAME:
+        chosen = next(
+            (c for c in ig_candidates if c["username"] == INSTAGRAM_TARGET_USERNAME),
+            None,
+        )
+        if not chosen:
+            found = ", ".join(f"@{c['username']}" for c in ig_candidates)
+            logger.error(
+                f"Целевой IG @{INSTAGRAM_TARGET_USERNAME} не найден среди "
+                f"привязанных Страниц. Найдены: {found}. Проверь привязку "
+                f"@{INSTAGRAM_TARGET_USERNAME} к FB-Странице."
+            )
+            return None
+    else:
+        chosen = ig_candidates[0]  # legacy: первый найденный
+
+    ig_user_id = chosen["ig_user_id"]
+    page_id = chosen["page_id"]
+    page_access_token = chosen["page_access_token"]
+    logger.info(
+        f"Выбран Instagram @{chosen['username']} (id={ig_user_id}, "
+        f"page='{chosen['page_name']}')"
+    )
 
     # Step 5: Subscribe page to webhook events (comments, messages)
     try:

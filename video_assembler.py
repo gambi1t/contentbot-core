@@ -212,14 +212,41 @@ def _find_avatar(project_dir: Path) -> Path:
     return candidates[0]
 
 
-def _find_broll(project_dir: Path) -> list[Path]:
-    """Return broll_*.mp4 files sorted by numeric suffix."""
+def _find_broll(project_dir: Path, mode: str = "mix") -> list[Path]:
+    """Return видео-клипы из project_dir для сборки.
+
+    W1 (27 May 2026): добавлен параметр `mode` для разделения источников.
+
+    - `mode='real'` → только `broll_*.mp4` (SMM-загрузки / YouTube-нарезки / прочее).
+    - `mode='ai'`   → только `autobroll/auto_*.mp4` (Remotion-вставки от AutoBroll).
+    - `mode='hf'`   → только `hyperframes/hf_*.mp4` (HyperFrames-вставки).
+    - `mode='mix'`  → все источники (default, backward-compat).
+
+    Раньше AutoBroll писал в `broll_NN.mp4` — общий namespace с SMM. При
+    сборке всё бралось в кучу → AI-визуалы перемешивались с реальными.
+    Теперь AutoBroll → `autobroll/auto_NN.mp4`, HyperFrames →
+    `hyperframes/hf_NN.mp4` — namespace'ы разделены, движки не мешаются.
+
+    Сортировка по числовому суффиксу.
+    """
     def _sort_key(p: Path) -> int:
         try:
             return int(p.stem.split("_")[-1])
         except (ValueError, IndexError):
             return 999
-    return sorted(project_dir.glob("broll_*.mp4"), key=_sort_key)
+
+    paths: list[Path] = []
+    if mode in ("real", "mix"):
+        paths.extend(project_dir.glob("broll_*.mp4"))
+    if mode in ("ai", "mix"):
+        autobroll_dir = project_dir / "autobroll"
+        if autobroll_dir.exists():
+            paths.extend(autobroll_dir.glob("auto_*.mp4"))
+    if mode in ("hf", "mix"):
+        hyperframes_dir = project_dir / "hyperframes"
+        if hyperframes_dir.exists():
+            paths.extend(hyperframes_dir.glob("hf_*.mp4"))
+    return sorted(paths, key=_sort_key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1455,6 +1482,7 @@ def assemble_auto_montage(
     montage_plan: list[dict] | None = None,
     brand_name: str = "default",
     smart_mix_cfg: dict | None = None,
+    broll_mode: str = "mix",
 ) -> Path:
     """Build a 9:16 video from avatar + B-roll.
 
@@ -1495,7 +1523,12 @@ def assemble_auto_montage(
         raise AssemblyError(f"Проект не найден: {project_dir}")
 
     avatar_path = _find_avatar(project_dir)
-    video_paths = _find_broll(project_dir)
+    # broll_mode разводит источники: 'real' (SMM broll_*), 'ai' (Remotion
+    # autobroll/), 'hf' (HyperFrames hyperframes/), 'mix' (все). КРИТИЧНО для
+    # pro/ai-плана: бот строит montage_plan из ТОГО ЖЕ списка через
+    # _find_broll(proj_dir, mode), иначе план и клипы рассинхронизируются
+    # (баг C1: графика из подпапок не попадала в ролик / шла не в те сегменты).
+    video_paths = _find_broll(project_dir, mode=broll_mode)
     project_photos = _find_project_photos(project_dir)
 
     avatar_duration = _probe_duration(avatar_path)

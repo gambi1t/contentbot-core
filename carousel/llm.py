@@ -69,6 +69,18 @@ _SYSTEM_PROMPT = """Ты — content-strategist для Максима Юмсун
 - Знаки: тире (—) для усиления, не дефис (-)
 - Двусмысленность: «он любит её больше всех» — кого больше? Переформулировать
 
+🛑 ОСОБЕННО ВАЖНО — НЕ РЕЖЬ ХВОСТ СЛОВА РАДИ ЛИМИТА СИМВОЛОВ:
+- ВЫРАЖЕНИЯ ВНУТРИ title/title_main/title_accent — это часть фразы,
+  продолжающей kicker и body. Если title продолжает мысль «который стоил X»,
+  то X стоит в наречии или род./вин. падеже («дорого», «миллион», «здоровья»),
+  а НЕ в краткой форме прилагательного («дорог» = «он дорог», не «стоил дорог»).
+- ПРИМЕР ПРАВИЛЬНО: «КОТОРЫЙ СТОИЛ ДОРОГО»
+- ПРИМЕР ОШИБКИ:    «КОТОРЫЙ СТОИЛ ДОРОГ» ← это краткая форма мужского рода,
+                     несогласованная с глаголом «стоил».
+- Если фраза не лезет в 11 знаков title_main/title_accent — переформулируй
+  ВСЮ фразу, НЕ режь хвост слова. «ВОЗВРАЩАЮТСЯ» (12 знаков) → «ВЕРНУТСЯ» (8)
+  — норм. «ДОРОГ» вместо «ДОРОГО» — провал, не оптимизация.
+
 ═══════════════════════════════════════════════════════════════════════
 ЧТО ТЫ ВОЗВРАЩАЕШЬ
 ═══════════════════════════════════════════════════════════════════════
@@ -157,14 +169,21 @@ INNER SLIDE (slides 2..N) — JSON schema
 Слайд 4 (inner):  совет 3
 Слайд 5 (inner):  совет 4
 Слайд 6 (inner):  совет 5 — финальный пункт, можно с эмоциональным итогом
-Слайд 7 (CTA):    "Подпишись @livedrive.tmn"
+Слайд 7 (CTA):    "Подпишись на Telegram-канал @yumsunov_realbiz"
 
 Для CTA-слайда:
   slide_type = "A"
   kicker = "ОТ АВТОРА · CTA"
   title = "ХОЧЕШЬ БОЛЬШЕ?"
   accent_word = "БОЛЬШЕ"
-  body = "Подпишись @livedrive.tmn — каждую неделю разборы из реального опыта картинг-центра и глэмпинга."
+  body = "Подпишись на Telegram-канал @yumsunov_realbiz — каждую неделю разборы из реального опыта картинг-центра и глэмпинга."
+
+ВАЖНО: CTA ведёт в TELEGRAM-канал @yumsunov_realbiz (это место где Максим
+постит длинные разборы). Карусель публикуется в Instagram @livedrive.tmn,
+но в CTA-теле НИКОГДА не зови подписаться на @livedrive.tmn — это та же
+страница где юзер уже видит карусель, такой призыв бессмысленен. Footer
+handle (поле `handle` в каждом слайде) = «@livedrive.tmn» — это адрес
+ПОСТА в Instagram, не призыв.
 
 ═══════════════════════════════════════════════════════════════════════
 ЖЁСТКИЕ ПРАВИЛА
@@ -182,6 +201,10 @@ INNER SLIDE (slides 2..N) — JSON schema
 - Слова-маркеры AI: «давайте», «итак», «таким образом».
 - Инфоцыганские формулы: «секрет», «формула», «лайфхак», «7 фишек».
 - Слово «ТОП» в hero / hero_word / title_main / title_accent / kicker. Лишнее, не добавляет смысла. «5 СОВЕТОВ» — да. «ТОП 5 СОВЕТОВ» — нет. «5 ОТЛИЧИЙ» — да. «5 ТОП ОТЛИЧИЙ» — нет.
+  🛑 КРИТИЧЕСКИ ВАЖНО — конкретный пример ПРОВАЛА:
+     ОШИБКА: hero="3", title_main="ТОП", title_accent="ТИПА" → выходит «3 ТОП ТИПА» (слово ТОП). НЕ ДЕЛАЙ ТАК.
+     ПРАВИЛЬНО: hero="3", title_main="ТИПА", title_accent="КЛИЕНТОВ" → выходит «3 ТИПА КЛИЕНТОВ» (нет ТОП).
+     Если хочешь топ-3 → используй просто число 3 в hero + существительное во множ.числе род.падеже в hero_word или title_main.
 - title_main И title_accent — каждое МАКС 11 знаков (включая пробелы). Иначе текст обрежется на cover. «ВОЗВРАЩАЮТСЯ» (12) — обрежется. «ВЕРНУТСЯ» (8) — норм. Длиннее — переформулируй.
 - Выдуманные цифры (если нет в исходных данных — не используй).
 - M6 шаблон.
@@ -382,19 +405,44 @@ def generate_carousel(
         parsed = _parse_json_array(raw)
         return _validate_slides(parsed, n_slides)
 
-    # 1 retry on count-mismatch — Opus иногда выдаёт 6 при n=7. На retry
-    # промпт уже в системе, Opus обычно поправляется.
-    try:
-        slides = _one_call()
-    except ValueError as e:
-        if "slide count mismatch" in str(e):
-            logger.warning(f"[carousel-llm] retry on count mismatch: {e}")
+    # F7 fix (26 May 2026, ChatGPT review M4): unified retry loop.
+    # Раньше count-mismatch retry и TOP-poisoning retry были независимы — в
+    # худшем случае получалось 3 Opus-вызова. Теперь один bounded loop:
+    # max_attempts=2 на любую причину. После — deterministic repair fallback.
+    MAX_ATTEMPTS = 2
+    slides = None
+    last_reason = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
             slides = _one_call()
-        else:
+        except ValueError as e:
+            if "slide count mismatch" in str(e):
+                last_reason = f"count_mismatch ({e})"
+                logger.warning(f"[carousel-llm] attempt #{attempt}: {last_reason}")
+                continue
             raise
+        slides = _strip_top_word(slides)
+        if _cover_has_empty_critical_fields(slides[0]):
+            last_reason = "cover_poisoned (TOP stripped → empty title)"
+            logger.warning(f"[carousel-llm] attempt #{attempt}: {last_reason}")
+            continue
+        # Успех — выходим раньше срока.
+        break
+    else:
+        # Loop отработал MAX_ATTEMPTS без break (slides проблемный) —
+        # deterministic repair чтобы рендер не падал. Юзер сможет поправить
+        # точечной правкой.
+        logger.warning(
+            f"[carousel-llm] all {MAX_ATTEMPTS} attempts failed "
+            f"(last: {last_reason}), applying deterministic repair"
+        )
+        if slides is not None:
+            cover = slides[0]
+            if not (cover.get("title_main") or "").strip():
+                cover["title_main"] = "ВЫВОДЫ"
+            if not (cover.get("title_accent") or "").strip():
+                cover["title_accent"] = "ДНЯ"
 
-    # Strip «ТОП» post-process — guarantees ban даже если Opus игнорит prompt
-    slides = _strip_top_word(slides)
     return slides
 
 
@@ -427,14 +475,138 @@ _SURG_EDIT_SYSTEM = """Ты — редактор карусельных сцен
 9. accent_word должен оставаться словом ИЗ title (если меняешь title — синхронизируй).
 10. title_main и title_accent на cover — каждое МАКС 11 знаков.
 
+🎯 REPLACE-ЗАПРОСЫ — самый частый тип инструкции. Формат:
+  «<X> поменяй на <Y>», «замени <X> на <Y>», «<X> → <Y>».
+
+ОБРАБОТКА REPLACE:
+1. Найди подстроку <X> в любом поле любого слайда (title, kicker, body,
+   title_main, title_accent, hero, hero_word, subtitle, pull_quote).
+2. ⚠️ ПРИ ПОИСКЕ нормализуй пробелы: двойные/тройные пробелы в <X> или
+   в поле слайда считай эквивалентом одинарного. Пример: <X> = «1 СОТРУДНИК
+   КОТОРЫЙ» (с одним пробелом) ДОЛЖЕН совпасть с полем «1 СОТРУДНИК  КОТОРЫЙ»
+   (с двумя пробелами).
+3. Если нашёл — замени именно эту подстроку на <Y>, остальное сохрани.
+4. Если <X> НЕ найдено даже после нормализации пробелов — добавь к
+   первому слайду поле "_surg_error": "не нашёл: <X>" и верни остальное
+   без изменений. Это сигнал пользователю переформулировать.
+5. ОБЯЗАТЕЛЬНО: при успехе хоть ОДНО поле в JSON должно отличаться
+   от исходного. Если ты возвращаешь идентичный JSON — это сигнал
+   что ты не понял инструкцию (см. правило 4).
+
 ЗАПРЕЩЕНО:
 - Объяснять что ты изменил. Только JSON.
 - Слово «ТОП» в любом поле.
 - Выдумывать факты, цифры, истории Максима, которых нет в текущем тексте.
 - Менять слайды, которых инструкция не касается.
+- Усекать слово ради лимита знаков («ДОРОГ» вместо «ДОРОГО» — провал).
 
 ФОРМАТ ОТВЕТА: ТОЛЬКО JSON-массив той же длины. Без markdown ```, без текста до/после.
 Начни с [ и заверши ]."""
+
+
+def _cover_has_empty_critical_fields(cover: dict) -> bool:
+    """Cover «отравлен» если ХОТЬ ОДНО критическое поле пусто после strip.
+
+    F5 fix (ChatGPT review M5): раньше срабатывало только когда ОБА title_*
+    пусты. Если Opus засунул «ТОП» только в title_main → strip опустошил
+    его → title_accent остался нормальным → detect не сработал → юзер
+    видит cover с пустой половиной заголовка. Теперь любое пустое из двух
+    critical fields = poisoned, идём в retry или fallback.
+    """
+    for k in ("title_main", "title_accent"):
+        if not (cover.get(k) or "").strip():
+            return True
+    return False
+
+
+_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_value(v):
+    """Normalize a slide-field value for tolerant comparison.
+
+    Multiple whitespaces (incl. \\u00A0 NBSP) → single space; trim ends.
+    Не-строки оставляем как есть (числа, None, dict).
+    """
+    if isinstance(v, str):
+        return _WS_RE.sub(" ", v.replace(" ", " ")).strip()
+    return v
+
+
+# F3 fix (ChatGPT review C2): служебные ключи которые модель может вернуть
+# как часть slide-объекта, но которые НЕ должны влиять на equality.
+# `_surg_error` — failure-сигнал от Sonnet (см. _SURG_EDIT_SYSTEM правило 4).
+_IGNORED_SLIDE_KEYS = frozenset({"_surg_error", "_debug", "_meta"})
+
+
+def _slides_equal_normalized(a: list[dict], b: list[dict]) -> bool:
+    """Tolerant equality for slide lists.
+
+    Считаем слайды равными если все поля (кроме `_IGNORED_SLIDE_KEYS`)
+    идентичны ПОСЛЕ нормализации пробелов в строковых значениях.
+    Используется для детекта no-op после surgical edit.
+    """
+    if len(a) != len(b):
+        return False
+    for sl_a, sl_b in zip(a, b):
+        keys_a = {k for k in sl_a.keys() if k not in _IGNORED_SLIDE_KEYS}
+        keys_b = {k for k in sl_b.keys() if k not in _IGNORED_SLIDE_KEYS}
+        if keys_a != keys_b:
+            return False
+        for k in keys_a:
+            if _normalize_value(sl_a[k]) != _normalize_value(sl_b.get(k)):
+                return False
+    return True
+
+
+def _extract_surg_error(slides: list[dict]) -> str | None:
+    """Извлечь и УДАЛИТЬ `_surg_error` из slides (модифицирует in-place).
+
+    F2 fix (ChatGPT review C2): Sonnet добавляет `_surg_error` в первый
+    слайд когда не нашёл подстроку для replace. Это failure-сигнал —
+    обработчик должен показать конкретную причину юзеру и НЕ сохранять
+    draft. Здесь достаём error и чистим slides от служебных полей.
+    """
+    if not slides:
+        return None
+    err: str | None = None
+    for sl in slides:
+        v = sl.pop("_surg_error", None)
+        if v and not err:
+            err = str(v)
+        sl.pop("_debug", None)
+        sl.pop("_meta", None)
+    return err
+
+
+_REPLACE_PATTERNS = [
+    # «X поменяй на Y» / «X замени на Y»
+    re.compile(r"^(.+?)\s+(?:поменяй|замени|меняй|сменить)\s+на\s+(.+)$", re.IGNORECASE | re.DOTALL),
+    # «замени X на Y» / «поменяй X на Y»
+    re.compile(r"^(?:замени|поменяй|меняй)\s+(.+?)\s+на\s+(.+)$", re.IGNORECASE | re.DOTALL),
+    # «X → Y» / «X -> Y»
+    re.compile(r"^(.+?)\s*(?:→|->)\s*(.+)$", re.DOTALL),
+]
+
+
+def _extract_replace_pattern(instruction: str) -> tuple[str, str] | None:
+    """Parse «X поменяй на Y» (и синонимы) → (X, Y) или None.
+
+    Используется на уровне UI/handlers для предупреждения юзера если он
+    написал replace-инструкцию, но Sonnet вернул no-op — значит подстроку
+    не нашёл. Также инструкция-как-есть передаётся в Sonnet (он сам ищет
+    X→Y по промпту), эта функция — для детекта intent в no-op случае.
+    """
+    if not instruction or not instruction.strip():
+        return None
+    text = instruction.strip()
+    for pat in _REPLACE_PATTERNS:
+        m = pat.match(text)
+        if m:
+            old, new = m.group(1).strip(), m.group(2).strip()
+            if old and new:
+                return (old, new)
+    return None
 
 
 def surgical_edit_carousel(

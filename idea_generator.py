@@ -397,7 +397,9 @@ def format_ideas_message(ideas: list[dict]) -> str:
     blocks = [format_idea_line(i + 1, idea) for i, idea in enumerate(ideas)]
     header = (
         f"🎰 <b>Банк идей — {len(ideas)} вариантов</b>\n"
-        f"<i>Полные сценарии (hook/тезис/почему работает) сохранятся в Notion.</i>\n\n"
+        f"<i>👇 Нажми кнопку «Взять» под идеей, которую хочешь забрать — "
+        f"только она уйдёт в Notion. Остальные ни на что не влияют, "
+        f"можешь просто сгенерировать новые.</i>\n\n"
     )
     return header + "\n\n".join(blocks)
 

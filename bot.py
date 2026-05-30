@@ -76,7 +76,22 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 
 # --- Clients ---
 notion = NotionClient(auth=os.getenv("NOTION_TOKEN"))
-claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# Claude client: подписка (CLAUDE_CODE_OAUTH_TOKEN) приоритет → fallback на
+# pay-per-token API (ANTHROPIC_API_KEY). Раньше всегда шёл pay-per-token,
+# хотя подписка была подключена для auto_broll.py. 27 May 2026 Артём указал:
+# «это неприемлемая цена, подключи всё на подписку».
+# SubscriptionClient — drop-in замена `anthropic.Anthropic`, под капотом
+# subprocess вызов `claude` CLI с OAuth-токеном (вызовы покрываются flat
+# fee подписки Max/Pro). Auth-логика повторяет auto_broll.py:_run_claude.
+_claude_oauth_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+if _claude_oauth_token:
+    from claude_subscription import SubscriptionClient
+    claude = SubscriptionClient(oauth_token=_claude_oauth_token)
+    logger.info("[claude] Auth: подписка через CLAUDE_CODE_OAUTH_TOKEN (CLI wrapper)")
+else:
+    claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    logger.info("[claude] Auth: pay-per-token API через ANTHROPIC_API_KEY (нет OAuth)")
 NOTION_DB = os.getenv("NOTION_DATABASE_ID")
 NOTION_GUIDES_DB = os.getenv("NOTION_GUIDES_DB_ID")
 # Публичный поддомен notion.site для ссылок на гайды. Per-tenant: у каждого
@@ -143,6 +158,7 @@ from video_assembler import (
     assemble_auto_montage,
     AssemblyError,
     build_bookend_montage_plan,
+    _find_broll,
 )
 from tg_post_handlers import (
     register as register_tgpost,
@@ -572,21 +588,33 @@ BRANDS = {
         # Avatar/voice IDs come from .env (HEYGEN_AVATAR_ID,
         # ELEVENLABS_VOICE_ID). Hard-coded None here so the brand inherits
         # env values — same pattern as "default".
-        # Тренированные ВИДЕО-аватары Максима в его СОБСТВЕННОМ HeyGen-аккаунте
-        # (новый ключ, 21 мая 2026). Тип avatar (digital twin), не фото —
-        # лучше лип-синк/жесты, нет «плывущих рук» фото-аватара. Старый фото-
-        # аватар (90610f1a…, в аккаунте Артёма) выведен из обращения.
-        # Новые аватары Максима (24 мая 2026) — старые a0bddf71 / f3a502ab сняты.
+        # Тренированные ВИДЕО-аватары Максима в его СОБСТВЕННОМ HeyGen-аккаунте.
+        # Тип avatar (digital twin), не фото — лучше лип-синк/жесты, нет
+        # «плывущих рук» фото-аватара.
+        #
+        # 27 мая 2026: финальный набор из 4 луков. Все предыдущие промежуточные
+        # версии (a0bddf71/f3a502ab/90610f1a и более ранние фото-аватары)
+        # выведены из обращения окончательно — в этом конфиге их нет.
+        # Default `heygen_avatar_id` = улица-свитер (нейтральный outdoor).
         "heygen_avatar_id": "89408fde1ded426dbadee1dbe9357e01",
         # Непустой heygen_looks = пикер показывает ТОЛЬКО эти луки.
+        # Порядок отрисовки = порядок ключей dict (Python 3.7+ insertion-ordered).
         "heygen_looks": {
-            "max_outdoor": {
-                "id": "89408fde1ded426dbadee1dbe9357e01",
-                "name": "Улица",
+            "studio_black": {
+                "id": "b560db700e914b0d9b98889ce6a30b85",
+                "name": "🎬 Студия — футболка",
             },
-            "office_kepka": {
+            "studio_hoodie": {
+                "id": "81dfdd09940b41d6b92d00fa7328095a",
+                "name": "🎬 Студия — худи",
+            },
+            "office_cap": {
                 "id": "f5e69972c9b5430fbda5fe00b2e4f234",
-                "name": "Офис (кепка)",
+                "name": "🏢 Офис — кепка",
+            },
+            "outdoor_sweater": {
+                "id": "89408fde1ded426dbadee1dbe9357e01",
+                "name": "🌲 Улица — свитер",
             },
         },
         # Новый голос Максима — клон ElevenLabs (21 мая 2026, более похожий).
@@ -922,7 +950,26 @@ def _start_action_kb_maksim() -> InlineKeyboardMarkup:
     #   🔥 Тренды недели — будущее место (Pipeline #0-A, research)
     # callback_data сохранены (maksim_ideas_stub / cmd_new_idea) для
     # обратной совместимости со старыми pending state.
-    return InlineKeyboardMarkup([
+    return _build_maksim_start_kb(last_card=None)
+
+
+def _build_maksim_start_kb(last_card: dict | None = None) -> InlineKeyboardMarkup:
+    """Главное меню Максима + опциональная первая кнопка «🔄 Продолжить».
+
+    `last_card={"id": notion_page_id, "title": "..."}` → добавляет верхним рядом
+    «🔄 Продолжить: <title>» с callback `notion_card:<id[:20]>` — один клик к
+    активной (или последней) карточке. Если None — старое меню без верха.
+    """
+    rows = []
+    if last_card and last_card.get("id"):
+        short_title = (last_card.get("title") or "карточка")[:40]
+        rows.append([
+            InlineKeyboardButton(
+                f"🔄 Продолжить: {short_title}",
+                callback_data=f"notion_card:{last_card['id'][:20]}",
+            )
+        ])
+    rows.extend([
         [
             InlineKeyboardButton("🎰 Банк идей", callback_data="maksim_ideas_stub"),
             InlineKeyboardButton("🎥 Селфи", callback_data="cmd_selfie"),
@@ -944,6 +991,114 @@ def _start_action_kb_maksim() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📋 Открыть Notion", url=_MAKSIM_NOTION_DB_URL),
         ],
     ])
+    return InlineKeyboardMarkup(rows)
+
+
+# ─── «Готовые материалы» под maksim ──────────────────────────────────────
+# Кнопки выбора категории для общей библиотеки + опт-аут. Вариант В
+# (гибрид) из плана 25 мая: дефолт = `personal`, явный опт-аут — `__skip__`.
+# Выбор хранится в `pending[user_id]["broll_lib_category"]`.
+
+_MAKSIM_READY_LIB_DEFAULT = "personal"
+_MAKSIM_READY_LIB_SKIP = "__skip__"
+
+# Какие категории показываем кнопками (6 функциональных + skip). Полный
+# список категорий лежит в MAKSIM_LIBRARY_CATEGORIES — для UI берём
+# подмножество чтобы не перегружать ряды.
+_MAKSIM_READY_LIB_BUTTONS = ["karting", "glamping", "sup", "nature", "team", "personal"]
+
+
+def _maksim_ready_kb(selected_category: str | None = None) -> InlineKeyboardMarkup:
+    """Клавиатура для «📥 Готовые материалы» под бренд maksim.
+
+    Раскладка: 3 ряда × 2 категории, затем full-width «не в библиотеку» +
+    «Готово» + «Назад». Выбранная категория помечена ✅ в подписи.
+    """
+    selected = selected_category or _MAKSIM_READY_LIB_DEFAULT
+    rows: list[list[InlineKeyboardButton]] = []
+    pair: list[InlineKeyboardButton] = []
+    for cat in _MAKSIM_READY_LIB_BUTTONS:
+        emoji, ru_name = MAKSIM_CATEGORY_UI.get(cat, ("📁", cat))
+        mark = "✅ " if selected == cat else ""
+        pair.append(InlineKeyboardButton(
+            f"{mark}{emoji} {ru_name}",
+            callback_data=f"broll_ready_cat:{cat}",
+        ))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    skip_mark = "✅ " if selected == _MAKSIM_READY_LIB_SKIP else ""
+    rows.append([InlineKeyboardButton(
+        f"{skip_mark}✋ Не класть в библиотеку",
+        callback_data=f"broll_ready_cat:{_MAKSIM_READY_LIB_SKIP}",
+    )])
+    rows.append([InlineKeyboardButton("✅ Готово", callback_data="broll_ready_done")])
+    rows.append([InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _maksim_ready_category_label(category: str | None) -> str:
+    """Человеческая подпись текущей категории для шапки «Готовые материалы»."""
+    cat = category or _MAKSIM_READY_LIB_DEFAULT
+    if cat == _MAKSIM_READY_LIB_SKIP:
+        return "✋ только в карточку (без копии в библиотеку)"
+    emoji, ru_name = MAKSIM_CATEGORY_UI.get(cat, ("📁", cat))
+    return f"{emoji} {ru_name}"
+
+
+def _build_photo_lib_pick_kb(
+    sample_paths: list[str],
+    selected_set: set[str],
+    full_lib_size: int,
+    card_id_short: str,
+) -> InlineKeyboardMarkup:
+    """Клавиатура выбора фото из библиотеки.
+
+    Сетка 3×3 цифровых toggle-кнопок (под альбом из 9 фото), потом:
+      [➕ Добавить в проект (N)] — копирует выбранные в projects/<id>/photos/
+      [🎲 Другая выборка]
+      [◀️ Назад к B-roll]
+
+    `selected_set` — множество абсолютных путей которые уже отмечены (накопительно
+    через rerolls). Лейбл `#N` показывает ✅ если path в множестве, иначе ⬜.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    digit_row: list[InlineKeyboardButton] = []
+    for idx, path in enumerate(sample_paths):
+        mark = "✅" if path in selected_set else "⬜"
+        digit_row.append(InlineKeyboardButton(
+            f"{mark}{idx + 1}",
+            callback_data=f"photo_lib_toggle:{idx}",
+        ))
+        if len(digit_row) == 3:
+            rows.append(digit_row)
+            digit_row = []
+    if digit_row:
+        rows.append(digit_row)
+    n_selected = sum(1 for p in sample_paths if p in selected_set) + \
+        sum(1 for p in selected_set if p not in sample_paths)
+    add_label = (
+        f"➕ Добавить в проект ({n_selected})"
+        if n_selected else "➕ Добавить в проект"
+    )
+    rows.append([InlineKeyboardButton(add_label, callback_data="photo_lib_add")])
+    rows.append([InlineKeyboardButton("🎲 Другая выборка", callback_data="broll_photo_reroll")])
+    rows.append([InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _maksim_pick_lib_category(data: dict) -> str | None:
+    """Выбранная категория для текущей сессии «Готовые материалы».
+
+    Возвращает имя категории, либо None если выбран опт-аут (`__skip__`).
+    Дефолт — `_MAKSIM_READY_LIB_DEFAULT` (personal).
+    """
+    cat = (data or {}).get("broll_lib_category") or _MAKSIM_READY_LIB_DEFAULT
+    if cat == _MAKSIM_READY_LIB_SKIP:
+        return None
+    return cat
 
 
 def _maksim_greeting_text(user_id: int) -> str:
@@ -1253,18 +1408,10 @@ def _pick_random_avatar() -> str | None:
     return None
 
 # --- Project folder management ---
-def _project_dir(data: dict) -> Path | None:
-    """Get or create project directory for current card. Returns None if no notion card."""
-    notion_id = data.get("notion_page_id")
-    if not notion_id:
-        return None
-    title = data.get("card_data", {}).get("title", "untitled")
-    # Clean title for folder name
-    safe_title = re.sub(r'[<>:"/\\|?*]', '', title)[:60].strip()
-    folder_name = f"{notion_id[:8]}_{safe_title}"
-    d = PROJECTS_DIR / folder_name
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+# F1 fix: канонический _project_dir теперь в bot_state.py (чтобы
+# carousel/handlers.py не делал import bot для доступа). Здесь — тонкая
+# обёртка с тем же именем для сохранения обратной совместимости.
+from bot_state import project_dir as _project_dir  # noqa: E402, F401
 
 
 def _save_to_project(data: dict, filename: str, source_path: str):
@@ -1357,7 +1504,20 @@ async def _save_ready_photo(
         1 for p in photos_dir.iterdir()
         if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
     )
-    return True, f"✓ Фото {next_n} сохранено ({size_kb:.0f} КБ). Всего в проекте: {total_photos}"
+    # Brand-aware автокопия в общую библиотеку — вариант В (гибрид).
+    # Дефолт maksim = personal, опт-аут = __skip__ (None после _maksim_pick_lib_category).
+    lib_note = ""
+    _brand_for_lib = _get_active_brand_name()
+    if _brand_for_lib == "maksim":
+        chosen_cat = _maksim_pick_lib_category(data)
+        if chosen_cat:
+            lib_copy = _copy_to_library(
+                dest, brand="maksim", kind="photo", category=chosen_cat,
+            )
+            if lib_copy:
+                cat_emoji = MAKSIM_CATEGORY_UI.get(chosen_cat, ("📁", chosen_cat))[0]
+                lib_note = f" • {cat_emoji} в библиотеке"
+    return True, f"✓ Фото {next_n} сохранено ({size_kb:.0f} КБ){lib_note}. Всего в проекте: {total_photos}"
 
 
 async def _save_ready_video(
@@ -1453,7 +1613,24 @@ async def _save_ready_video(
         return False, "❌ Видео не сохранилось после обработки."
 
     size_mb = target_path.stat().st_size / (1024 * 1024)
-    return True, f"✓ Видео сохранено как {target_name} ({size_mb:.1f} МБ){trim_note}"
+
+    # Brand-aware автокопия в общую клип-библиотеку.
+    # Берём НЕ обрезанный target (5с), а ОРИГИНАЛ из raw_path — в библиотеке
+    # полнометражная версия полезнее для будущего переиспользования.
+    lib_note = ""
+    _brand_for_lib = _get_active_brand_name()
+    if _brand_for_lib == "maksim":
+        chosen_cat = _maksim_pick_lib_category(data)
+        if chosen_cat:
+            source_for_lib = raw_path if raw_path.exists() else target_path
+            lib_copy = _copy_to_library(
+                source_for_lib, brand="maksim", kind="video", category=chosen_cat,
+            )
+            if lib_copy:
+                cat_emoji = MAKSIM_CATEGORY_UI.get(chosen_cat, ("📁", chosen_cat))[0]
+                lib_note = f" • {cat_emoji} в библиотеке"
+
+    return True, f"✓ Видео сохранено как {target_name} ({size_mb:.1f} МБ){trim_note}{lib_note}"
 
 
 def _zip_project(data: dict) -> Path | None:
@@ -2783,23 +2960,11 @@ def _build_structure_prompt(brand_name: str | None = None) -> str:
 FORMATS = ["Short video", "Long post", "Reel"]
 
 # --- Storage for pending data (persisted to file) ---
-PENDING_FILE = Path(__file__).parent / "pending.json"
-
-
-def _load_pending() -> dict:
-    if PENDING_FILE.exists():
-        try:
-            return {int(k): v for k, v in json.loads(PENDING_FILE.read_text(encoding="utf-8")).items()}
-        except Exception:
-            return {}
-    return {}
-
-
-def _save_pending(data: dict):
-    PENDING_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-pending: dict[int, dict] = _load_pending()
+# F1 fix (26 May 2026): pending и save_pending вынесены в bot_state.py чтобы
+# carousel/handlers.py не делал `import bot` (вызывало второй import bot.py
+# когда сервис запущен как `python bot.py` под __main__).
+# Имя `_save_pending` сохранено для обратной совместимости с ~50 call sites.
+from bot_state import pending, save_pending as _save_pending, PENDING_FILE  # noqa: E402, F401
 
 
 # --- Publication calendar tracking ---
@@ -4356,6 +4521,7 @@ def _search_pexels_videos(query: str, count: int = 15) -> list[dict]:
             # Pick smallest HD file
             hd = sorted(files, key=lambda f: f.get("width", 9999))[0]
             w, h = hd.get("width", 0), hd.get("height", 0)
+            user = v.get("user") or {}
             results.append({
                 "url": hd["link"],
                 "preview": v.get("image", ""),
@@ -4365,6 +4531,8 @@ def _search_pexels_videos(query: str, count: int = 15) -> list[dict]:
                 "tags": ", ".join(v.get("tags", [])) if isinstance(v.get("tags"), list) else "",
                 "source": "Pexels",
                 "id": f"pexels_{v.get('id', '')}",
+                "author_id": f"pexels_user_{user.get('id', 0)}",
+                "author_name": user.get("name", ""),
             })
         return results
     except Exception as e:
@@ -4405,6 +4573,8 @@ def _search_pixabay_videos(query: str, count: int = 15) -> list[dict]:
                         "tags": v.get("tags", ""),
                         "source": "Pixabay",
                         "id": f"pixabay_{v.get('id', '')}",
+                        "author_id": f"pixabay_user_{v.get('user_id', 0)}",
+                        "author_name": v.get("user", ""),
                     })
                     break
         return results
@@ -4413,10 +4583,246 @@ def _search_pixabay_videos(query: str, count: int = 15) -> list[dict]:
         return []
 
 
+# Max stock clips per (source, author) across one B-roll selection — prevents
+# 4 near-duplicate clips from one videographer (Pexels Jakub Zerdzicki incident,
+# 27 May 2026: 4 clips returned, 2 were visual dupes).
+STOCK_MAX_PER_AUTHOR = 2
+
+
+def _collect_stock_candidates(queries: list[str]) -> list[dict]:
+    """Search Pexels+Pixabay across `queries`, dedupe by clip id, throttle by author.
+
+    Returns merged list of clip dicts. Each clip has keys: id, source,
+    author_id, author_name, url, duration, width, height, tags.
+    """
+    all_candidates: list[dict] = []
+    seen_ids: set[str] = set()
+    per_author: dict[str, int] = {}
+    for q in queries:
+        for searcher in (_search_pixabay_videos, _search_pexels_videos):
+            try:
+                results = searcher(q, count=10)
+            except Exception as e:
+                logger.warning(f"_collect_stock_candidates: {searcher.__name__}({q!r}) failed: {e}")
+                continue
+            for r in results:
+                if r["id"] in seen_ids:
+                    continue
+                author_key = r.get("author_id") or r.get("source", "")
+                if per_author.get(author_key, 0) >= STOCK_MAX_PER_AUTHOR:
+                    continue
+                seen_ids.add(r["id"])
+                per_author[author_key] = per_author.get(author_key, 0) + 1
+                all_candidates.append(r)
+    return all_candidates
+
+
 # --- Local B-roll library ---
 BROLL_LIBRARY_DIR = Path(__file__).parent / "broll-library"
 PHOTO_LIBRARY_DIR = BROLL_LIBRARY_DIR / "photos"
 PHOTO_LIB_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+VIDEO_LIB_EXTS = (".mp4", ".mov", ".webm")
+
+# Число фото в превью-альбоме фото-библиотеки (B-roll меню).
+# Telegram media_group лимит = 10, держим 9 чтобы Максим/Артём быстрее выбирали.
+PHOTO_PREVIEW_COUNT = 9
+
+# Сколько клипов отдаём в категории «Моя библиотека клипов» за один заход.
+# 10 — компактно (15 наследие, было слишком много: 15 отдельных send_video
+# растягивают чат и грузят TG; 10 даёт достаточную выборку, согласован с
+# PHOTO_PREVIEW_COUNT=9).
+CLIP_PREVIEW_COUNT = 10
+
+# Фактическая структура клип-библиотеки Максима на сервере:
+#   broll-library/clips/maksim/{karting, glamping, sup, personal, ...}/*.mp4
+# Категории совпадают со списком фото-папок (TG_PHOTO_CATEGORIES["maksim"]),
+# плюс sup/personal которые исторически добавлены вручную через rsync.
+MAKSIM_LIBRARY_CATEGORIES = [
+    "karting", "glamping", "sup", "nature", "team", "personal", "meetings", "maksim_self",
+]
+
+# Эмодзи + подпись для кнопок-фильтров категорий (вариант В «Готовые материалы»).
+# Порядок = порядок отрисовки. Используется и для подсветки ⭐ в библиотеке клипов.
+MAKSIM_CATEGORY_UI = {
+    "karting":     ("🏎", "Картинг"),
+    "glamping":    ("🏕", "Глэмпинг"),
+    "sup":         ("🏄", "Сап"),
+    "nature":      ("🌲", "Природа"),
+    "team":        ("👥", "Команда"),
+    "meetings":    ("🤝", "Встречи"),
+    "maksim_self": ("🙂", "Сам"),
+    "personal":    ("📦", "Общее"),
+}
+
+# Ключевые слова для подсветки ⭐ категории под сценарий.
+# Базируются на лексике Максима (бизнес-контекст Life Drive), не на Артёмовских AI-словах.
+MAKSIM_CLIP_KEYWORDS = {
+    "karting":   ["картинг", "карт ", "карты", "гонк", "трасс", "трек", "пилот", "руль", "болид"],
+    "glamping":  ["глэмпинг", "глемпинг", "домик", "баня", "хот-таб", "хоттаб", "терраса", "гост", "бронир", "отдых", "купольн"],
+    "sup":       ["сап", "сапборд", "доск", "вёсл", "вес-л"],
+    "nature":    ["природ", "лес", "сосн", "озер", "берёз", "берез", "тишин", "закат", "рассвет"],
+    "team":      ["команд", "сотрудник", "управляющ", "директор", "найм"],
+    "meetings":  ["выступл", "конференц", "встреч", "форум", "спикер"],
+}
+
+
+def _list_brand_photo_library(brand: str | None = None) -> list[Path]:
+    """Brand-aware фото-библиотека для B-roll меню.
+
+    - maksim  → `photos/maksim/**/*.{jpg,…}` (только фото Максима по категориям)
+    - default → `photos/**` (исторически — `photos/midjourney/**` Артёма)
+
+    Возврат отсортирован по имени для детерминированного превью.
+    """
+    if brand is None:
+        brand = _get_active_brand_name()
+    if brand == "maksim":
+        base = PHOTO_LIBRARY_DIR / "maksim"
+    else:
+        base = PHOTO_LIBRARY_DIR
+    if not base.exists():
+        return []
+    photos: list[Path] = []
+    for p in base.rglob("*"):
+        if p.is_file() and p.suffix.lower() in PHOTO_LIB_EXTS:
+            photos.append(p)
+    return sorted(photos)
+
+
+def _list_brand_clip_library(brand: str | None = None) -> list[tuple[str, list[Path]]]:
+    """Brand-aware клип-библиотека: список `(категория, [клипы])`.
+
+    - maksim  → `clips/maksim/<category>/*.mp4`
+    - default → старые Артёмовы AI-категории (`<category>/*.mp4` в корне broll-library)
+
+    Пустые категории НЕ возвращаются — UI рисует только непустые.
+    """
+    if brand is None:
+        brand = _get_active_brand_name()
+    out: list[tuple[str, list[Path]]] = []
+    if brand == "maksim":
+        base = BROLL_LIBRARY_DIR / "clips" / "maksim"
+        if not base.exists():
+            return []
+        for child in sorted(base.iterdir()):
+            if not child.is_dir():
+                continue
+            clips = [
+                p for p in child.iterdir()
+                if p.is_file() and p.suffix.lower() in VIDEO_LIB_EXTS
+                and p.stat().st_size > 1000
+            ]
+            if clips:
+                out.append((child.name, sorted(clips)))
+        return out
+    # default: Артёмовы категории на верхнем уровне
+    if not BROLL_LIBRARY_DIR.exists():
+        return []
+    for child in sorted(BROLL_LIBRARY_DIR.iterdir()):
+        if not child.is_dir() or child.name in ("photos", "clips"):
+            continue
+        clips = [
+            p for p in child.iterdir()
+            if p.is_file() and p.suffix.lower() in VIDEO_LIB_EXTS
+            and p.stat().st_size > 1000
+        ]
+        if clips:
+            out.append((child.name, sorted(clips)))
+    return out
+
+
+def _resolve_library_target(brand: str, kind: str, category: str) -> Path:
+    """Куда копировать загружаемый материал в общую библиотеку.
+
+    `kind` — "photo" → `photos/<brand>/<category>/`,
+             "video" → `clips/<brand>/<category>/`.
+    Папка не создаётся здесь — `_copy_to_library` сделает mkdir.
+    """
+    if kind == "photo":
+        return PHOTO_LIBRARY_DIR / brand / category
+    elif kind == "video":
+        return BROLL_LIBRARY_DIR / "clips" / brand / category
+    raise ValueError(f"unknown kind: {kind!r}")
+
+
+def _copy_to_library(
+    src: Path,
+    brand: str,
+    kind: str,
+    category: str | None,
+) -> Path | None:
+    """Копия `src` в общую библиотеку с уникальным именем.
+
+    Имя — `<stem>_<timestamp_ms><ext>` чтобы повторная загрузка того же файла
+    не перезаписала существующий. `category=None` → НЕ копировать (юзер выбрал
+    «✋ не в библиотеку»), возвращаем None.
+
+    Возвращает путь к копии или None.
+    """
+    if not category:
+        return None
+    try:
+        target_dir = _resolve_library_target(brand, kind, category)
+    except ValueError as e:
+        logger.warning(f"[_copy_to_library] {e}")
+        return None
+    target_dir.mkdir(parents=True, exist_ok=True)
+    import time as _time
+    import shutil as _shutil
+    ts_ms = int(_time.time() * 1000)
+    dest = target_dir / f"{src.stem}_{ts_ms}{src.suffix.lower()}"
+    # На случай коллизии (две загрузки в одну ms) — добавим суффикс
+    n = 1
+    while dest.exists():
+        dest = target_dir / f"{src.stem}_{ts_ms}_{n}{src.suffix.lower()}"
+        n += 1
+    try:
+        _shutil.copy2(str(src), str(dest))
+    except Exception as e:
+        logger.warning(f"[_copy_to_library] copy failed: {e}")
+        return None
+    return dest
+
+
+def _match_brand_clip_categories(brand: str, text: str) -> list[str]:
+    """Категории, под которые подходит сценарий — для подсветки ⭐ в UI.
+
+    Для бренда maksim берём `MAKSIM_CLIP_KEYWORDS`, для остальных — старый
+    `BROLL_CATEGORY_KEYWORDS` (Артёмовы AI-категории).
+    """
+    text_low = (text or "").lower()
+    if brand == "maksim":
+        mapping = MAKSIM_CLIP_KEYWORDS
+    else:
+        mapping = BROLL_CATEGORY_KEYWORDS
+    matched: list[str] = []
+    for cat, keywords in mapping.items():
+        if any(kw.lower() in text_low for kw in keywords):
+            matched.append(cat)
+    return matched
+
+
+def _extract_last_card_from_state(state: dict) -> dict | None:
+    """Из pending-state одного юзера достать {id, title} последней карточки.
+
+    Используется в `start()` ПЕРЕД pop, чтобы сохранить «куда вернуться» и
+    показать кнопку «🔄 Продолжить» при следующем /start.
+
+    Источники в порядке приоритета:
+      1. Активный `notion_page_id` + `card_data.title` — сейчас в работе.
+      2. Сохранённый `_last_card` slot — preserved между /start.
+    """
+    if not isinstance(state, dict):
+        return None
+    pid = state.get("notion_page_id")
+    if pid:
+        title = (state.get("card_data") or {}).get("title") or "карточка"
+        return {"id": pid, "title": str(title)[:60]}
+    lc = state.get("_last_card")
+    if isinstance(lc, dict) and lc.get("id"):
+        return {"id": lc["id"], "title": str(lc.get("title", "карточка"))[:60]}
+    return None
+
 
 
 def _list_photo_library() -> list[Path]:
@@ -4534,15 +4940,60 @@ BROLL_CATEGORY_KEYWORDS = {
 }
 
 
-def _search_local_broll(script_phrase: str, visual_desc: str, search_queries: list[str]) -> list[dict]:
-    """Search local B-roll library by matching keywords to categories. Returns list of clip dicts."""
+def _search_local_broll(
+    script_phrase: str,
+    visual_desc: str,
+    search_queries: list[str],
+    brand: str | None = None,
+) -> list[dict]:
+    """Search local B-roll library by matching keywords to categories.
+
+    Brand-aware: maksim reads `clips/maksim/<cat>/` using `MAKSIM_CLIP_KEYWORDS`;
+    default brand keeps the historical Артёмов layout (categories at the root
+    of broll-library, matched via `BROLL_CATEGORY_KEYWORDS`).
+
+    Without this branching, scripts for Максим that mention generic tech words
+    ("технолог", "ИИ", "сервер") leak into category `tech-general`/`ai-tools`
+    and the assembler pulls robot footage into Максим's videos — the "50/50
+    роботам" incident (handoff 27 May).
+    """
     if not BROLL_LIBRARY_DIR.exists():
         return []
 
-    # Combine all text for matching
+    if brand is None:
+        try:
+            brand = _get_active_brand_name()
+        except Exception:
+            brand = None
+
     combined_text = f"{script_phrase} {visual_desc} {' '.join(search_queries)}".lower()
 
-    # Find matching categories
+    if brand == "maksim":
+        matched_categories = _match_brand_clip_categories("maksim", combined_text)
+        if not matched_categories:
+            return []
+        # Maksim's library: clips/maksim/<cat>/
+        brand_lib = dict(_list_brand_clip_library("maksim"))  # {cat: [Path,...]}
+        clips: list[dict] = []
+        for cat in matched_categories:
+            for clip_path in brand_lib.get(cat, []):
+                clips.append({
+                    "id": f"local_{clip_path.stem}",
+                    "source": "local",
+                    "path": str(clip_path),
+                    "filename": clip_path.name,
+                    "category": cat,
+                    "duration": 5,
+                    "width": 1280,
+                    "height": 720,
+                    "tags": f"{cat} {clip_path.stem.replace('_', ' ')}",
+                    "url": "",
+                })
+        if clips:
+            logger.info(f"Local B-roll [maksim]: {len(clips)} clips from {matched_categories}")
+        return clips
+
+    # Default brand (Артём): legacy keyword-mapping + top-level category dirs.
     matched_categories = []
     for category, keywords in BROLL_CATEGORY_KEYWORDS.items():
         for kw in keywords:
@@ -4553,21 +5004,20 @@ def _search_local_broll(script_phrase: str, visual_desc: str, search_queries: li
     if not matched_categories:
         return []
 
-    # Collect clips from matched categories
     clips = []
     for category in matched_categories:
         cat_dir = BROLL_LIBRARY_DIR / category
         if not cat_dir.exists():
             continue
         for clip_path in cat_dir.glob("*.mp4"):
-            if clip_path.stat().st_size > 1000:  # skip broken files
+            if clip_path.stat().st_size > 1000:
                 clips.append({
                     "id": f"local_{clip_path.stem}",
                     "source": "local",
                     "path": str(clip_path),
                     "filename": clip_path.name,
                     "category": category,
-                    "duration": 5,  # all clips are 5s
+                    "duration": 5,
                     "width": 1280,
                     "height": 720,
                     "tags": f"{category} {clip_path.stem.replace('_', ' ')}",
@@ -4576,8 +5026,6 @@ def _search_local_broll(script_phrase: str, visual_desc: str, search_queries: li
 
     if not clips:
         return []
-
-    # Use Claude to pick best 2 from local clips
     logger.info(f"Local B-roll: {len(clips)} clips from categories {matched_categories}")
     return clips
 
@@ -5032,18 +5480,12 @@ async def find_broll_for_shotlist(shotlist: list[dict]) -> list[dict]:
             logger.info(f"B-roll '{visual_desc[:40]}': using {len(picked)} LOCAL clips")
             continue
 
-        # Step 2: Fall back to stock sites
-        all_candidates = []
-        seen_ids = set()
-        for q in queries:
-            for searcher in (_search_pixabay_videos, _search_pexels_videos):
-                results = searcher(q, count=10)
-                for r in results:
-                    if r["id"] not in seen_ids:
-                        seen_ids.add(r["id"])
-                        all_candidates.append(r)
-
-        logger.info(f"B-roll '{visual_desc[:40]}': {len(all_candidates)} STOCK candidates from {len(queries)} queries")
+        # Step 2: Fall back to stock sites.
+        all_candidates = _collect_stock_candidates(queries)
+        logger.info(
+            f"B-roll '{visual_desc[:40]}': {len(all_candidates)} STOCK candidates "
+            f"from {len(queries)} queries"
+        )
 
         if all_candidates:
             shot["videos"] = _rank_broll_candidates(
@@ -5497,8 +5939,15 @@ def _brand_picker_kb(selected: str) -> InlineKeyboardMarkup:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    # Preserve last-card pointer ПЕРЕД pop, чтобы /start мог показать кнопку
+    # «🔄 Продолжить» одним кликом к последней карточке. См.
+    # _extract_last_card_from_state + _build_maksim_start_kb.
+    _last_card_preserved: dict | None = None
     if user_id in pending:
+        _last_card_preserved = _extract_last_card_from_state(pending[user_id])
         pending.pop(user_id, None)
+        if _last_card_preserved:
+            pending[user_id] = {"_last_card": _last_card_preserved}
         _save_pending(pending)
 
     # Billing gate on /start:
@@ -5535,7 +5984,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             _maksim_greeting_text(user_id),
             parse_mode="Markdown",
-            reply_markup=_start_action_kb_maksim(),
+            reply_markup=_build_maksim_start_kb(last_card=_last_card_preserved),
         )
         return
 
@@ -7036,6 +7485,49 @@ def _clear_carousel_surg_state(user_id: int) -> None:
         _save_pending(pending)
 
 
+# ─── F4 (26 May 2026): carousel seed session-объект ──────────────────────
+# Раньше seed-поля (carousel_seed_text, carousel_seed_card_id, ...) висели
+# в pending[uid] плоско. Старая кнопка шаблона M1 от карточки A могла
+# нажаться ПОСЛЕ того как юзер открыл карточку B и заменил seed — handler
+# не понимал что callback устарел, и создавал карусель по B вместо A
+# (ChatGPT review M1, M2).
+#
+# Решение: единый объект `pending[uid]["carousel_seed"]` с session_id (8 chars
+# token_urlsafe) + created_at. Кнопка шаблона включает session_id в callback:
+# `carousel_tpl:M2:<session_id>`. Handler парсит session, валидирует против
+# seed.session_id — mismatch / TTL>30мин → stale message, не запускает Opus.
+
+_CAROUSEL_SEED_TTL_SEC = 30 * 60  # 30 минут
+
+
+def _make_carousel_seed(card_id: str, card_url: str, text: str) -> dict:
+    """Создать seed-объект с session_id + timestamp.
+
+    Каждый клик «🎨 В карусель» из карточки делает НОВЫЙ seed (новый session_id),
+    даже если карточка та же — старые кнопки шаблона перестают работать.
+    """
+    import secrets
+    import time
+    return {
+        "session_id": secrets.token_urlsafe(8),
+        "card_id": card_id,
+        "card_url": card_url,
+        "text": text,
+        "created_at": time.time(),
+    }
+
+
+def _seed_is_stale(seed: dict | None) -> bool:
+    """Seed считается устаревшим если нет created_at или прошло >TTL."""
+    import time
+    if not seed or not isinstance(seed, dict):
+        return True
+    created = seed.get("created_at")
+    if not isinstance(created, (int, float)):
+        return True
+    return (time.time() - created) > _CAROUSEL_SEED_TTL_SEC
+
+
 async def _handle_tgpost_surg_edit_instruction(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -8524,6 +9016,75 @@ async def _ideas_batch_stale(query) -> None:
         )
 
 
+def _compress_for_telegram(src: str, dst: str, duration=None,
+                           target_mb: int = 46) -> bool:
+    """Сжать видео под лимит Telegram (<50 МБ), СОХРАНЯЯ разрешение.
+
+    24 мая 2026. Раньше 413-guard просто даунскейлил до 720p + crf 28 —
+    Avatar IV (1080p, ~46 Мбит/с, 167 МБ на 30с) превращался в мыло.
+    Теперь: 2-pass x264 с целевым битрейтом под `target_mb`, разрешение
+    оригинала сохраняем (1080p при том же размере файла выглядит резко).
+    Если 2-pass не вышел / длительность неизвестна / файл всё равно велик
+    — фолбэк на старый 720p, лишь бы гарантированно влез.
+    Возвращает True, если dst готов и поместился в лимит.
+    """
+    LIMIT = 49 * 1024 * 1024
+    dur = 0.0
+    try:
+        dur = float(duration)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if dur <= 0:
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", src],
+                capture_output=True, text=True, timeout=30)
+            dur = float((r.stdout or "0").strip())
+        except Exception:
+            dur = 0.0
+    # --- основной путь: 2-pass, разрешение оригинала ---
+    if dur > 0:
+        audio_k = 128
+        total_k = int(target_mb * 8 * 1024 / dur)
+        video_k = max(1000, total_k - audio_k - 200)  # запас на контейнер
+        logp = dst + ".pass"
+        common = ["-c:v", "libx264", "-preset", "medium",
+                  "-b:v", f"{video_k}k", "-maxrate", f"{int(video_k * 1.25)}k",
+                  "-bufsize", f"{int(video_k * 2)}k",
+                  "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+        try:
+            subprocess.run(["ffmpeg", "-y", "-i", src, "-an", "-pass", "1",
+                            "-passlogfile", logp, *common, "-f", "mp4", os.devnull],
+                           capture_output=True, timeout=600)
+            subprocess.run(["ffmpeg", "-y", "-i", src, "-pass", "2",
+                            "-passlogfile", logp, *common,
+                            "-c:a", "aac", "-b:a", f"{audio_k}k", dst],
+                           capture_output=True, timeout=600)
+        except Exception as e:
+            logger.warning(f"[tg-compress] 2-pass error: {e}")
+        finally:
+            for suf in ("-0.log", "-0.log.mbtree"):
+                try:
+                    os.remove(logp + suf)
+                except Exception:
+                    pass
+        if os.path.exists(dst) and 0 < os.path.getsize(dst) <= LIMIT:
+            logger.info(f"[tg-compress] 2-pass keep-res ok: "
+                        f"{os.path.getsize(dst) // 1048576}МБ @ {video_k}k")
+            return True
+        logger.warning("[tg-compress] 2-pass не влез/не вышел → фолбэк 720p")
+    # --- фолбэк: агрессивный 720p (гарантированно влезает) ---
+    try:
+        subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", "scale=720:-2",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+                        dst], capture_output=True, timeout=300)
+    except Exception as e:
+        logger.warning(f"[tg-compress] 720p fallback error: {e}")
+    return os.path.exists(dst) and 0 < os.path.getsize(dst) <= LIMIT
+
+
 async def _render_avatar_from_audio(context, chat_id, audio_path, look_id,
                                     look_name, avatar_version, data):
     """Сгенерировать HeyGen-аватар из ГОТОВОГО аудио-файла (mp3).
@@ -8593,28 +9154,42 @@ async def _render_avatar_from_audio(context, chat_id, audio_path, look_id,
 
                 cap = (f"🤖 Аватар готов — озвучен ТВОИМ голосом! "
                        f"({look_name}, {ver_label}, {duration}с)")
-                # 413-guard: >48 МБ → сжать; не выйдет → ссылка
+                # 24 мая 2026 — кнопки «что дальше» строим ДО отправки и
+                # прикрепляем ПОД видео (reply_markup в send_video). Раньше
+                # selfvoice-флоу только редактировал статус НАВЕРХУ и кнопок
+                # под роликом не давал — приходилось скроллить вверх, чтобы
+                # утвердить. Теперь как в обычном флоу аватара: всё под видео.
+                try:
+                    quota = await asyncio.to_thread(heygen_get_quota)
+                except Exception:
+                    quota = "?"
+                _next_buttons = [
+                    [InlineKeyboardButton("🔄 Другой лук / версия", callback_data="heygen_looks")],
+                ]
+                if not data.get("broll_approved"):
+                    _next_buttons.append([InlineKeyboardButton("🎬 Подобрать B-roll", callback_data="broll")])
+                if NOTION_GUIDES_DB and not data.get("guide_created"):
+                    _next_buttons.append([InlineKeyboardButton("📎 Создать гайд", callback_data="create_guide")])
+                _next_buttons.append([InlineKeyboardButton("📥 Скачать материалы", callback_data="download_project")])
+                _next_buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
+                _next_kb = InlineKeyboardMarkup(_next_buttons)
+                _video_caption = (
+                    f"{cap}\n\n💰 Остаток HeyGen: {quota} кредитов\nЧто дальше?"
+                )
+                # 413-guard: >48 МБ → сжать (2-pass, сохраняя 1080p); не
+                # выйдет → ссылка. Avatar IV даёт ~167 МБ на 30с.
                 send_file = video_file
                 if video_file.stat().st_size > 48 * 1024 * 1024:
                     cmp = ASSETS_DIR / f"heygen_{video_id[:8]}_tg.mp4"
-                    try:
-                        await asyncio.to_thread(
-                            subprocess.run,
-                            ["ffmpeg", "-y", "-i", str(video_file),
-                             "-vf", "scale=720:-2",  # превью: даунскейл, чтобы влезть в 50МБ
-                             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
-                             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-                             str(cmp)], capture_output=True, timeout=300,
-                        )
-                        if cmp.exists() and 0 < cmp.stat().st_size <= 48 * 1024 * 1024:
-                            send_file = cmp
-                    except Exception as _ce:
-                        logger.warning(f"[selfvoice] compress: {_ce}")
+                    ok = await asyncio.to_thread(
+                        _compress_for_telegram, str(video_file), str(cmp), duration)
+                    if ok:
+                        send_file = cmp
                 try:
                     with open(send_file, "rb") as vf:
                         await context.bot.send_video(
-                            chat_id=chat_id, video=vf, caption=cap,
-                            supports_streaming=True,
+                            chat_id=chat_id, video=vf, caption=_video_caption,
+                            supports_streaming=True, reply_markup=_next_kb,
                         )
                 except Exception as _se:
                     logger.warning(f"[selfvoice] send_video: {_se}")
@@ -8626,10 +9201,14 @@ async def _render_avatar_from_audio(context, chat_id, audio_path, look_id,
                         pass
                     tail = (f"\n⚠️ Крупный файл — ссылка:\n{link}" if link
                             else "\n⚠️ Файл крупный, забери из «📥 Скачать материалы».")
-                    await context.bot.send_message(chat_id, cap + tail)
-                await status.edit_text(
-                    f"✅ {cap}\n\nДальше — собери ролик на карточке "
-                    f"(B-roll / монтаж).")
+                    await context.bot.send_message(
+                        chat_id, _video_caption + tail, reply_markup=_next_kb)
+                # Статус НАВЕРХУ больше не несёт «что дальше» — гасим в галочку,
+                # вся навигация теперь под видео.
+                try:
+                    await status.edit_text("✅ Аватар готов — детали и кнопки под видео 👇")
+                except Exception:
+                    pass
                 return
             if st == "failed":
                 await status.edit_text(
@@ -8667,17 +9246,36 @@ async def _consume_selfvoice_audio(update: Update, context: ContextTypes.DEFAULT
     if not Path(mp3).exists() or Path(mp3).stat().st_size == 0:
         await msg.edit_text("❌ Конвертация аудио не удалась — пришли голосовое ещё раз.")
         return
-    # Сбрасываем состояние, чтобы следующее голосовое шло как обычно
-    data["state"] = None
+    # 24 мая 2026 — НЕ генерируем аватар сразу. Генерация аватара = реальные
+    # деньги HeyGen, поэтому переспрашиваем (как просил Максим: «он должен
+    # спросить — запись в порядке? — и только потом генерировать»).
+    # Сохраняем путь к mp3 + длительность, ждём подтверждения кнопкой.
+    dur = 0
+    try:
+        dur = int(getattr(voice, "duration", 0) or 0)
+    except Exception:
+        dur = 0
+    data["selfvoice_audio_path"] = mp3
+    data["state"] = None  # дальше всё через кнопки, не через голос
     pending[user_id] = data
     _save_pending(pending)
-    await msg.edit_text("🎤 Голос принят. Запускаю генерацию аватара под твою запись…")
-    await _render_avatar_from_audio(
-        context, update.effective_chat.id, mp3,
-        data.get("selfvoice_look_id"),
-        data.get("selfvoice_look_name", "Аватар"),
-        data.get("selfvoice_version", "v4"),
-        data,
+
+    ver_label = {"v4": "Avatar IV", "v2": "Avatar 4", "v3": "Avatar 3"}.get(
+        data.get("selfvoice_version", "v4"), "Avatar 3")
+    look_name = data.get("selfvoice_look_name", "Аватар")
+    dur_str = f"{dur} сек" if dur else "запись"
+    await msg.edit_text(
+        f"🎤 Голос получил ({dur_str}).\n\n"
+        f"Послушай свою запись выше — всё чисто, без обрывов?\n"
+        f"Если ок — генерирую аватар «{look_name}» ({ver_label}) твоим голосом.\n"
+        f"Это спишет кредиты HeyGen.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да, генерировать аватар",
+                                  callback_data="selfvoice_confirm")],
+            [InlineKeyboardButton("🔁 Перезаписать голос",
+                                  callback_data="selfvoice_redo")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="selfvoice_cancel")],
+        ]),
     )
 
 
@@ -10135,6 +10733,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # 14 May 2026 — entrypoint Pipeline #6 (Carousel for Instagram).
             # Step 1 of 2: ask for template choice. After user picks M1/M2,
             # `carousel_tpl:<X>` callback sets state and prompts for theme.
+            # 26 May 2026: чистим залипший surg-edit state — если юзер ушёл
+            # из прошлой карусели через cmd_carousel без approve/cancel,
+            # state «awaiting_carousel_surg_edit» залипал и следующий текст
+            # юзера интерпретировался как правка пропавшего draft.
+            _clear_carousel_surg_state(query.from_user.id)
             await query.message.reply_text(
                 "🎨 <b>Карусель для Instagram</b>\n\n"
                 "Сначала — выбери стиль обложки:",
@@ -10290,7 +10893,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, idea in enumerate(ideas):
             short_title = (idea.get("title", "") or "?")[:38]
             buttons.append([InlineKeyboardButton(
-                f"✅ #{i + 1}: {short_title}",
+                # 24 May 2026 — was "✅ #N: …". Maksim читал зелёную
+                # галочку как «уже сохранено» и думал, что весь батч
+                # автоматом улетает в Notion. Меняем на «💾 Взять #N»:
+                # явный жест «забрать ИМЕННО эту». ✅ остаётся ТОЛЬКО
+                # для уже сохранённых (см. idea_save rebuild ниже).
+                f"💾 Взять #{i + 1}: {short_title}",
                 callback_data=f"idea_save:{i}",
             )])
         buttons.append([InlineKeyboardButton(
@@ -10406,13 +11014,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, it in enumerate(batch):
                 if i in saved_idx:
                     new_buttons.append([InlineKeyboardButton(
-                        f"✓ #{i + 1} сохранено",
+                        f"✅ #{i + 1} в Notion",
                         callback_data=f"idea_view:{i}",  # no-op visual
                     )])
                 else:
                     short_title = (it.get("title", "") or "?")[:38]
                     new_buttons.append([InlineKeyboardButton(
-                        f"✅ #{i + 1}: {short_title}",
+                        f"💾 Взять #{i + 1}: {short_title}",
                         callback_data=f"idea_save:{i}",
                     )])
             new_buttons.append([InlineKeyboardButton(
@@ -10887,8 +11495,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ─── Carousel template-choice callback (between cmd_carousel and theme intake) ───
+    # F4/F5 (26 May 2026): callback расширен до `carousel_tpl:<M1|M2>:<session_id>`.
+    # session_id привязан к конкретному seed-объекту в pending[uid]["carousel_seed"].
+    # Старые кнопки без session_id (formant `carousel_tpl:M2`) — legacy для
+    # flow «главное меню → тема» (нет seed, ничего не валидируем).
     if query.data.startswith("carousel_tpl:"):
-        tpl = query.data.split(":", 1)[1].strip().upper()
+        parts = query.data.split(":")
+        tpl = parts[1].strip().upper() if len(parts) >= 2 else ""
+        callback_session_id = parts[2] if len(parts) >= 3 else None
         if tpl not in ("M1", "M2"):
             try:
                 await query.answer("Неизвестный шаблон", show_alert=True)
@@ -10904,11 +11518,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        # Set state + remember template
+        # Set template choice
         user_id_local = query.from_user.id
         data_local = pending.get(user_id_local) or {}
-        data_local["state"] = "awaiting_carousel_theme"
         data_local["carousel_template"] = tpl
+
+        # ── card → carousel: валидация session_id ──
+        # Если callback пришёл с session_id, проверяем что seed в pending
+        # имеет ТОТ ЖЕ session_id (не устарел / не подменён). Mismatch =
+        # stale callback (юзер кликнул старую кнопку от прошлой карточки).
+        seed = data_local.get("carousel_seed")
+        seed_valid = (
+            callback_session_id is not None
+            and seed is not None
+            and not _seed_is_stale(seed)
+            and seed.get("session_id") == callback_session_id
+        )
+        if callback_session_id and not seed_valid:
+            # Старая кнопка / устаревший seed / mismatch — НЕ создаём карусель.
+            pending[user_id_local] = data_local
+            _save_pending(pending)
+            await query.message.reply_text(
+                "⚠️ Эта кнопка устарела (карусель открывалась раньше, или ты переходил "
+                "к другой карточке). Открой карточку заново и нажми «🎨 В карусель»."
+            )
+            return
+
+        if seed_valid:
+            # Атомарно потребляем seed — pop ТОЛЬКО после успешной валидации.
+            seed_text = seed.get("text")
+            seed_url = seed.get("card_url") or ""
+            seed_card_id = seed.get("card_id")
+            data_local.pop("carousel_seed", None)
+            data_local["state"] = None
+            pending[user_id_local] = data_local
+            _save_pending(pending)
+            try:
+                from carousel.handlers import generate_carousel_preview
+            except Exception as e:
+                logger.error(f"[carousel_tpl] import failed: {e}", exc_info=True)
+                await query.message.reply_text(f"❌ Модуль карусели не загружен: {e}")
+                return
+            await generate_carousel_preview(
+                update, context, claude,
+                theme=seed_text,
+                chat_id=query.message.chat_id,
+                notion_url=seed_url,
+                template=tpl,
+                seed_card_id=seed_card_id,
+            )
+            return
+        # Legacy / manual flow — без seed: ждём тему как раньше.
+        data_local["state"] = "awaiting_carousel_theme"
         pending[user_id_local] = data_local
         _save_pending(pending)
         await query.message.reply_text(
@@ -10997,6 +11658,134 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Или <code>отмена</code> чтобы выйти.",
             parse_mode="HTML",
         )
+        return
+
+    if query.data == "carousel_back_to_preview" or query.data.startswith("carousel_back_to_preview:"):
+        # «✏️ Поправить ещё» из финального post-render меню. Возвращаем
+        # текстовое preview, draft жив (persistent), юзер может «Точечная
+        # правка» → новые PNG.
+        # F6 (26 May 2026): поддерживаем `carousel_back_to_preview:<card_id>` —
+        # ownership-check внутри handler'а.
+        requested_card_id = None
+        if ":" in query.data:
+            requested_card_id = query.data.split(":", 1)[1]
+        try:
+            await query.answer("Возвращаюсь к сценарию…")
+        except Exception:
+            pass
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            from carousel.handlers import back_to_carousel_preview
+        except Exception as e:
+            logger.error(f"[carousel] import back_to_preview failed: {e}", exc_info=True)
+            return
+        await back_to_carousel_preview(update, context, requested_card_id=requested_card_id)
+        return
+
+    if query.data == "carousel_status_menu":
+        # B4 (26 May 2026): кнопка из post-render финального меню. Показывает
+        # submenu со списком PIPELINE_STATUSES (+ Идеи | старт) — юзер сам
+        # решает куда передвинуть карточку.
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        try:
+            from carousel.handlers import _load_carousel_draft
+            draft = _load_carousel_draft(query.from_user.id)
+        except Exception:
+            draft = None
+        seed_card_id = (draft or {}).get("seed_card_id") if draft else None
+        if not seed_card_id:
+            await query.message.reply_text("❌ Не нашёл карточку — статус сменить не могу.")
+            return
+        # Список статусов: «Идеи | старт» (откат) + PIPELINE_STATUSES.
+        all_statuses = ["Идеи | старт"] + PIPELINE_STATUSES
+        status_icons = {
+            "Идеи | старт": "🐣",
+            "Сценарий | озвучка": "🎙",
+            "Подбор скринкаст": "🎥",
+            "Аватар | генерации": "🤖",
+            "Монтаж": "✂️",
+            "Готово к публикации": "✅",
+        }
+        rows = []
+        for st in all_statuses:
+            icon = status_icons.get(st, "📝")
+            rows.append([InlineKeyboardButton(
+                f"{icon} {st}",
+                callback_data=f"carousel_set_status:{st}",
+            )])
+        rows.append([InlineKeyboardButton("❌ Отмена", callback_data="carousel_status_cancel")])
+        await query.message.reply_text(
+            "📊 <b>В какой статус перевести карточку?</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    if query.data == "carousel_status_cancel":
+        try:
+            await query.answer("Отменено")
+        except Exception:
+            pass
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+
+    if query.data.startswith("carousel_set_status:"):
+        new_status = query.data.split(":", 1)[1]
+        try:
+            await query.answer(f"Перевожу в «{new_status}»…")
+        except Exception:
+            pass
+        try:
+            from carousel.handlers import _load_carousel_draft
+            draft = _load_carousel_draft(query.from_user.id)
+        except Exception:
+            draft = None
+        seed_card_id = (draft or {}).get("seed_card_id") if draft else None
+        if not seed_card_id:
+            await query.message.reply_text("❌ Карточка потеряна, статус не сменил.")
+            return
+        try:
+            await asyncio.to_thread(
+                update_notion_status, seed_card_id, new_status, _get_active_brand_name(),
+            )
+            try:
+                await query.edit_message_text(
+                    f"✅ Статус карточки → <b>{new_status}</b>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                await query.message.reply_text(f"✅ Статус карточки → {new_status}")
+        except Exception as e:
+            logger.error(f"[carousel_set_status] update failed: {e}", exc_info=True)
+            await query.message.reply_text(f"❌ Не смог сменить статус: {e}")
+        return
+
+    if query.data == "carousel_finalize":
+        # «✅ Готово, закрыть» — явное удаление draft.
+        try:
+            await query.answer("Закрыто")
+        except Exception:
+            pass
+        _clear_carousel_surg_state(query.from_user.id)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            from carousel.handlers import finalize_carousel
+        except Exception as e:
+            logger.error(f"[carousel] import finalize_carousel failed: {e}", exc_info=True)
+            return
+        await finalize_carousel(update, context)
         return
 
     if query.data == "carousel_cancel":
@@ -11245,6 +12034,119 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка card_continue: {e}", exc_info=True)
             await query.edit_message_text(f"Ошибка: {e}")
+        return
+
+    # ─── card → carousel: точка входа из меню карточки в Pipeline #6 ────
+    # Артём (25 мая): «карусель — отдельно стоящий пайплайн, хотя должна
+    # уметь брать сценарий существующей карточки». Этот handler читает
+    # script из карточки → кладёт seed в pending → показывает выбор шаблона.
+    # После клика carousel_tpl:<X> если в pending есть `carousel_seed_text` —
+    # generate_carousel_preview зовётся СРАЗУ с seed как темой, без ожидания
+    # state=awaiting_carousel_theme.
+    # ChatGPT review M7 (27 May 2026): «🔄 Сделать заново» раньше работало через
+    # мутацию query.data + fall-through на «card_to_carousel:» — НЕ работало
+    # на проде (PTB CallbackQuery с __slots__: setattr query.data может пройти
+    # тихо, но второй блок `if` не подхватывал новое значение в той же async-функции).
+    # Артём поймал 27 мая. Правильное решение: вынести логику в helper, два
+    # handler'а зовут её с force-флагом.
+    _card_carousel_force = False
+    _card_carousel_prefix: str | None = None
+    if query.data.startswith("card_to_carousel_force:"):
+        try:
+            from carousel.handlers import _drop_carousel_draft
+            _drop_carousel_draft(query.from_user.id)
+        except Exception as e:
+            logger.warning(f"[card_to_carousel_force] drop draft failed: {e}")
+        _card_carousel_force = True
+        _card_carousel_prefix = query.data.split(":", 1)[1]
+    elif query.data.startswith("card_to_carousel:"):
+        _card_carousel_prefix = query.data.split(":", 1)[1]
+
+    if _card_carousel_prefix is not None:
+        card_id_prefix = _card_carousel_prefix
+        all_cards = await asyncio.to_thread(fetch_notion_cards, limit=30)
+        card = _pick_card_apply_brand(all_cards, card_id_prefix)
+        if not card:
+            await query.edit_message_text("Карточка не найдена.")
+            return
+        full_id = card["id"]
+        try:
+            script_text = await asyncio.to_thread(fetch_notion_page_script, full_id)
+        except Exception as e:
+            logger.error(f"[card_to_carousel] fetch_notion_page_script failed: {e}", exc_info=True)
+            await query.edit_message_text(
+                f"❌ Не смог загрузить сценарий из Notion: {e}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{full_id[:20]}")],
+                ]),
+            )
+            return
+        if not script_text or not script_text.strip():
+            await query.edit_message_text(
+                "❌ В карточке нет сценария — добавь сценарий, потом возвращайся "
+                "и нажми «🎨 В карусель» снова.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{full_id[:20]}")],
+                ]),
+            )
+            return
+
+        # C (26 May 2026): защита от перезаписи. Если для этой же карточки уже
+        # есть draft карусели — показать выбор «открыть существующий / заново»,
+        # вместо тихой перезаписи прошлой работы.
+        # 27 May 2026: при force=True (юзер нажал «🔄 Сделать заново») draft
+        # УЖЕ сдропан выше — C-check пропускаем, иначе бесконечный диалог.
+        try:
+            from carousel.handlers import _load_carousel_draft, _existing_carousel_for_card_detect
+            existing_draft = _load_carousel_draft(user_id)
+            card_url = card.get("url", "")
+            if (not _card_carousel_force) and _existing_carousel_for_card_detect(existing_draft, card_url):
+                # Сценарий есть. Считаем сколько слайдов и когда.
+                n_slides = len(existing_draft.get("slides", []))
+                # F6: «Открыть существующий» теперь несёт card_id — handler
+                # сверит ownership перед открытием.
+                await query.edit_message_text(
+                    f"⚠️ Для этой карточки уже есть карусель — <b>{n_slides} слайдов</b>.\n\n"
+                    "Открыть существующий сценарий или сделать заново с нуля?",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✏️ Открыть существующий", callback_data=f"carousel_back_to_preview:{full_id[:20]}")],
+                        [InlineKeyboardButton("🔄 Сделать заново", callback_data=f"card_to_carousel_force:{full_id[:20]}")],
+                        [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{full_id[:20]}")],
+                    ]),
+                )
+                return
+        except Exception as e:
+            logger.warning(f"[card_to_carousel] draft-detect failed (non-fatal): {e}")
+
+        # F4 (26 May 2026): seed как session-объект {session_id, card_id, ...}.
+        # Каждый клик «🎨 В карусель» создаёт НОВЫЙ session_id — старые
+        # кнопки шаблона от прошлой карточки/прошлого клика становятся stale
+        # и handler их отбрасывает.
+        _clear_carousel_surg_state(query.from_user.id)
+        pending[user_id] = pending.get(user_id) or {}
+        seed = _make_carousel_seed(
+            card_id=full_id,
+            card_url=card.get("url", ""),
+            text=script_text.strip(),
+        )
+        pending[user_id]["carousel_seed"] = seed
+        # state НЕ ставим — carousel_tpl запустит превью сразу,
+        # без awaiting_carousel_theme (см. handler ниже).
+        _save_pending(pending)
+        session_id = seed["session_id"]
+        await query.edit_message_text(
+            "🎨 <b>Карусель из карточки</b>\n\n"
+            f"Сценарий <i>«{card['title'][:60]}»</i> возьму как seed для Opus.\n\n"
+            "Выбери стиль обложки:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("M2 · Pit-Stop (universал, гайды/советы)", callback_data=f"carousel_tpl:M2:{session_id}")],
+                [InlineKeyboardButton("M1 · Anniversary (анонсы, события, юбилеи)", callback_data=f"carousel_tpl:M1:{session_id}")],
+                [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{full_id[:20]}")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="carousel_cancel")],
+            ]),
+        )
         return
 
     if query.data.startswith("card_script:"):
@@ -11503,9 +12405,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             from auto_broll import generate_auto_broll
-            # Проект получит ровно 6 графичных вставок — старые клипы убираем.
-            for _old in proj_dir.glob("broll_*.mp4"):
-                _old.unlink()
+            # W1 (27 May 2026): namespace separation. AutoBroll теперь пишет
+            # в proj_dir/autobroll/auto_NN.mp4 — отдельно от broll_NN.mp4
+            # (SMM-загрузки). Чистим ТОЛЬКО старые auto_*.mp4, реальные
+            # клипы НЕ трогаем (раньше затирали SMM-видео).
+            _autobroll_dir = proj_dir / "autobroll"
+            if _autobroll_dir.exists():
+                for _old in _autobroll_dir.glob("auto_*.mp4"):
+                    _old.unlink()
             clips, cost_usd = await asyncio.to_thread(
                 generate_auto_broll, script_text, proj_dir
             )
@@ -11528,6 +12435,76 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"✅ Графика готова: {len(clips)} вставок для «{card['title']}».\n"
             f"{_cost_line}\n\n"
+            f"Дальше — собери ролик в Про-монтаже (хук-аватар → 50/50 → CTA).",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 Собрать ролик", callback_data=f"card_assemble:{full_id[:20]}")],
+                [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{full_id[:20]}")],
+            ]),
+        )
+        return
+
+    if query.data.startswith("card_hfbroll:"):
+        # Автономная графика через HyperFrames (ВТОРОЙ движок, параллельно
+        # Remotion). Claude Code на сервере пишет 6 HTML-композиций и рендерит
+        # их. Выход в proj_dir/hyperframes/hf_NN.mp4 — отдельный namespace.
+        # См. project_maksim_dual_broll_engine.md.
+        card_id_prefix = query.data.split(":", 1)[1]
+        all_cards = await asyncio.to_thread(fetch_notion_cards, limit=30)
+        card = _pick_card_apply_brand(all_cards, card_id_prefix)
+        if not card:
+            await query.edit_message_text("Карточка не найдена.")
+            return
+        full_id = card["id"]
+        _hf_data = {"notion_page_id": full_id, "card_data": {"title": card["title"]}}
+        proj_dir = _project_dir(_hf_data)
+        if not proj_dir:
+            await query.edit_message_text("❌ Не удалось определить папку проекта.")
+            return
+        proj_dir.mkdir(parents=True, exist_ok=True)
+
+        script_text = await asyncio.to_thread(fetch_notion_page_script, full_id)
+        if not script_text or len(script_text.strip()) < 30:
+            await query.edit_message_text(
+                "❌ В карточке нет сценария.\n\n"
+                "Сначала сгенерируй или впиши сценарий — графика строится из него."
+            )
+            return
+
+        await query.edit_message_text(
+            f"🎨 Графика (HyperFrames) для «{card['title']}»\n\n"
+            f"Claude на сервере пишет 6 HTML-вставок и рендерит их через "
+            f"HyperFrames. Это ~8–12 минут — пришлю, когда будет готово."
+        )
+
+        try:
+            from hyperframes_broll import generate_hyperframes_broll
+            # Чистим только старые hf_*.mp4 в hyperframes/ (namespace отдельный
+            # от autobroll/ и от SMM broll_*.mp4 — их НЕ трогаем).
+            _hf_dir = proj_dir / "hyperframes"
+            if _hf_dir.exists():
+                for _old in _hf_dir.glob("hf_*.mp4"):
+                    _old.unlink()
+            clips, cost_usd = await asyncio.to_thread(
+                generate_hyperframes_broll, script_text, proj_dir
+            )
+        except Exception as e:
+            logger.error(f"card_hfbroll failed: {e}", exc_info=True)
+            await query.edit_message_text(
+                f"⚠️ Не удалось сгенерировать графику (HyperFrames):\n{e}\n\n"
+                f"Можно повторить, попробовать Remotion-движок или подобрать "
+                f"B-roll вручную (🎬 B-roll)."
+            )
+            return
+
+        _on_sub = bool(os.getenv("CLAUDE_CODE_OAUTH_TOKEN"))
+        _cost_line = (
+            f"💳 Claude: ~${cost_usd:.3f} из подписки Max (не реальное списание)"
+            if _on_sub else
+            f"💵 Claude (метеред API): ${cost_usd:.3f}"
+        )
+        await query.edit_message_text(
+            f"✅ Графика (HyperFrames) готова: {len(clips)} вставок для "
+            f"«{card['title']}».\n{_cost_line}\n\n"
             f"Дальше — собери ролик в Про-монтаже (хук-аватар → 50/50 → CTA).",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🎬 Собрать ролик", callback_data=f"card_assemble:{full_id[:20]}")],
@@ -11705,6 +12682,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Выбор источника B-roll по namespace (фикс бага C1: план монтажа и
+        # клипы для сборки ОБЯЗАНЫ браться из одного источника). Приоритет:
+        # HyperFrames > Remotion > SMM-реал > mix. Это же даёт чистое сравнение
+        # движков — собирается ровно та графика, что только что сгенерили.
+        # `_find_broll(proj_dir, mode)` — единый источник истины и для плана
+        # (ниже), и для ассемблера (broll_mode прокидывается в него).
+        if _find_broll(proj_dir, "hf"):
+            broll_mode = "hf"
+        elif _find_broll(proj_dir, "ai"):
+            broll_mode = "ai"
+        elif _find_broll(proj_dir, "real"):
+            broll_mode = "real"
+        else:
+            broll_mode = "mix"
+        _broll_clips_for_plan = _find_broll(proj_dir, broll_mode)
+        logger.info(
+            f"[card_asm_go] broll_mode={broll_mode}, "
+            f"{len(_broll_clips_for_plan)} клипов для плана/сборки"
+        )
+
         layout_labels = {
             "split": "Сплит (50/50)",
             "dynamic": "Динамический (аватар ↔ B-roll)",
@@ -11733,8 +12730,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if script_file.exists():
                         script_text = script_file.read_text(encoding="utf-8")
 
-                # Get B-roll descriptions with durations
-                broll_files = sorted(proj_dir.glob("broll_*.mp4"), key=lambda f: f.name)
+                # Get B-roll descriptions with durations.
+                # ИЗ ТОГО ЖЕ источника, что увидит ассемблер (broll_mode) —
+                # иначе план (по числу клипов) разойдётся с реальными путями.
+                broll_files = _broll_clips_for_plan
                 broll_descriptions = []
                 for bf in broll_files:
                     try:
@@ -11888,6 +12887,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 montage_plan=montage_plan,
                 brand_name=_current_brand,
                 smart_mix_cfg=_brand_smart_cfg,
+                broll_mode=broll_mode,
             )
             size_mb = final_path.stat().st_size / 1024 / 1024
 
@@ -12268,9 +13268,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             buttons = []
 
-            # For idea cards — offer to continue pipeline
-            if card["status"] == "Идеи | старт":
-                buttons.append([InlineKeyboardButton("▶️ Продолжить пайплайн", callback_data=f"card_continue:{full_id[:20]}")])
+            # «▶️ Продолжить пайплайн» — главная навигационная кнопка карточки.
+            # На каждом статусе ведёт к следующему логическому шагу:
+            #   Идеи | старт       → подтянуть сценарий из Notion и показать «Утвердить»
+            #   Сценарий | озвучка → озвучка (card_voice)
+            #   Подбор скринкаст   → B-roll (card_broll)
+            #   Аватар | генерации → аватар (card_avatar)
+            #   Монтаж             → автосборка (card_assemble)
+            #   Готово к публикации → кросс-постинг (crosspost)
+            # Карточки без статуса / опубликованные / в архиве — кнопку не показываем.
+            _pipeline_next_step = {
+                "Идеи | старт":         ("▶️ Продолжить пайплайн",         f"card_continue:{full_id[:20]}"),
+                "Сценарий | озвучка":   ("▶️ Продолжить: озвучка",         f"card_voice:{full_id[:20]}"),
+                "Подбор скринкаст":     ("▶️ Продолжить: B-roll",          f"card_broll:{full_id[:20]}"),
+                "Аватар | генерации":   ("▶️ Продолжить: аватар",          f"card_avatar:{full_id[:20]}"),
+                "Монтаж":               ("▶️ Продолжить: сборка",          f"card_assemble:{full_id[:20]}"),
+                "Готово к публикации":  ("▶️ Продолжить: публикация",      f"crosspost:{full_id[:20]}"),
+            }
+            _next_step = _pipeline_next_step.get(card["status"])
+            if _next_step:
+                buttons.append([InlineKeyboardButton(_next_step[0], callback_data=_next_step[1])])
 
             # Resolve project dir early — needed for B-roll count and other checks
             _tmp_data = {"notion_page_id": full_id, "card_data": {"title": card["title"]}}
@@ -12291,17 +13308,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if _tmp_proj and _tmp_proj.exists() and any(_tmp_proj.glob("broll_*.mp4")):
                 _broll_n = len(list(_tmp_proj.glob("broll_*.mp4")))
                 buttons.append([InlineKeyboardButton(f"📋 Управление B-roll ({_broll_n} клипов)", callback_data=f"broll_manage:{full_id[:20]}")])
-            # Autonomous Remotion graphics — Claude на сервере рисует
-            # 6 графичных B-roll-вставок прямо из сценария карточки.
+            # Autonomous graphics — Claude на сервере рисует 6 графичных
+            # B-roll-вставок прямо из сценария карточки. ДВА движка:
+            # Remotion (React) и HyperFrames (HTML) — можно сравнить.
             buttons.append([InlineKeyboardButton(
                 "🎨 Графика из сценария (Remotion)",
                 callback_data=f"card_autobroll:{full_id[:20]}",
+            )])
+            buttons.append([InlineKeyboardButton(
+                "🎨 Графика из сценария (HyperFrames)",
+                callback_data=f"card_hfbroll:{full_id[:20]}",
             )])
             if NOTION_GUIDES_DB:
                 buttons.append([InlineKeyboardButton("📎 Создать гайд", callback_data=f"card_guide:{full_id[:20]}")])
             if HEYGEN_API_KEY:
                 buttons.append([InlineKeyboardButton("🤖 Сгенерировать аватар", callback_data=f"card_avatar:{full_id[:20]}")])
             buttons.append([InlineKeyboardButton("📜 Сценарий", callback_data=f"card_script:{full_id[:20]}")])
+            # 26 May 2026: точка входа в Pipeline #6 (Карусель) из карточки.
+            # Бот берёт сценарий карточки как seed для Opus, минует ввод темы.
+            # Доступно ТОЛЬКО для бренда maksim — карусель пайплайн под него.
+            if _get_active_brand_name() == "maksim":
+                buttons.append([InlineKeyboardButton(
+                    "🎨 В карусель",
+                    callback_data=f"card_to_carousel:{full_id[:20]}",
+                )])
             buttons.append([InlineKeyboardButton("📝 Описание для публикации", callback_data="gen_description")])
             buttons.append([InlineKeyboardButton("🖼 Сменить обложку", callback_data=f"card_cover:{full_id[:20]}")])
 
@@ -12328,7 +13358,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # clips are saved to the project folder.
             _has_avatar = bool(_tmp_proj and _tmp_proj.exists() and any(_tmp_proj.glob("avatar_*.mp4")))
             _has_video_broll = bool(_tmp_proj and _tmp_proj.exists() and any(_tmp_proj.glob("broll_*.mp4")))
-            _photo_lib_count = len(_list_photo_library())
+            _photo_lib_count = len(_list_brand_photo_library())
             _has_photo_lib = _photo_lib_count > 0
             _has_broll = _has_video_broll or _has_photo_lib
             if _has_avatar and _has_broll:
@@ -13314,8 +14344,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # First time — offer to send YouTube link manually
                 data["state"] = "broll_youtube_or_stock"
                 _save_pending(pending)
-                _photo_count = len(_list_photo_library())
                 _brand_now = _get_active_brand_name()
+                _photo_count = len(_list_brand_photo_library(_brand_now))
                 _card_id_for_autobroll = data.get("notion_page_id", "")[:20]
                 buttons = []
                 # «🎨 Графика из сценария» — автономный Remotion-B-roll
@@ -13329,6 +14359,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     buttons.append([InlineKeyboardButton(
                         "🎨 Графика из сценария (Remotion)",
                         callback_data=f"card_autobroll:{_card_id_for_autobroll}",
+                    )])
+                    buttons.append([InlineKeyboardButton(
+                        "🎨 Графика из сценария (HyperFrames)",
+                        callback_data=f"card_hfbroll:{_card_id_for_autobroll}",
                     )])
                 buttons.extend([
                     [InlineKeyboardButton("📥 Готовые материалы (фото + видео)", callback_data="broll_ready")],
@@ -13477,6 +14511,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
                 await query.answer(f"✅ Клип #{idx+1} выбран ({len(selected)} всего)")
+
+            # Live-update footer-сообщения категории (если сохранили id) —
+            # счётчик «✅ Выбрано всего: N клипов» в актуальном состоянии.
+            footer_msg_id = data.get("broll_lib_footer_msg_id")
+            footer_chat_id = data.get("broll_lib_footer_chat_id")
+            footer_category = data.get("broll_lib_footer_category")
+            if footer_msg_id and footer_chat_id and footer_category:
+                n_total = len(selected)
+                new_text = (
+                    "Нажми «Выбрать» под нужными, потом «Сохранить».\n\n"
+                    f"✅ Выбрано всего: *{n_total}* клипов"
+                    if n_total else
+                    "Нажми «Выбрать» под нужными, потом «Сохранить»."
+                )
+                footer_buttons = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💾 Сохранить выбранные в Notion", callback_data="broll_approve")],
+                    [InlineKeyboardButton("📚 Другая категория", callback_data="broll_local_lib")],
+                    [InlineKeyboardButton("🔀 Обновить выборку", callback_data=f"broll_lib_cat:{footer_category}")],
+                    [InlineKeyboardButton("◀️ К меню B-roll", callback_data="broll")],
+                ])
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=footer_chat_id,
+                        message_id=footer_msg_id,
+                        text=new_text,
+                        parse_mode="Markdown",
+                        reply_markup=footer_buttons,
+                    )
+                except Exception as e:
+                    # Footer мог быть удалён, устарел или is identical — не критично.
+                    logger.debug(f"[broll_select] footer edit skipped: {e}")
         return
 
     # --- Cross-posting (direct API) ---
@@ -14787,13 +15852,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Explicit photo library path — user picks this when they want Ken Burns
         # clips built from Midjourney photos instead of video B-roll.
         #
-        # `broll_photo_lib`      — first entry, shows 3 random samples
-        # `broll_photo_reroll`   — user clicked "Другие 3 фото", sends a fresh batch
-        photos = _list_photo_library()
+        # `broll_photo_lib`      — first entry, shows random sample (PHOTO_PREVIEW_COUNT)
+        # `broll_photo_reroll`   — user clicked «Другая выборка», sends a fresh batch
+        _brand_now_pl = _get_active_brand_name()
+        photos = _list_brand_photo_library(_brand_now_pl)
         if not photos:
+            empty_hint = (
+                "Закинь фото через «📥 Готовые материалы» — они попадут в проект "
+                "и в общую библиотеку Максима."
+                if _brand_now_pl == "maksim" else
+                "Закинь картинки в `broll-library/photos/midjourney/`."
+            )
             await query.edit_message_text(
-                "📸 Фото-библиотека пуста.\n\n"
-                "Закинь картинки в `broll-library/photos/midjourney/`.",
+                f"📸 Фото-библиотека пуста.\n\n{empty_hint}",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("◀️ Назад", callback_data="broll")],
                 ]),
@@ -14812,12 +15883,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Pick 6 fresh random samples (max media group size we want for a
-        # preview — 10 is Telegram's hard ceiling, 6 gives a good feel for
-        # variety without wall-of-photos). Exclude already-shown so reroll
-        # gives genuinely new options.
+        # Pick fresh random samples (max media group size is 10; PHOTO_PREVIEW_COUNT
+        # = 9 by default — даёт быстрее выбрать без wall-of-photos). Exclude
+        # already-shown so reroll gives genuinely new options.
         import random as _random
-        PREVIEW_COUNT = 6
+        PREVIEW_COUNT = PHOTO_PREVIEW_COUNT
         shown_set = set(data.get("photo_lib_shown", [])) if data else set()
         remaining = [p for p in photos if str(p) not in shown_set]
         if len(remaining) < PREVIEW_COUNT:
@@ -14828,6 +15898,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         shown_set.update(str(p) for p in sample)
         if data is not None:
             data["photo_lib_shown"] = list(shown_set)
+            # Сохраняем текущую девятку — toggle handler идентифицирует фото по индексу.
+            data["photo_lib_sample"] = [str(p) for p in sample]
+            # Накопительный список выбранных — НЕ сбрасываем на reroll
+            # (новые «другие» прибавляются к ранее выбранным).
+            if "photo_lib_selected" not in data:
+                data["photo_lib_selected"] = []
             _save_pending(pending)
 
         # Estimate how many photos will actually land in the final video so
@@ -14884,8 +15960,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"\n\n👀 Просмотрено превью: *{seen_count}/{len(photos)}*"
             if seen_count > PREVIEW_COUNT else ""
         )
-        # Honest final-count line — the preview shows 6 photos, but the
-        # final video uses 8-20 depending on avatar length.
+        # Honest final-count line — the preview shows PHOTO_PREVIEW_COUNT photos,
+        # but the final video uses 8-20 depending on avatar length.
         if est_photo_count and est_avatar_sec:
             final_line = (
                 f"🎬 В финальный ролик пойдёт *~{est_photo_count} фото* "
@@ -14898,25 +15974,131 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"на кадр — зависит от длины аватара. Порядок рандомный, "
                 f"эффект Ken Burns."
             )
+        photo_lib_title = (
+            "📸 *Фото-библиотека Максима*"
+            if _brand_now_pl == "maksim" else
+            "📸 *Фото-библиотека Midjourney*"
+        )
+        # Клавиатура выбора: 3×3 цифровые toggle + действия снизу.
+        # Состояние ✅/⬜ берётся из photo_lib_selected (накопительно через rerolls).
+        selected_paths = set(data.get("photo_lib_selected", []) if data else [])
+        photo_kb_rows = _build_photo_lib_pick_kb(
+            sample_paths=[str(p) for p in sample],
+            selected_set=selected_paths,
+            full_lib_size=len(photos),
+            card_id_short=cid,
+        )
+        n_selected_total = len(selected_paths)
+        select_hint = (
+            f"\n\n✅ Выбрано всего: *{n_selected_total}*"
+            if n_selected_total else
+            "\n\n_Тап по цифре — отметить фото. «➕ Добавить в проект» — копирует выбранные._"
+        )
         await context.bot.send_message(
             chat_id=query.message.chat_id,
             text=(
-                f"📸 *Фото-библиотека Midjourney*\n\n"
+                f"{photo_lib_title}\n\n"
                 f"Всего в библиотеке *{len(photos)}* фото. "
-                f"Выше — *{len(sample)} случайных превью*.\n\n"
-                f"{final_line}{viewed_hint}"
+                f"Выше — *{len(sample)} случайных превью*."
+                f"{select_hint}{viewed_hint}"
             ),
             parse_mode="Markdown",
+            reply_markup=photo_kb_rows,
+        )
+        return
+
+    # ── Photo library: toggle отдельной фотки ──
+    if query.data.startswith("photo_lib_toggle:"):
+        try:
+            idx = int(query.data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Кривой индекс", show_alert=False)
+            return
+        sample = (data or {}).get("photo_lib_sample") or []
+        if not 0 <= idx < len(sample):
+            await query.answer("Это превью устарело — нажми «Другая выборка»", show_alert=True)
+            return
+        path_str = sample[idx]
+        selected: list[str] = list(data.get("photo_lib_selected") or [])
+        if path_str in selected:
+            selected.remove(path_str)
+            answer_msg = f"⬜ #{idx+1} убрано"
+        else:
+            selected.append(path_str)
+            answer_msg = f"✅ #{idx+1} выбрано"
+        data["photo_lib_selected"] = selected
+        _save_pending(pending)
+        # Перерисуем клавиатуру (текст не трогаем — Telegram быстрее работает).
+        try:
+            photos_full = _list_brand_photo_library(_get_active_brand_name())
+            card_id = data.get("notion_page_id", "")[:20]
+            new_kb = _build_photo_lib_pick_kb(
+                sample_paths=sample,
+                selected_set=set(selected),
+                full_lib_size=len(photos_full),
+                card_id_short=card_id,
+            )
+            await query.edit_message_reply_markup(reply_markup=new_kb)
+        except Exception as e:
+            logger.debug(f"[photo_lib_toggle] edit_markup skipped: {e}")
+        await query.answer(answer_msg, show_alert=False)
+        return
+
+    # ── Photo library: добавить выбранные в проект ──
+    if query.data == "photo_lib_add":
+        proj = _project_dir(data) if data else None
+        if not proj:
+            await query.answer("Нет активной карточки", show_alert=True)
+            return
+        selected = list((data or {}).get("photo_lib_selected") or [])
+        if not selected:
+            await query.answer("Ни одна фотография не выбрана. Тапни цифру.", show_alert=True)
+            return
+        photos_dir = proj / "photos"
+        photos_dir.mkdir(parents=True, exist_ok=True)
+        existing_names = sorted(p.name for p in photos_dir.iterdir() if p.is_file())
+        import shutil as _sh
+        n_added = 0
+        n_skipped = 0
+        for src_str in selected:
+            src = Path(src_str)
+            if not src.exists():
+                n_skipped += 1
+                continue
+            ext = src.suffix.lower() if src.suffix else ".jpg"
+            next_n = 1
+            while f"ready_{next_n:02d}{ext}" in existing_names:
+                next_n += 1
+            dest = photos_dir / f"ready_{next_n:02d}{ext}"
+            try:
+                _sh.copy2(str(src), str(dest))
+                existing_names.append(dest.name)
+                n_added += 1
+            except Exception as e:
+                logger.warning(f"[photo_lib_add] copy failed: {e}")
+                n_skipped += 1
+        # Чистим состояние выбора — следующий заход начинается с нуля.
+        data["photo_lib_selected"] = []
+        data["photo_lib_sample"] = []
+        _save_pending(pending)
+        cid_short = (data.get("notion_page_id") or "")[:20]
+        skipped_note = f" ({n_skipped} пропущено)" if n_skipped else ""
+        await query.edit_message_text(
+            f"✅ Добавлено в проект: *{n_added}* фото{skipped_note}.\n\n"
+            "Теперь можно двигаться дальше — озвучить, сгенерировать аватар "
+            "или собрать ролик. Все добавленные фото лежат в `projects/<id>/photos/` "
+            "и пойдут в Smart-mix / Pro-монтаж как B-roll.",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎬 Собрать ролик из библиотеки", callback_data=f"card_assemble:{cid}")],
-                [InlineKeyboardButton("🎲 Другие 3 фото", callback_data="broll_photo_reroll")],
-                [InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")],
+                [InlineKeyboardButton("◀️ К меню B-roll", callback_data="broll")],
+                [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{cid_short}")],
             ]),
         )
         return
 
     if query.data == "broll_local_lib":
-        # Show local B-roll library categories matched against script
+        # Show local B-roll library categories matched against script.
+        # Brand-aware: maksim → clips/maksim/<cat>, default → broll-library/<cat>.
         if not BROLL_LIBRARY_DIR.exists():
             await query.edit_message_text(
                 "📚 Локальная библиотека не найдена на этом сервере.",
@@ -14926,30 +16108,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        _brand_now_cl = _get_active_brand_name()
         script_text = data.get("script", "") or ""
         title_text = data.get("card_data", {}).get("title", "") or ""
-        combined = f"{title_text} {script_text}".lower()
+        combined = f"{title_text} {script_text}"
 
-        # Match categories by keywords
-        matched = []
-        for category, keywords in BROLL_CATEGORY_KEYWORDS.items():
-            if any(kw.lower() in combined for kw in keywords):
-                matched.append(category)
+        # Brand-aware keyword match (maksim → MAKSIM_CLIP_KEYWORDS, иначе AI-словарь)
+        matched = _match_brand_clip_categories(_brand_now_cl, combined)
 
-        # Count clips per category — show ALL categories so user can pick any
-        all_categories = []
-        for category in BROLL_CATEGORY_KEYWORDS.keys():
-            cat_dir = BROLL_LIBRARY_DIR / category
-            if not cat_dir.exists():
-                continue
-            n_clips = sum(1 for p in cat_dir.glob("*.mp4") if p.stat().st_size > 1000)
-            if n_clips == 0:
-                continue
-            all_categories.append((category, n_clips, category in matched))
+        # Brand-aware список категорий с непустыми клипами
+        brand_lib = _list_brand_clip_library(_brand_now_cl)
+        all_categories = [(cat, len(clips), cat in matched) for cat, clips in brand_lib]
 
         if not all_categories:
+            empty_hint = (
+                "📚 Библиотека пуста.\n\n"
+                "Загрузи клипы через «📥 Готовые материалы» — выбери категорию "
+                "перед загрузкой, и они автоматом попадут в библиотеку Максима."
+                if _brand_now_cl == "maksim" else
+                "📚 Библиотека пуста."
+            )
             await query.edit_message_text(
-                "📚 Библиотека пуста.",
+                empty_hint,
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("◀️ Назад", callback_data="broll")],
                 ]),
@@ -14959,15 +16139,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Sort: matched first, then by clip count
         all_categories.sort(key=lambda x: (not x[2], -x[1]))
 
-        cat_emoji = {
+        # Brand-aware подписи: для maksim — русские названия и тематические эмодзи
+        default_cat_emoji = {
             "robots": "🤖", "ai-tools": "💬", "tech-general": "💻",
             "social-media": "📱", "space": "🚀", "medical": "🏥", "ai-video": "🎞",
             "apps": "📲", "payments": "💳",
         }
         buttons = []
         for category, n_clips, is_matched in all_categories:
-            emoji = cat_emoji.get(category, "📁")
-            label = f"{emoji} {category} ({n_clips})"
+            if _brand_now_cl == "maksim" and category in MAKSIM_CATEGORY_UI:
+                emoji, ru_name = MAKSIM_CATEGORY_UI[category]
+                label = f"{emoji} {ru_name} ({n_clips})"
+            else:
+                emoji = default_cat_emoji.get(category, "📁")
+                label = f"{emoji} {category} ({n_clips})"
             if is_matched:
                 label = "⭐ " + label
             buttons.append([InlineKeyboardButton(label, callback_data=f"broll_lib_cat:{category}")])
@@ -14986,7 +16171,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("broll_lib_cat:"):
         category = query.data.split(":", 1)[1]
-        cat_dir = BROLL_LIBRARY_DIR / category
+        _brand_now_lc = _get_active_brand_name()
+        if _brand_now_lc == "maksim":
+            cat_dir = BROLL_LIBRARY_DIR / "clips" / "maksim" / category
+        else:
+            cat_dir = BROLL_LIBRARY_DIR / category
         if not cat_dir.exists():
             await query.edit_message_text(
                 f"Категория {category} не найдена.",
@@ -14996,11 +16185,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Build clip list for this category (limit to ~15 to avoid flooding chat)
+        # Build clip list for this category — limit CLIP_PREVIEW_COUNT (10),
+        # иначе чат заваливается длинной полосой send_video.
+        # Принимаем все видео-расширения VIDEO_LIB_EXTS (.mp4/.mov/.webm),
+        # иначе расходится с меню «Моя библиотека клипов» которое тоже их считает —
+        # симптом: кнопка категории показывает N, в категории «0 клипов из 0».
         import random as _random
-        all_clips = [p for p in cat_dir.glob("*.mp4") if p.stat().st_size > 1000]
+        all_clips = [
+            p for p in cat_dir.iterdir()
+            if p.is_file()
+            and p.suffix.lower() in VIDEO_LIB_EXTS
+            and p.stat().st_size > 1000
+        ]
         _random.shuffle(all_clips)
-        show_clips = all_clips[:15]
+        show_clips = all_clips[:CLIP_PREVIEW_COUNT]
 
         new_clip_dicts = [
             {
@@ -15053,18 +16251,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f"Failed to send local clip {c['filename']}: {e}")
 
-        # Final action panel
+        # Final action panel — со счётчиком выбранных всего (по всему пулу,
+        # а не только текущей выборке — Артём может смешивать категории).
         buttons = [
             [InlineKeyboardButton("💾 Сохранить выбранные в Notion", callback_data="broll_approve")],
             [InlineKeyboardButton("📚 Другая категория", callback_data="broll_local_lib")],
             [InlineKeyboardButton("🔀 Обновить выборку", callback_data=f"broll_lib_cat:{category}")],
             [InlineKeyboardButton("◀️ К меню B-roll", callback_data="broll")],
         ]
-        await context.bot.send_message(
+        n_selected_total = len(data.get("broll_selected", []) or [])
+        footer_text = (
+            "Нажми «Выбрать» под нужными, потом «Сохранить».\n\n"
+            f"✅ Выбрано всего: *{n_selected_total}* клипов"
+            if n_selected_total else
+            "Нажми «Выбрать» под нужными, потом «Сохранить»."
+        )
+        footer_msg = await context.bot.send_message(
             chat_id=query.message.chat_id,
-            text="Нажми «Выбрать» под нужными, потом «Сохранить».",
+            text=footer_text,
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+        # Сохраняем id footer-сообщения для live-обновления счётчика при select
+        data["broll_lib_footer_msg_id"] = footer_msg.message_id
+        data["broll_lib_footer_chat_id"] = query.message.chat_id
+        data["broll_lib_footer_category"] = category
+        _save_pending(pending)
         return
 
     if query.data == "broll_shooting_list":
@@ -15252,6 +16464,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # trimmed per brand, see BRANDS[brand]["auto_trim_video_sec"]).
         # Different from broll_youtube: no 5-sec ffmpeg chopping, no YouTube
         # download — the client's own footage is the end material.
+        #
+        # 25 May 2026: для бренда maksim добавлены кнопки-фильтры категорий
+        # библиотеки — гибрид (вариант В): дефолт = personal, опт-аут возможен.
+        # Каждый загруженный фото/видео идёт И в карточку, И в общую библиотеку
+        # под выбранную категорию (если не выбран опт-аут).
         data["state"] = "broll_ready_material"
         _save_pending(pending)
         _brand_now = _get_active_brand_name()
@@ -15259,22 +16476,74 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trim_sec = _brand_cfg.get("auto_trim_video_sec")
         trim_note = (
             f"🎬 Видео длиннее {trim_sec}с будут автоматически обрезаны "
-            f"до {trim_sec}с (с начала). Оригинал сохранится в _raw_uploads/.\n\n"
+            f"до {trim_sec}с (с начала). Оригинал сохранится в _raw_uploads/ "
+            f"и пойдёт в библиотеку целиком.\n\n"
             if trim_sec else
             "🎬 Видео сохраняются целиком.\n\n"
         )
-        await query.edit_message_text(
-            f"📥 Готовые материалы (бренд: *{_brand_now}*)\n\n"
-            "Скинь сюда **фото и/или видео** по одному или пачкой — сохраню в проект.\n\n"
-            f"📸 Фото → в `projects/<id>/photos/`\n"
-            f"{trim_note}"
-            "Когда закончишь — нажми «✅ Готово».",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Готово", callback_data="broll_ready_done")],
-                [InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")],
-            ]),
+        if _brand_now == "maksim":
+            current_cat = data.get("broll_lib_category") or _MAKSIM_READY_LIB_DEFAULT
+            cat_label = _maksim_ready_category_label(current_cat)
+            await query.edit_message_text(
+                f"📥 *Готовые материалы* (бренд: *{_brand_now}*)\n\n"
+                f"📂 Категория в библиотеке: *{cat_label}*\n"
+                f"_(нажми ниже, чтобы сменить — выбор живёт до конца этого режима)_\n\n"
+                f"Скинь сюда **фото и/или видео** по одному или пачкой. "
+                f"Каждый материал пойдёт И в карточку, И в общую библиотеку под "
+                f"выбранную категорию (✋ — только в карточку).\n\n"
+                f"{trim_note}"
+                f"Когда закончишь — нажми «✅ Готово».",
+                parse_mode="Markdown",
+                reply_markup=_maksim_ready_kb(current_cat),
+            )
+        else:
+            await query.edit_message_text(
+                f"📥 Готовые материалы (бренд: *{_brand_now}*)\n\n"
+                "Скинь сюда **фото и/или видео** по одному или пачкой — сохраню в проект.\n\n"
+                f"📸 Фото → в `projects/<id>/photos/`\n"
+                f"{trim_note}"
+                "Когда закончишь — нажми «✅ Готово».",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Готово", callback_data="broll_ready_done")],
+                    [InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")],
+                ]),
+            )
+        return
+
+    if query.data.startswith("broll_ready_cat:"):
+        # Выбор категории библиотеки в режиме «Готовые материалы».
+        # Сохраняем в pending — действует до выхода из режима (broll_ready_done).
+        chosen = query.data.split(":", 1)[1]
+        valid = set(_MAKSIM_READY_LIB_BUTTONS) | {_MAKSIM_READY_LIB_SKIP}
+        if chosen not in valid:
+            await query.answer("Неизвестная категория", show_alert=False)
+            return
+        data["broll_lib_category"] = chosen
+        _save_pending(pending)
+        cat_label = _maksim_ready_category_label(chosen)
+        # Перерисовываем шапку с новой подписью + клавиатуру с галкой
+        _brand_cfg = _get_active_brand()
+        trim_sec = _brand_cfg.get("auto_trim_video_sec")
+        trim_note = (
+            f"🎬 Видео длиннее {trim_sec}с будут обрезаны до {trim_sec}с; "
+            f"оригинал пойдёт в библиотеку целиком.\n\n"
+            if trim_sec else
+            "🎬 Видео сохраняются целиком.\n\n"
         )
+        try:
+            await query.edit_message_text(
+                f"📥 *Готовые материалы* (бренд: *maksim*)\n\n"
+                f"📂 Категория в библиотеке: *{cat_label}*\n\n"
+                f"Скинь фото и/или видео. {trim_note}"
+                f"Когда закончишь — «✅ Готово».",
+                parse_mode="Markdown",
+                reply_markup=_maksim_ready_kb(chosen),
+            )
+        except Exception as e:
+            # Edit может упасть если сообщение совпадает — это OK
+            logger.debug(f"[broll_ready_cat] edit skipped: {e}")
+        await query.answer(f"✓ {cat_label}", show_alert=False)
         return
 
     if query.data == "broll_ready_done":
@@ -15783,24 +17052,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # жестов. Поэтому для maksim предлагаем строго Avatar IV (v4 →
         # use_avatar_iv_model=true).
         if _get_active_brand_name() == "maksim":
+            # 24 мая 2026 — Avatar 3 = рекомендованный дефолт (вывод Максима:
+            # разница в поведении с IV минимальна, IV в разы дороже). «Свой
+            # голос» теперь без жёсткой версии — выбор 3/IV на след. шаге.
             buttons = [
                 [InlineKeyboardButton(
-                    "⚡ Avatar 3 — дешевле (~$1/мин, тест/рутина)",
+                    "⚡ Avatar 3 — рекомендуем (дешевле в разы)",
                     callback_data="heygen_ver:v3")],
                 [InlineKeyboardButton(
-                    "✨ Avatar IV — качество (мимика, жесты, ~$4/мин)",
+                    "✨ Avatar IV — премиум (свои жесты, дороже)",
                     callback_data="heygen_ver:v4")],
                 [InlineKeyboardButton(
                     "🎤 Озвучить своим голосом",
-                    callback_data="heygen_selfvoice:v4")],
+                    callback_data="heygen_selfvoice")],
                 [InlineKeyboardButton("◀️ Назад к лукам", callback_data="heygen_looks")],
             ]
             ver_text = (
                 f"👤 Лук: {look_name}\n\n"
-                f"Выбери модель аватара:\n"
-                f"• ⚡ Avatar 3 — дешевле, для теста и рутины.\n"
-                f"• ✨ Avatar IV — реалистичнее (мимика, жесты рук), дороже.\n"
-                f"• 🎤 Своим голосом — пришлёшь голосовое, озвучу им (Avatar IV)."
+                f"⚡ Avatar 3 — рекомендуем. Дешевле в разы, поведение почти как у IV.\n"
+                f"   Повторяет жесты из твоей записи лука — если они спокойные, "
+                f"выглядит отлично.\n\n"
+                f"✨ Avatar IV — придумывает свои жесты, чуть живее, но в разы дороже. "
+                f"Для особых роликов.\n\n"
+                f"🎤 Своим голосом — пришлёшь голосовое, озвучу им (версию выберешь дальше)."
             )
         else:
             buttons = [
@@ -15821,6 +17095,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Фича «свой голос»: тот же шаг версии, но озвучка — записью Максима,
     # а не TTS. Резолвим лук так же, как heygen_ver, и ждём голосовое.
+    # «Свой голос» без версии → сперва выбор модели (Avatar 3 дешевле / IV
+    # дороже), потом ждём голосовое. 24 мая 2026: раньше кнопка жёстко гнала
+    # на IV (heygen_selfvoice:v4). Теперь Avatar 3 — рекомендованный дефолт.
+    if query.data == "heygen_selfvoice":
+        _lk = data.get("heygen_look_key", "default")
+        await query.edit_message_text(
+            "🎤 Озвучка своим голосом — выбери модель аватара:\n\n"
+            "⚡ Avatar 3 — рекомендуем, дешевле в разы. Повторит жесты из записи лука.\n"
+            "✨ Avatar IV — свои жесты, чуть живее, но в разы дороже.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚡ Avatar 3 (дешевле)",
+                                      callback_data="heygen_selfvoice:v3")],
+                [InlineKeyboardButton("✨ Avatar IV (дороже)",
+                                      callback_data="heygen_selfvoice:v4")],
+                [InlineKeyboardButton("◀️ Назад", callback_data=f"heygen_gen:{_lk}")],
+            ]),
+        )
+        return
+
     if query.data.startswith("heygen_selfvoice:"):
         avatar_version = query.data.split(":", 1)[1]
         look_key = data.get("heygen_look_key", "look1")
@@ -15841,11 +17134,55 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["state"] = "awaiting_selfvoice"
         pending[user_id] = data
         _save_pending(pending)
+        _sv_ver = {"v4": "Avatar IV", "v2": "Avatar 4", "v3": "Avatar 3"}.get(
+            avatar_version, "Avatar 3")
         await query.edit_message_text(
-            f"🎤 Озвучка своим голосом — {look_name}\n\n"
+            f"🎤 Озвучка своим голосом — {look_name} ({_sv_ver})\n\n"
             f"Пришли ОДНО голосовое сообщение на весь ролик. Я озвучу им аватар "
             f"(без синтеза голоса), субтитры сниму с твоей записи на монтаже.\n\n"
-            f"⏱ После записи аватар сгенерится автоматически (1-3 мин)."
+            f"После записи я переспрошу — и только после твоего «Да» запущу "
+            f"генерацию аватара (она спишет кредиты HeyGen)."
+        )
+        return
+
+    # Подтверждение «свой голос → аватар» (24 мая 2026). Гейт перед тратой
+    # кредитов HeyGen: запись принята, но генерим только после явного «Да».
+    if query.data == "selfvoice_confirm":
+        audio_path = data.get("selfvoice_audio_path")
+        if not audio_path or not Path(audio_path).exists():
+            await query.edit_message_text(
+                "⚠️ Запись потерялась (бот перезапускался?). "
+                "Нажми «🎤 Озвучить своим голосом» и пришли голосовое заново."
+            )
+            return
+        await query.edit_message_text("🎤 Принято. Запускаю генерацию аватара под твою запись…")
+        await _render_avatar_from_audio(
+            context, query.message.chat_id, audio_path,
+            data.get("selfvoice_look_id"),
+            data.get("selfvoice_look_name", "Аватар"),
+            data.get("selfvoice_version", "v4"),
+            data,
+        )
+        return
+
+    if query.data == "selfvoice_redo":
+        data["state"] = "awaiting_selfvoice"
+        pending[user_id] = data
+        _save_pending(pending)
+        await query.edit_message_text(
+            f"🔁 Ок, перезаписываем. Пришли новое голосовое сообщение "
+            f"на весь ролик — лук «{data.get('selfvoice_look_name', 'Аватар')}». "
+            f"После записи снова переспрошу перед генерацией."
+        )
+        return
+
+    if query.data == "selfvoice_cancel":
+        data["state"] = None
+        data.pop("selfvoice_audio_path", None)
+        pending[user_id] = data
+        _save_pending(pending)
+        await query.edit_message_text(
+            "❌ Отменил. Аватар не генерировал, кредиты не тронуты."
         )
         return
 
@@ -16090,25 +17427,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     _tg_compressed = None
                     if video_file.stat().st_size > 48 * 1024 * 1024:
                         _tg_compressed = ASSETS_DIR / f"heygen_{video_id[:8]}_tg.mp4"
-                        try:
-                            await asyncio.to_thread(
-                                subprocess.run,
-                                ["ffmpeg", "-y", "-i", str(video_file),
-                                 "-vf", "scale=720:-2",  # превью: даунскейл под лимит 50МБ
-                                 "-c:v", "libx264", "-preset", "veryfast",
-                                 "-crf", "28", "-c:a", "aac", "-b:a", "128k",
-                                 "-movflags", "+faststart", str(_tg_compressed)],
-                                capture_output=True, timeout=300,
+                        # 2-pass, сохраняя 1080p (раньше даунскейлили до 720p
+                        # → Avatar IV выглядел мыльно). Фолбэк на 720p внутри.
+                        ok = await asyncio.to_thread(
+                            _compress_for_telegram, str(video_file),
+                            str(_tg_compressed), duration)
+                        if ok:
+                            send_file = _tg_compressed
+                            logger.info(
+                                f"[avatar] сжал для Telegram: "
+                                f"{video_file.stat().st_size / 1048576:.0f}МБ → "
+                                f"{_tg_compressed.stat().st_size / 1048576:.0f}МБ"
                             )
-                            if _tg_compressed.exists() and _tg_compressed.stat().st_size > 0:
-                                send_file = _tg_compressed
-                                logger.info(
-                                    f"[avatar] сжал для Telegram: "
-                                    f"{video_file.stat().st_size / 1048576:.0f}МБ → "
-                                    f"{_tg_compressed.stat().st_size / 1048576:.0f}МБ"
-                                )
-                        except Exception as _ce:
-                            logger.warning(f"[avatar] компрессия для Telegram не удалась: {_ce}")
                     # Кнопки «что дальше» строим ДО отправки видео и прикрепляем
                     # под видео (reply_markup в send_video). Иначе они оказываются
                     # в «генерация…»-сообщении наверху, и пользователю приходится

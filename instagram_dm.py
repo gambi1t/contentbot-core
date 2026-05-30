@@ -593,4 +593,16 @@ async def start_webhook_server():
     site = web.TCPSite(runner, "0.0.0.0", INSTAGRAM_DM_PORT)
     await site.start()
     logger.info(f"Instagram DM webhook server started on port {INSTAGRAM_DM_PORT}")
+
+    # Самовосстановление подписки Страницы на feed (комментарии). Подписка
+    # обнуляется при перевыдаче токена / смене прав — без этого Comment-to-DM
+    # воронка тихо умирает («то работало, то слетало»). Проверяем при каждом
+    # старте бота. Не блокирует запуск сервера при сбое.
+    try:
+        import asyncio as _asyncio
+        from crosspost import ensure_page_subscribed
+        await _asyncio.to_thread(ensure_page_subscribed)
+    except Exception as e:
+        logger.warning(f"[ig-subscribe] вызов при старте не удался: {e}")
+
     return runner
