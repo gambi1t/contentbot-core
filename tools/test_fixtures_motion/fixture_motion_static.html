@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="UTF-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<style>
+  html, body { width: 1080px; height: 1920px; margin: 0; background: #0A0A0A; overflow: hidden; }
+  #bar { position: absolute; left: 60px; top: 600px;
+         width: 800px; height: 200px; background: #FF5722; }
+</style>
+</head>
+<body>
+<div id="scene" data-composition-id="scene_test" data-width="1080" data-height="1920" data-duration="5">
+  <div id="bar"></div>
+</div>
+<script>
+  /* СИМУЛЯЦИЯ scene_04-style БАГА: timeline зарегистрирован, но onUpdate
+     меняет значение plain-object'а — DOM не обновляется при seek/progress.
+     Эту сцену smoke-test должен DETECT'ить как fail. */
+  window.__timelines = window.__timelines || {};
+  const fakeObj = { v: 0 };
+  const tl = gsap.timeline({ paused: true });
+  tl.to(fakeObj, { v: 100, duration: 5 });
+  // НИКАКОГО onUpdate → DOM не меняется → визуально статично
+  window.__timelines["scene_test"] = tl;
+</script>
+</body></html>

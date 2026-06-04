@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="UTF-8">
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+<style>
+  html, body { width: 1080px; height: 1920px; margin: 0; background: #0A0A0A; overflow: hidden; }
+  /* большая статичная карточка занимает почти всю safe-area */
+  #panel { position: absolute; left: 60px; top: 500px;
+           width: 960px; height: 900px;
+           background: #181818; border: 1px solid #FF5722;
+           opacity: 1; }
+</style>
+</head>
+<body>
+<div id="scene" data-composition-id="scene_test" data-width="1080" data-height="1920" data-duration="5">
+  <div id="panel"></div>
+</div>
+<script>
+  /* Реалистичный ambient-hold по контракту: панель почти статична, только
+     тонкая полоса перемещается в углу safe-area (~0.3-0.5% изменения).
+     Smoke-test должен дать warning, НЕ fail. */
+  window.__timelines = window.__timelines || {};
+  const tl = gsap.timeline({ paused: true });
+  /* добавляем тонкую полоску внутри панели (10×60 пикс ≈ 0.06% safe-area)
+     которая едет по горизонтали — мало пикселей меняется, но они МЕНЯЮТСЯ */
+  const bar = document.createElement('div');
+  bar.style.cssText = 'position:absolute;left:80px;top:520px;width:60px;height:10px;background:#FF5722;';
+  document.body.appendChild(bar);
+  tl.to(bar, { x: 800, duration: 5, ease: "none" });
+  window.__timelines["scene_test"] = tl;
+</script>
+</body></html>

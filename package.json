@@ -1,0 +1,30 @@
+{
+  "name": "maksim-bot",
+  "version": "1.0.0",
+  "description": "Кодовая база контент-бота — фабрика коротких видео (идея → сценарий → ИИ-аватар → озвучка → B-roll → монтаж → кросспост). Это **база будущего мультитенантного конструктора**: один движок, клиент = конфиг + ассеты, без правок кода.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gambi1t/contentbot-core.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/gambi1t/contentbot-core/issues"
+  },
+  "homepage": "https://github.com/gambi1t/contentbot-core#readme",
+  "optionalDependencies": {
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0",
+    "puppeteer": "^25.1.0"
+  }
+}
