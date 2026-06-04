@@ -1835,8 +1835,46 @@ def _number_to_russian(n: int) -> str:
     return " ".join(p for p in parts if p)
 
 
-def transliterate_for_tts(text: str) -> str:
-    """Replace English words with Russian phonetic equivalents and clean up text for TTS."""
+async def _send_or_edit(query, context, text: str, reply_markup=None, **kw):
+    """edit_message_text c фолбэком на send_message.
+
+    Корень бага (Артём 31 мая): кнопка «Подобрать B-roll» висит ПОД видео-
+    сообщением аватара. У видео нет .text (только .caption), и
+    `query.edit_message_text(...)` падает в Telegram `BadRequest:
+    "There is no text in the message to edit"`. Хендлер обрывается с
+    Traceback, пользователь видит «кнопка не работает».
+
+    Поведение:
+      • edit_message_text успешен → возвращаем результат, ничего не отправляем
+      • BadRequest содержит "no text" / "no caption" → шлём новое сообщение
+      • BadRequest "message is not modified" → молча игнорим (известно безобидное)
+      • иные BadRequest → пробрасываем (это реальная ошибка кода/прав)
+    """
+    from telegram.error import BadRequest as _BR  # локальный импорт чтобы не тащить наверх
+    try:
+        return await query.edit_message_text(text, reply_markup=reply_markup, **kw)
+    except _BR as e:
+        msg = str(e).lower()
+        if "no text" in msg or "no caption" in msg:
+            return await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                **kw,
+            )
+        if "not modified" in msg:
+            return None
+        raise
+
+
+def transliterate_for_tts(text: str, model_id: str | None = None) -> str:
+    """Replace English words with Russian phonetic equivalents and clean up text for TTS.
+
+    model_id — модель ElevenLabs. У v3 НЕ инжектим SSML <break>-теги: v3 их
+    не поддерживает и озвучивает как мусор («премани», Артём 31 мая). Для v3
+    паузы держатся на пунктуации, переносы схлопываются в пробел. v2/turbo —
+    <break> как раньше. None → v2-поведение (обратная совместимость).
+    """
     import re
     result = text
 
@@ -1913,22 +1951,30 @@ def transliterate_for_tts(text: str) -> str:
     # Remove quotes of all kinds
     result = result.replace('"', '').replace("'", "").replace("«", "").replace("»", "")
     result = result.replace(""", "").replace(""", "").replace("'", "").replace("'", "")
-    # Replace em-dash and en-dash with comma (natural pause)
-    result = result.replace("—", ",").replace("–", ",").replace(" - ", ", ")
-    # Remove standalone dashes at start of lines
-    result = re.sub(r'^\s*[-—–]\s*', '', result, flags=re.MULTILINE)
+    # Remove standalone dashes at start of lines (list/dialogue markers) FIRST —
+    # до inline-замены, иначе строковый дефис превратится в запятую.
+    result = re.sub(r'^[ \t]*[-—–][ \t]*', '', result, flags=re.MULTILINE)
+    # Inline em/en-dash → запятая, ПРИКЛЕЕННАЯ к предыдущему слову (схлопываем
+    # окружающие пробелы). Плавающая « , » (пробел ПЕРЕД запятой) озвучивается
+    # v3 Creative как мусорное слово («терне»/«тире»/«можно», Артём 31 мая —
+    # подтверждено реальной генерацией). «зарплаты — каждый» → «зарплаты, каждый».
+    result = re.sub(r'[ \t]*[—–][ \t]*', ', ', result)
+    result = re.sub(r'[ \t]+-[ \t]+', ', ', result)
     # Clean up multiple commas — but preserve newlines for paragraph pauses
     result = re.sub(r',\s*,', ',', result)
     result = re.sub(r'[ \t]{2,}', ' ', result)
 
-    # 4. Inject explicit pauses for ElevenLabs (eleven_multilingual_v2 supports
-    # <break> tags). Paragraph breaks → 0.6s, sentence endings → 0.25s.
-    # This gives the voice real breathing room between thoughts.
-    # Paragraph-level pauses first (double+ newlines)
-    result = re.sub(r'\n{2,}', ' <break time="0.6s" /> ', result)
-    # Remaining single newlines → sentence break
-    result = re.sub(r'\n+', ' <break time="0.3s" /> ', result)
-    # Collapse accidental double spaces introduced by break insertion
+    # 4. Pauses between thoughts.
+    if (model_id or "").startswith("eleven_v3"):
+        # v3 НЕ поддерживает <break> SSML — озвучивает их как мусор. Паузы
+        # держатся на пунктуации (. , ! ?), переносы схлопываем в пробел.
+        result = re.sub(r'\n+', ' ', result)
+    else:
+        # v2/turbo поддерживают <break> — инжектим явные паузы.
+        # Paragraph breaks → 0.6s, sentence endings → 0.3s.
+        result = re.sub(r'\n{2,}', ' <break time="0.6s" /> ', result)
+        result = re.sub(r'\n+', ' <break time="0.3s" /> ', result)
+    # Collapse accidental double spaces
     result = re.sub(r' {2,}', ' ', result)
 
     return result.strip()
@@ -2309,15 +2355,17 @@ def generate_voiceover(
         expressive_text = _prepare_tts_intonation(script_text)
         logger.info(f"TTS после интонации (per-part): {expressive_text[:100]}...")
 
-    # Step 2: Transliterate English words + numbers for Russian pronunciation
-    tts_text = transliterate_for_tts(expressive_text)
-    logger.debug(f"TTS после транслитерации: {tts_text[:100]}...")
-
-    # Brand overrides (per active brand, see /brand command)
+    # Brand overrides (per active brand, see /brand command).
+    # Считаем модель ДО транслитерации — нужно знать v2/v3 для решения,
+    # инжектить ли <break>-теги (v3 их не поддерживает).
     brand = _get_active_brand()
     voice_id = brand.get("eleven_voice_id") or ELEVENLABS_VOICE_ID
     # model_override побеждает бренд — нужно для пикера «v2/v3 перед озвучкой».
     model_id = model_override or brand.get("eleven_model_id") or "eleven_multilingual_v2"
+
+    # Step 2: Transliterate English words + numbers for Russian pronunciation
+    tts_text = transliterate_for_tts(expressive_text, model_id=model_id)
+    logger.debug(f"TTS после транслитерации: {tts_text[:100]}...")
 
     # ElevenLabs v3 — другая шкала voice_settings. У v3 один эффективный
     # параметр stability: 0.0 = Creative (макс. выразительность, эмоции),
@@ -2377,9 +2425,11 @@ async def _run_voiceover_generation(query, data: dict, model_id: str) -> None:
         logger.info(
             f"TTS full_processed ({len(full_processed)} chars):\n{full_processed}"
         )
-        parts = split_script_to_parts(full_processed)
+        # v3 + короткий сценарий → единый блок (цельная интонация, без стыков).
+        _tp = _voice_target_parts(model_id, full_processed)
+        parts = split_script_to_parts(full_processed, target_parts=_tp)
         logger.info(
-            "TTS split: "
+            f"TTS split (model={model_id}, target_parts={_tp}): "
             + " | ".join(f"[{i}]({len(p)}) {p[:40]}…{p[-25:]}"
                          for i, p in enumerate(parts))
         )
@@ -2889,6 +2939,23 @@ def split_script_to_parts(script_text: str, target_parts: int | None = None) -> 
         i += 1
 
     return cleaned or parts
+
+
+def _voice_target_parts(model_id: str | None, text: str, cap: int = 1000) -> int | None:
+    """Сколько частей для озвучки в зависимости от модели ElevenLabs.
+
+    Для v3 короткий сценарий озвучиваем ОДНИМ блоком (`target_parts=1`):
+    разбивка на части меняет интонацию на стыке (Артём 31 мая). v3 держит
+    качество и длину на цельном тексте.
+
+    Длинный сценарий (>cap символов) у v3 всё равно делим — защита от
+    обрезки/просадки ElevenLabs на длинном одиночном запросе.
+
+    v2 и прочие — None (авто-разбивка ~450 симв/часть, старое поведение).
+    """
+    if (model_id or "").startswith("eleven_v3") and len((text or "").strip()) <= cap:
+        return 1
+    return None
 
 
 # --- Load prompts ---
@@ -7865,9 +7932,10 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(
                 f"TTS full_processed ({len(full_processed)} chars):\n{full_processed}"
             )
-            parts = split_script_to_parts(full_processed)
+            _tp = _voice_target_parts(_get_active_brand().get("eleven_model_id"), full_processed)
+            parts = split_script_to_parts(full_processed, target_parts=_tp)
             logger.info(
-                "TTS split: "
+                f"TTS split (target_parts={_tp}): "
                 + " | ".join(f"[{i}]({len(p)}) {p[:40]}…{p[-25:]}" for i, p in enumerate(parts))
             )
             pending[user_id]["voice_parts"] = parts
@@ -9630,9 +9698,10 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(
                     f"TTS full_processed ({len(full_processed)} chars):\n{full_processed}"
                 )
-                parts = split_script_to_parts(full_processed)
+                _tp = _voice_target_parts(_get_active_brand().get("eleven_model_id"), full_processed)
+                parts = split_script_to_parts(full_processed, target_parts=_tp)
                 logger.info(
-                    "TTS split: "
+                    f"TTS split (target_parts={_tp}): "
                     + " | ".join(f"[{i}]({len(p)}) {p[:40]}…{p[-25:]}" for i, p in enumerate(parts))
                 )
                 pending[user_id]["voice_parts"] = parts
@@ -11291,22 +11360,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             return
 
-        # ── 🤖 AI-аватар: инструкция (pipeline #3 cmd_new_idea) ─────
+        # ── 🤖 AI-аватар: 2 кнопки автозапуска (Pipeline #3) ───────
+        # Раньше эта ветка показывала копипаст-инструкцию «Скопируй тезис →
+        # жми Моя идея → вставь», что Артём прямо назвал «неправильным
+        # pipeline» (31 мая 2026). Теперь предлагаем 2 варианта автозапуска:
+        #   • idea_avatar_full   — полный prod: сценарий → одобрение
+        #                          → (Фаза 2) озвучка v3 → HeyGen аватар
+        #   • idea_avatar_script — только до сценария, дальше юзер сам
+        # Оба варианта берут тезис+хук из banked idea и СРАЗУ зовут
+        # `_generate_script` — без копипасты.
         if pipeline == "avatar":
             title_esc = html_mod.escape(title)
-            thesis_esc = html_mod.escape(thesis)
+            thesis_esc = html_mod.escape(
+                thesis if len(thesis) <= 400 else thesis[:397] + "…"
+            )
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=(
                     f"🤖 <b>AI-аватар под идею «{title_esc}»</b>\n\n"
-                    f"1. Скопируй тезис ниже\n"
-                    f"2. Жми «✍️ Моя идея» в главном меню\n"
-                    f"3. Вставь тезис — бот сгенерит сценарий → обложку → озвучку → аватар → сборку\n\n"
-                    f"<b>Тезис:</b>\n<code>{thesis_esc}</code>"
+                    f"<b>Тезис:</b>\n{thesis_esc}\n\n"
+                    f"Как запустить?"
                 ),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✍️ Моя идея", callback_data="cmd_new_idea")],
+                    [InlineKeyboardButton(
+                        "🎬 Собрать ролик с аватаром",
+                        callback_data=f"idea_avatar_full:{idx}",
+                    )],
+                    [InlineKeyboardButton(
+                        "📝 Сначала только сценарий",
+                        callback_data=f"idea_avatar_script:{idx}",
+                    )],
                     [InlineKeyboardButton("◀️ В главное меню", callback_data="idea_back_to_menu")],
                 ]),
             )
@@ -11358,6 +11442,92 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         await query.answer(f"⚠️ Неизвестный pipeline: {pipeline}")
+        return
+
+    # ═══════════════════════════════════════════════════════════════════
+    #  Idea → AI-avatar autorun (Pipeline #3, banked-idea entry point)
+    # ═══════════════════════════════════════════════════════════════════
+    # Два варианта запуска из меню «Что дальше?» → AI-аватар:
+    #   idea_avatar_full:<idx>   — сценарий + флаг auto_after_approve=
+    #                              "avatar_full" (Фаза 2 подхватит флаг и
+    #                              после approve запустит цепочку voice→
+    #                              HeyGen без участия юзера)
+    #   idea_avatar_script:<idx> — только сценарий, дальше юзер сам через
+    #                              стандартные кнопки «Утвердить → обложка»
+    # Замена копипаст-инструкции (Артём 31 мая: «должна была быть кнопка,
+    # чтобы по этому тезису сразу нажимался генерировать»).
+    if query.data.startswith("idea_avatar_full:") or query.data.startswith("idea_avatar_script:"):
+        is_full = query.data.startswith("idea_avatar_full:")
+        try:
+            idx = int(query.data.split(":", 1)[1])
+        except (IndexError, ValueError):
+            await query.answer("⚠️ Некорректный индекс")
+            return
+
+        session_data = pending.get(user_id) or {}
+        batch = session_data.get("ideas_batch") or []
+        if idx < 0 or idx >= len(batch):
+            await _ideas_batch_stale(query)
+            return
+
+        idea = batch[idx]
+        thesis = (idea.get("central_thesis") or "").strip()
+        hook = (idea.get("hook_draft") or "").strip()
+        if not thesis:
+            await query.answer("⚠️ У идеи пустой тезис", show_alert=True)
+            return
+
+        # Seed text для _generate_script: ровно так же, как если бы Артём
+        # сам надиктовал идею через «✍️ Моя идея» — хук (если есть) + тезис.
+        # Хук ставим первым: SCRIPT_PROMPT в Opus умеет открывать сценарий
+        # с заданного хука (см. tg_post_writer extra_notes pattern на 11275).
+        seed_parts = []
+        if hook:
+            seed_parts.append(f"Хук: {hook}")
+        seed_parts.append(f"Тезис: {thesis}")
+        seed_text = "\n\n".join(seed_parts)
+
+        # Pseudo-update — _generate_script зовёт update.message.reply_text
+        # для статусов, ему нужен .message и .effective_user. Тот же
+        # паттерн, что используется в "cmd_*" роутере выше (10752).
+        class _PseudoUpdate:
+            def __init__(self, msg, user):
+                self.message = msg
+                self.effective_user = user
+                self.effective_chat = msg.chat
+                self.callback_query = None
+        pseudo = _PseudoUpdate(query.message, query.from_user)
+
+        await query.answer("✍️ Пишу сценарий…")
+
+        try:
+            await _generate_script(pseudo, context, seed_text)
+        except Exception as e:
+            logger.error(f"[idea_avatar] _generate_script failed: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"❌ Ошибка генерации сценария: {e}",
+            )
+            return
+
+        # _generate_script полностью перезаписал pending[user_id] (см.
+        # 10441). Для full-варианта ставим флаг ПОСЛЕ — Фаза 2 (auto-
+        # цепочка озвучка→HeyGen) проверит его в approve handler.
+        if is_full:
+            cur = pending.get(user_id, {}) or {}
+            cur["auto_after_approve"] = "avatar_full"
+            # Сохраним idx и notion_url из исходного банка идей, чтобы
+            # Фаза 2 могла связать готовый ролик с карточкой банка.
+            cur["from_idea_idx"] = idx
+            urls_map = session_data.get("ideas_notion_urls") or {}
+            if urls_map.get(str(idx)):
+                cur["from_idea_notion_url"] = urls_map[str(idx)]
+            pending[user_id] = cur
+            _save_pending(pending)
+            logger.info(
+                f"[idea_avatar_full] флаг auto_after_approve='avatar_full' "
+                f"выставлен для user={user_id}, idea_idx={idx}"
+            )
         return
 
     # ═══════════════════════════════════════════════════════════════════
@@ -12477,7 +12647,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            from hyperframes_broll import generate_hyperframes_broll
+            from hyperframes_broll import (
+                generate_hyperframes_broll,
+                HyperFramesInterrupted,
+                HyperFramesTimeout,
+            )
             # Чистим только старые hf_*.mp4 в hyperframes/ (namespace отдельный
             # от autobroll/ и от SMM broll_*.mp4 — их НЕ трогаем).
             _hf_dir = proj_dir / "hyperframes"
@@ -12487,12 +12661,84 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clips, cost_usd = await asyncio.to_thread(
                 generate_hyperframes_broll, script_text, proj_dir
             )
+        except HyperFramesInterrupted as e:
+            # Отдельная ветка: Claude Code прерван снаружи (systemd-restart,
+            # OOM). НЕ показываем юзеру «упал» — это инфра-событие. Кнопка
+            # «🔁 Повторить» = тот же callback, что и текущий.
+            logger.warning(f"card_hfbroll interrupted: {e}")
+            await query.edit_message_text(
+                f"🔁 Графика не успела собраться — сервис перезапускался "
+                f"во время рендера.\n\n"
+                f"Сценарий и карточка на месте. Жми «Повторить» — начнём заново.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🔁 Повторить HyperFrames",
+                        callback_data=query.data,  # тот же card_hfbroll:<id>
+                    )],
+                    [InlineKeyboardButton(
+                        "🎨 Попробовать Remotion",
+                        callback_data=f"card_autobroll:{card_id_prefix}",
+                    )],
+                    [InlineKeyboardButton(
+                        "◀️ К карточке",
+                        callback_data=f"notion_card:{card_id_prefix}",
+                    )],
+                ]),
+            )
+            return
+        except HyperFramesTimeout as e:
+            # Claude Code не уложился в CLAUDE_TIMEOUT (900s по умолчанию).
+            # Не transient — retry той же длины тоже не уложится с большой
+            # вероятностью. Рекомендуем Remotion (быстрее, ~2-3 мин на
+            # генерацию + рендер) или сократить сценарий.
+            logger.error(f"card_hfbroll timeout: {e}")
+            await query.edit_message_text(
+                f"⏱ {e}\n\n"
+                f"Рекомендую попробовать Remotion — он обычно укладывается "
+                f"в 3-5 минут. Сценарий и карточка на месте.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🎨 Попробовать Remotion",
+                        callback_data=f"card_autobroll:{card_id_prefix}",
+                    )],
+                    [InlineKeyboardButton(
+                        "🔁 Повторить HyperFrames",
+                        callback_data=query.data,
+                    )],
+                    [InlineKeyboardButton(
+                        "◀️ К карточке",
+                        callback_data=f"notion_card:{card_id_prefix}",
+                    )],
+                ]),
+            )
+            return
         except Exception as e:
             logger.error(f"card_hfbroll failed: {e}", exc_info=True)
+            # Обрезаем str(e) до 200 симв — защита от утечки длинных
+            # exception-сообщений типа subprocess.TimeoutExpired, чей
+            # str() содержит всю команду с промптом (~4KB). Уже починено
+            # точечно через HyperFramesTimeout, но общая защита не помешает.
+            short_e = str(e)
+            if len(short_e) > 200:
+                short_e = short_e[:200] + "…"
             await query.edit_message_text(
-                f"⚠️ Не удалось сгенерировать графику (HyperFrames):\n{e}\n\n"
+                f"⚠️ Не удалось сгенерировать графику (HyperFrames):\n{short_e}\n\n"
                 f"Можно повторить, попробовать Remotion-движок или подобрать "
-                f"B-roll вручную (🎬 B-roll)."
+                f"B-roll вручную (🎬 B-roll).",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        "🔁 Повторить HyperFrames",
+                        callback_data=query.data,
+                    )],
+                    [InlineKeyboardButton(
+                        "🎨 Попробовать Remotion",
+                        callback_data=f"card_autobroll:{card_id_prefix}",
+                    )],
+                    [InlineKeyboardButton(
+                        "◀️ К карточке",
+                        callback_data=f"notion_card:{card_id_prefix}",
+                    )],
+                ]),
             )
             return
 
@@ -14128,7 +14374,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             voice_path = str(ASSETS_DIR / f"voice_part_{idx}.mp3")
 
             from elevenlabs import VoiceSettings
-            tts_text = transliterate_for_tts(part_text)
+            tts_text = transliterate_for_tts(part_text, model_id=_model_id)
             # На v3 style игнорируется API; передаём 0 чтобы не было «штрафа».
             _style = 0.0 if _is_v3 else ps["st"]
             custom_settings = VoiceSettings(
@@ -14256,7 +14502,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # If we have YouTube URLs from the article — cut clips from them first
         if yt_urls:
-            await query.edit_message_text(
+            await _send_or_edit(
+                query, context,
                 f"🎬 Нашёл {len(yt_urls)} YouTube-ссылок в статье.\n"
                 f"Скачиваю и нарезаю клипы...\n\n"
                 f"🔗 {chr(10).join(yt_urls[:2])}"
@@ -14276,7 +14523,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data["broll_selected"] = []
                     _save_pending(pending)
 
-                    await query.edit_message_text(
+                    await _send_or_edit(
+                        query, context,
                         f"📊 Нарезано {len(all_clips)} клипов из YouTube — выбери подходящие"
                     )
 
@@ -14392,14 +14640,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
                 buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
-                await query.edit_message_text(
+                await _send_or_edit(
+                    query, context,
                     "🎬 Выбери способ подбора видеоряда:",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
                 return
 
         # Stock B-roll search
-        await query.edit_message_text("🎬 Ищу подходящие видео на стоках...")
+        await _send_or_edit(query, context, "🎬 Ищу подходящие видео на стоках...")
         try:
             shotlist = await asyncio.to_thread(generate_shotlist, script_text)
             shotlist = await find_broll_for_shotlist(shotlist)
