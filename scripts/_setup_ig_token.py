@@ -19,9 +19,12 @@ OUT_FILE = ROOT / "instagram_token.json"
 TARGET_USERNAME = "yumsunov86"
 GRAPH = "https://graph.facebook.com/v21.0"
 
-systoken = TOKEN_FILE_IN.read_text(encoding="utf-8").strip()
-if not systoken:
+# Берём ПОСЛЕДНЮЮ непустую строку — Артём дописывает новый токен с новой строки.
+_lines = [l.strip() for l in TOKEN_FILE_IN.read_text(encoding="utf-8").splitlines() if l.strip()]
+if not _lines:
     sys.exit("FAIL: пустой токен в token_insta.txt")
+systoken = _lines[-1]
+print(f"(использую последнюю строку токена из {len(_lines)})")
 
 # 1) Кто мы (sanity) - НЕ печатаем токен
 me = requests.get(f"{GRAPH}/me", params={"access_token": systoken, "fields": "id,name"}, timeout=20)
