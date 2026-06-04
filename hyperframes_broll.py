@@ -344,7 +344,22 @@ def _scene_contract(storyboard: dict, scene_id: str) -> dict:
 
 def _build_scene_prompt(storyboard: dict, scene_id: str, done_scenes: list[dict]) -> str:
     """Промпт на ОДНУ сцену. Короткий → укладывается в SCENE_BUILD_TIMEOUT.
-    Передаёт контракт сцены из storyboard + список готовых (единство стиля)."""
+
+    Передаёт контракт сцены из storyboard + **единый style contract** (Phase 1
+    Step 2, 5 июня) который inline-ится одинаковым для всех 6 параллельных
+    subagent'ов. Это заменяет cross-talk done_scenes (который не работает при
+    параллели) на статичную дизайн-систему.
+
+    done_scenes — оставлен для обратной совместимости с последовательным циклом,
+    но при параллельном scheduler'е будет всегда [].
+    """
+    # Загружаем style contract один раз на вызов (~1KB, дешево). При запуске
+    # ОЧЕНЬ десятков параллельных вызовов можно кэшировать на module-level,
+    # но сейчас 6 сцен × 1KB = шум.
+    from style_contract import load_style_contract, inline_for_prompt
+    contract = load_style_contract()
+    style_block = inline_for_prompt(contract)
+
     sc = _scene_contract(storyboard, scene_id)
     done_block = ""
     if done_scenes:
@@ -372,19 +387,11 @@ def _build_scene_prompt(storyboard: dict, scene_id: str, done_scenes: list[dict]
   НЕ читай файлы скилла и design.md — их содержимое уже сведено в reference_pack.
 - `index.html` — образец композиции + блок `@font-face` (скопируй его дословно).
 
-ПРАВИЛА:
-- Реализуй ИМЕННО business_archetype / hf_technique / visual_style /
-  motion_family из контракта. primary_text — главный текст на экране.
-- Кадр 1080×1920, data-duration="5". @font-face копируй из index.html
-  (6 woff2 cyrillic+latin) — без кириллических шрифтов русский текст не видно.
-- БРЕНД: фон тёмный (#0A0A0A / #111), акцент оранжевый `#FF5722`, текст #FFF /
-  #BBB. Не выдумывай другую палитру — это фирменные цвета.
-- SAFE-AREA: весь смысловой контент в x∈[40,1040], y∈[480,1440]. Контейнер —
-  flex-column (display:flex; flex-direction:column; gap:48px; padding:40px), БЕЗ
-  position:absolute;top на текстовых блоках (см. reference_pack.md). Absolute —
-  только для декора/SVG/glow.
-- Детерминизм: НЕ Math.random()/Date.now(), НЕ repeat:-1, НЕ exit-анимаций
-  (кроме scene_06). Регистрируй `window.__timelines["{scene_id}"]={{paused:true}}`.
+ГЛАВНОЕ ПРАВИЛО АРХЕТИПА:
+Реализуй ИМЕННО business_archetype / hf_technique / visual_style /
+motion_family из КОНТРАКТА СЦЕНЫ выше. primary_text — главный текст на экране.
+
+{style_block}
 
 🔴 ЖЁСТКО ПРО СКОРОСТЬ (нарушение = провал задачи):
 - НЕ запускай НИКАКИХ команд: ни `npx hyperframes lint`, ни `validate`,
