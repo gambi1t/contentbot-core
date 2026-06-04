@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="UTF-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1080px; height:1920px; }
+  .frame { position:relative; width:1080px; height:1920px; background:#0a0a0a; }
+  .title { position:absolute; left:60px; top:560px; width:900px; font-size:100px;
+           line-height:1.0; color:#fff; font-family:sans-serif; }
+  .accent { color:#ff5722; }
+</style></head>
+<body>
+  <div class="frame" data-composition-id="fx" data-duration="5" data-width="1080" data-height="1920">
+    <!-- Заголовок в 2 строки: direct text «Прибыль —» + <span> «сезон».
+         span — ПОТОМОК .title. Детектор НЕ должен считать это overlap
+         (это один логический заголовок, как scene_01). Ожидаем ok:true. -->
+    <div class="title">Прибыль —<br /><span class="accent">сезон</span></div>
+  </div>
+  <script>window.__timelines = {};</script>
+</body></html>

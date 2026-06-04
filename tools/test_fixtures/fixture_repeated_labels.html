@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="UTF-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1080px; height:1920px; }
+  .frame { position:relative; width:1080px; height:1920px; background:#0a0a0a; }
+  .num { position:absolute; color:#ff5722; font-size:80px; font-family:sans-serif; font-weight:800; }
+  .lbl { position:absolute; color:#aaa; font-size:24px; font-family:sans-serif; }
+</style></head>
+<body>
+  <div class="frame" data-composition-id="fx" data-duration="5" data-width="1080" data-height="1920">
+    <!-- H2: одинаковый текст «100%», но в РАЗНЫХ местах + у каждого своя подпись
+         «от выручки». Все пары — crowding (gap 4px < MIN_GAP).
+         Старый дедуп склеивает в 1 issue по тексту; новый должен дать 2 разных. -->
+
+    <!-- ПАРА 1: левая колонка (x ~ 100..280) -->
+    <div class="num" style="left:100px; top:700px; width:180px;">100%</div>
+    <div class="lbl" style="left:100px; top:804px; width:180px;">от выручки</div>
+
+    <!-- ПАРА 2: правая колонка (x ~ 700..880) -->
+    <div class="num" style="left:700px; top:700px; width:180px;">100%</div>
+    <div class="lbl" style="left:700px; top:804px; width:180px;">от выручки</div>
+  </div>
+  <script>window.__timelines = {};</script>
+</body></html>

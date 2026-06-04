@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="UTF-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1080px; height:1920px; }
+  .frame { position:relative; width:1080px; height:1920px; background:#0a0a0a; }
+  .card { position:absolute; background:#1a1a1a; border:1px solid #333; border-radius:16px; }
+  .box { position:absolute; color:#fff; font-family:sans-serif; }
+</style></head>
+<body>
+  <div class="frame" data-composition-id="fx" data-duration="5" data-width="1080" data-height="1920">
+    <!-- Карточка-фон уходит за правый край: left:760 width:400 -> right:1160 > 1080.
+         Текст ВНУТРИ в пределах (left:780 width:180 -> right:960), чтобы проверить
+         что детектор ловит именно КАРТОЧКУ (фон), а не только текст. -->
+    <div class="card" style="left:760px; top:800px; width:400px; height:300px;"></div>
+    <div class="box" style="left:780px; top:880px; width:180px; height:140px; font-size:100px;">20%</div>
+  </div>
+  <script>window.__timelines = {};</script>
+</body></html>

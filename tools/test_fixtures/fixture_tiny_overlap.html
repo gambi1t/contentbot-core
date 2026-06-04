@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="UTF-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1080px; height:1920px; }
+  .frame { position:relative; width:1080px; height:1920px; background:#0a0a0a; }
+  .box { position:absolute; color:#fff; font-family:sans-serif; font-size:24px; }
+</style></head>
+<body>
+  <div class="frame" data-composition-id="fx" data-duration="5" data-width="1080" data-height="1920">
+    <!-- C1: dead-zone. Боксы реально пересекаются по ОБЕИМ осям, но площадь
+         пересечения < MIN_OVERLAP(25):
+           A: left=100 top=600 width=120 height=30 → right=220 bottom=630
+           B: left=215 top=627 width=120 height=30 → right=335 bottom=657
+         ix = min(220,335)-max(100,215) = 220-215 = 5
+         iy = min(630,657)-max(600,627) = 630-627 = 3
+         ix*iy = 15 < 25 → старая логика дропала, новая должна ловить. -->
+    <div class="box" style="left:100px; top:600px; width:120px; height:30px;">первый</div>
+    <div class="box" style="left:215px; top:627px; width:120px; height:30px;">второй</div>
+  </div>
+  <script>window.__timelines = {};</script>
+</body></html>

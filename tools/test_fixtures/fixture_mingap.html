@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="UTF-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1080px; height:1920px; }
+  .frame { position:relative; width:1080px; height:1920px; background:#0a0a0a; }
+  .box { position:absolute; color:#fff; font-family:sans-serif; }
+</style></head>
+<body>
+  <div class="frame" data-composition-id="fx" data-duration="5" data-width="1080" data-height="1920">
+    <!-- НЕ пересекаются, но зазор 8px (< MIN_GAP): A bottom=700, B top=708.
+         Оба пересекаются по X (x[100,500]). Это «crowding» — визуально тесно. -->
+    <div class="box" style="left:100px; top:600px; width:400px; height:100px; font-size:70px;">Верхний</div>
+    <div class="box" style="left:100px; top:708px; width:400px; height:100px; font-size:70px;">Нижний тесно</div>
+  </div>
+  <script>window.__timelines = {};</script>
+</body></html>

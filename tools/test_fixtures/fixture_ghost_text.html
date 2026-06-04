@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="UTF-8" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { width:1080px; height:1920px; }
+  .frame { position:relative; width:1080px; height:1920px; background:#0a0a0a; }
+  /* ghost-text — декоративный фон: огромный, очень тусклый (6% opacity).
+     reference_pack рекомендует «ghost text 3-8% opacity для глубины».
+     НЕ контент — детектор НЕ должен считать его overlap. */
+  /* ghost через opacity-property */
+  .ghost { position:absolute; left:50%; top:700px; transform:translateX(-50%);
+           font-size:300px; font-weight:800; color:#ff5722; opacity:0.06;
+           font-family:sans-serif; white-space:nowrap; }
+  /* ghost через alpha В ЦВЕТЕ (rgba) — opacity property = 1 (реальный кейс scene_01) */
+  .ghost2 { position:absolute; left:50%; top:1000px; transform:translateX(-50%);
+            font-size:280px; font-weight:800; color:rgba(255,87,34,0.05);
+            font-family:sans-serif; white-space:nowrap; }
+  .title { position:absolute; left:60px; top:760px; width:600px; height:120px;
+           font-size:90px; color:#fff; font-family:sans-serif; }
+  .label { position:absolute; left:60px; top:1080px; width:300px; height:60px;
+           font-size:40px; color:#fff; font-family:sans-serif; }
+</style></head>
+<body>
+  <div class="frame" data-composition-id="fx" data-duration="5" data-width="1080" data-height="1920">
+    <!-- ghost «ОКНО» (opacity 0.06) пересекается с заголовком «ВЫРУЧКА» -->
+    <div class="ghost">ОКНО</div>
+    <div class="title">ВЫРУЧКА</div>
+    <!-- ghost2 «ОКНО» (color alpha 0.05) пересекается с меткой «ИЮН» -->
+    <div class="ghost2">ОКНО</div>
+    <div class="label">ИЮН</div>
+  </div>
+  <script>window.__timelines = {};</script>
+</body></html>
