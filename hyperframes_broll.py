@@ -294,10 +294,31 @@ def _scene_valid_minimal(path, scene_id: str) -> tuple[bool, list[str]]:
         issues.append("Date.now/new Date — недетерминизм")
     if "repeat:-1" in html.replace(" ", "") or "repeat: -1" in html:
         issues.append("repeat:-1 — бесконечный цикл")
-    # внешние URL (http) — рендер оффлайн, ассеты должны быть локальные/inline
+    # Внешние http(s) URL — рендер обычно оффлайн, ПРОИЗВОЛЬНЫЕ ассеты ломают
+    # детерминизм. Но есть LIBRARY-CDN'ы (GSAP, шрифты), за которыми сам
+    # HyperFrames-рендер ходит при инициализации сцены — их разрешаем.
+    # Whitelist строгий: точное совпадение хоста (чтобы typosquat вроде
+    # cdn.jsdelivr.net.attacker.com не пролез). w3.org — SVG namespace.
+    _URL_WHITELIST = {
+        "www.w3.org",            # xmlns SVG
+        "cdn.jsdelivr.net",      # GSAP и др. библиотеки (стандарт для HF)
+        "fonts.googleapis.com",  # Google Fonts CSS
+        "fonts.gstatic.com",     # Google Fonts woff2
+        "unpkg.com",             # npm CDN
+    }
     import re as _re
-    if _re.search(r"https?://(?!www\.w3\.org)", html):
-        issues.append("внешний http(s) URL — рендер оффлайн, нужны локальные/inline ассеты")
+    bad_hosts: list[str] = []
+    for m in _re.finditer(r"https?://([a-zA-Z0-9.-]+)", html):
+        host = m.group(1).lower()
+        if host not in _URL_WHITELIST:
+            bad_hosts.append(host)
+    if bad_hosts:
+        sample = ", ".join(sorted(set(bad_hosts))[:3])
+        issues.append(
+            f"внешний http(s) URL вне whitelist ({sample}) — рендер оффлайн, "
+            f"произвольные ассеты не подгружаются; разрешены только: "
+            f"{', '.join(sorted(_URL_WHITELIST))}"
+        )
     return (len(issues) == 0), issues
 
 
