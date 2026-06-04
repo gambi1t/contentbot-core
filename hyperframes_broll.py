@@ -403,6 +403,283 @@ motion_family из КОНТРАКТА СЦЕНЫ выше. primary_text — гл
   время). Качество закладывай СРАЗУ в Write, а не итерациями."""
 
 
+# ── Phase 1 Step 6: production-grade pre-flight + async build + native render
+
+def _probe_ratelimit_now() -> dict | None:
+    """Дёшевый probe rate-limit состояния Max-подписки.
+    Запускает тривиальный `claude -p "1+1"` с --max-turns 1, парсит stream,
+    возвращает rate_limit_info dict (или None при ошибке).
+    Время ~5-7 сек, токенов копейки.
+    """
+    env = dict(os.environ)
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        env.pop("ANTHROPIC_API_KEY", None)
+    env.setdefault("HOME", str(HF_PROJECT.parent))
+    try:
+        proc = subprocess.run(
+            ["claude", "-p", "1+1",
+             "--output-format", "stream-json", "--verbose", "--max-turns", "1"],
+            cwd=HF_PROJECT, env=env,
+            capture_output=True, text=True, timeout=60,
+        )
+        diag = _parse_stream(proc.stdout or "")
+        return diag.get("rate_limit")
+    except Exception as e:
+        logger.warning(f"[hf_broll] probe_ratelimit failed: {e}")
+        return None
+
+
+def _check_ratelimit_before_batch(default_concurrency: int = 2) -> int:
+    """Pre-flight gate перед параллельным батчем. Возвращает effective concurrency
+    или бросает HyperFramesBrollError если rate-limit делает прогон бессмысленным.
+
+    Логика (по ревью ChatGPT 4 июня):
+      status=rejected            → raise (повтор упрётся в стену)
+      util >= 0.9                → raise (5 минут гнать и упрёшься)
+      util >= 0.7                → concurrency=1 (не нагружаем окно)
+      util >= 0.5                → concurrency=min(default, 2)
+      иначе (allowed, util<0.5)  → default
+    """
+    info = _probe_ratelimit_now()
+    if not isinstance(info, dict):
+        logger.info("[hf_broll] probe_ratelimit вернул None — продолжаю с default concurrency")
+        return default_concurrency
+    if info.get("status") == "rejected":
+        note = _rate_limit_note(info) or "rate-limit rejected"
+        raise HyperFramesBrollError(
+            f"Pre-flight rate-limit: {note}. Запусти позже."
+        )
+    util = info.get("utilization")
+    if isinstance(util, (int, float)):
+        if util >= 0.9:
+            raise HyperFramesBrollError(
+                f"Pre-flight rate-limit: utilization={util:.0%} — окно почти исчерпано, "
+                f"батч бессмыслен. Запусти позже."
+            )
+        if util >= 0.7:
+            logger.warning(f"[hf_broll] rate-limit util={util:.0%} → concurrency понижен до 1")
+            return 1
+        if util >= 0.5:
+            return min(default_concurrency, 2)
+    return default_concurrency
+
+
+def _build_scene_prompt_for_attempt(storyboard: dict, scene_id: str,
+                                    attempt_dir: Path) -> str:
+    """Промпт сцены с абсолютным путём в workspace-sandbox.
+
+    По Step 1 (workspace isolation) каждая попытка пишется в свой attempt_dir,
+    потом валидный HTML promoted в HF_PROJECT. Промпт говорит Claude писать
+    через Write абсолютный путь — agent не конкурирует с другими сценами за
+    общую папку.
+    """
+    base = _build_scene_prompt(storyboard, scene_id, [])
+    abs_target = attempt_dir / f"{scene_id}.html"
+    # перезаписываем относительный путь scene_NN.html на абсолютный
+    sandbox_note = (
+        f"\n\n🔵 РАБОЧАЯ ПАПКА (sandbox этой попытки):\n"
+        f"  {attempt_dir}\n"
+        f"  Пиши результат Write по АБСОЛЮТНОМУ пути: {abs_target}\n"
+        f"  reference_pack.md и index.html лежат в {HF_PROJECT} — читай их "
+        f"оттуда по абсолютному пути.\n"
+    )
+    return base + sandbox_note
+
+
+async def _run_build_phase_async(storyboard: dict, job) -> float:
+    """Async параллельный build через SceneScheduler (Phase 1 Step 6).
+
+    Заменяет последовательный _run_build_phase. Шаги:
+      1. Pre-flight rate-limit → effective concurrency.
+      2. SceneScheduler(concurrency) — Semaphore-bounded async-batch.
+      3. Для каждой сцены до MAX_SCENE_BUILD_ATTEMPTS попыток.
+      4. Валидные HTML promoted из attempt_dir → HF_PROJECT (atomic).
+      5. job.finalize_scene для каждой завершённой.
+      6. raise HyperFramesBrollError если хоть одна не сдалась.
+    """
+    from scene_scheduler import SceneScheduler
+
+    concurrency = _check_ratelimit_before_batch(default_concurrency=int(
+        os.getenv("HF_BUILD_CONCURRENCY", "2")))
+    scheduler = SceneScheduler(
+        concurrency=concurrency,
+        idle_timeout=float(os.getenv("HF_IDLE_TIMEOUT_S", "60")),
+        wall_timeout=float(os.getenv("HF_WALL_TIMEOUT_S", str(SCENE_BUILD_TIMEOUT))),
+    )
+
+    all_scene_ids = [f"scene_{i:02d}" for i in range(1, N_INSERTS + 1)]
+    done: dict[str, SceneResult] = {}  # type: ignore
+
+    for attempt_n in range(1, MAX_SCENE_BUILD_ATTEMPTS + 1):
+        remaining = [sid for sid in all_scene_ids if sid not in done]
+        if not remaining:
+            break
+        logger.info(
+            f"[hf_broll] build-phase attempt {attempt_n}/{MAX_SCENE_BUILD_ATTEMPTS}: "
+            f"{len(remaining)} сцен"
+        )
+        prompts = {
+            sid: _build_scene_prompt_for_attempt(
+                storyboard, sid, job.attempt_dir(sid, attempt_n)
+            )
+            for sid in remaining
+        }
+        results = await scheduler.build_all(prompts, job, attempt_n=attempt_n)
+
+        # promote успешно записанные + валидные
+        for sid, r in results.items():
+            html = job.attempt_dir(sid, attempt_n) / f"{sid}.html"
+            if html.exists():
+                ok, iss = _scene_valid_minimal(html, sid)
+                if ok:
+                    job.promote(sid, html, HF_PROJECT)
+                    done[sid] = r
+                    job.finalize_scene(
+                        sid, "ok", attempt_n=attempt_n,
+                        turns=r.turns, cost_usd=r.cost_usd,
+                        duration_s=r.duration_s,
+                    )
+                    logger.info(
+                        f"[hf_broll] {sid} ok @ attempt {attempt_n} "
+                        f"(turns={r.turns}, ${r.cost_usd:.2f}, {r.duration_s:.0f}s)"
+                    )
+                else:
+                    logger.warning(
+                        f"[hf_broll] {sid} attempt {attempt_n}: HTML невалиден ({iss})"
+                    )
+            else:
+                logger.warning(
+                    f"[hf_broll] {sid} attempt {attempt_n}: HTML не записан "
+                    f"(scheduler status={r.status}, reason={r.reason!r})"
+                )
+
+    # финал — все сдались?
+    failed = [sid for sid in all_scene_ids if sid not in done]
+    if failed:
+        # фиксируем причину для дебага
+        for sid in failed:
+            job.finalize_scene(sid, "failed", reason=f"{MAX_SCENE_BUILD_ATTEMPTS} попыток исчерпаны")
+        raise HyperFramesBrollError(
+            f"{len(failed)} сцен не сгенерированы за {MAX_SCENE_BUILD_ATTEMPTS} попыток: "
+            f"{', '.join(failed)}"
+        )
+    return sum(r.cost_usd for r in done.values())
+
+
+def _run_motion_gate() -> None:
+    """Прогон motion smoke-test на всех 6 scene_NN.html в HF_PROJECT.
+
+    Вызывается ПОСЛЕ build, ДО render — ловит scene_04-style баги
+    (timeline зарегистрирован, но визуально статичен) до того как мы
+    потратили время на ffmpeg.
+
+    Raise HyperFramesBrollError если хотя бы одна сцена даёт is_blocking
+    verdict (fail / no_timeline / error). warning не блокирует.
+    """
+    from motion_smoketest import check_motion
+
+    blocked: list[tuple[str, str]] = []
+    warnings: list[tuple[str, str]] = []
+    for sf in SCENE_FILES:
+        p = HF_PROJECT / sf
+        if not p.exists():
+            blocked.append((sf, "html отсутствует"))
+            continue
+        v = check_motion(p)
+        if v.is_blocking:
+            blocked.append((sf, f"{v.verdict}: {v.reason or 'motion ~ 0'}"))
+        elif v.verdict == "warning":
+            warnings.append((sf, f"motion {v.max_diff_pct:.2%}"))
+
+    if warnings:
+        logger.info(
+            f"[hf_broll] motion gate: {len(warnings)} warnings (не блокируют): "
+            + "; ".join(f"{n}:{r}" for n, r in warnings)
+        )
+    if blocked:
+        raise HyperFramesBrollError(
+            f"Motion gate FAIL: {len(blocked)} сцен. "
+            + "; ".join(f"{n} ({r})" for n, r in blocked)
+        )
+
+
+def _render_all_native(out_dir: Path) -> tuple[list[Path], list[str]]:
+    """Render через наш tools/render_scene.mjs + ffmpeg (Phase 1 Step 6).
+
+    Заменяет _render_all (npx hyperframes). По Step 4 (parity-test) у npx
+    67% совместимость с subagent-generated сценами (scene_01 → чёрный экран).
+    Наш puppeteer-based render даёт 100%.
+
+    Pipeline на сцену:
+      1. node tools/render_scene.mjs scene.html frames_dir 5 30 → 150 PNG
+      2. ffmpeg -framerate 30 -i frame_%04d.png ... → hf_NN.mp4
+
+    Возвращает (готовые_клипы, ошибки) — тот же контракт что _render_all.
+    """
+    render_script = Path(__file__).resolve().parent / "tools" / "render_scene.mjs"
+    if not render_script.exists():
+        return [], [f"render_scene.mjs не найден: {render_script}"]
+
+    hf_dir = out_dir / "hyperframes"
+    hf_dir.mkdir(parents=True, exist_ok=True)
+    clips: list[Path] = []
+    errors: list[str] = []
+
+    for i, scene_file in enumerate(SCENE_FILES, start=1):
+        scene_path = HF_PROJECT / scene_file
+        if not scene_path.exists():
+            errors.append(f"{scene_file}: файл не создан Клодом")
+            continue
+
+        frames_dir = hf_dir / f"_frames_{i:02d}"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        out_mp4 = hf_dir / f"hf_{i:02d}.mp4"
+
+        # 1) puppeteer → 150 PNG
+        try:
+            r1 = subprocess.run(
+                ["node", str(render_script), str(scene_path),
+                 str(frames_dir), "5", "30"],
+                cwd=HF_PROJECT, env=_render_env(),
+                capture_output=True, text=True, timeout=RENDER_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"{scene_file}: render_scene.mjs таймаут")
+            continue
+        if r1.returncode != 0:
+            tail = (r1.stderr or r1.stdout)[-500:]
+            errors.append(f"{scene_file}: render_scene.mjs rc={r1.returncode}: {tail}")
+            continue
+
+        # 2) ffmpeg склейка
+        try:
+            r2 = subprocess.run(
+                ["ffmpeg", "-y", "-framerate", "30",
+                 "-i", str(frames_dir / "frame_%04d.png"),
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-crf", "20", "-preset", "medium",
+                 str(out_mp4)],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"{scene_file}: ffmpeg таймаут")
+            continue
+        if r2.returncode != 0 or not out_mp4.exists():
+            tail = (r2.stderr or "")[-500:]
+            errors.append(f"{scene_file}: ffmpeg rc={r2.returncode}: {tail}")
+            continue
+        clips.append(out_mp4)
+
+    return clips, errors
+
+
+# import для типов в _run_build_phase_async (ленивый, чтобы не падать на старте)
+try:
+    from scene_scheduler import SceneResult  # noqa: F401
+except Exception:
+    pass
+
+
 def _run_build_phase(storyboard: dict) -> float:
     """Фаза 2: пишет 6 сцен ПОСЦЕННО (каждая — отдельный claude -p со своим
     таймаутом). Готовые сцены передаются в следующие промпты (единство стиля).
@@ -1023,20 +1300,48 @@ def generate_hyperframes_broll(
         storyboard, sb_cost = _run_storyboard_phase(script_text)
         total_cost += sb_cost
 
-        # ── ФАЗА 2: per-scene build (каждая сцена отдельным вызовом) ────
-        # Монолит на 6 сцен не уложился в 30 мин (1 июня) — пишем посценно
-        # со своим таймаутом на сцену. _run_build_phase сам делает _revert_stray.
-        logger.info("[hf_broll] Фаза 2: per-scene build (6 сцен по storyboard)…")
-        total_cost += _run_build_phase(storyboard)
+        # ── ФАЗА 2: per-scene build ────────────────────────────────────
+        # По умолчанию (Phase 1 Step 6) — async-параллельная сборка через
+        # SceneScheduler + workspace isolation через JobContext.
+        # HF_LEGACY_BUILD=1 → fallback на старый последовательный flow.
+        legacy_build = os.getenv("HF_LEGACY_BUILD", "").strip() == "1"
+        if legacy_build:
+            logger.info("[hf_broll] Фаза 2: legacy последовательный build (HF_LEGACY_BUILD=1)")
+            total_cost += _run_build_phase(storyboard)
+        else:
+            logger.info("[hf_broll] Фаза 2: async-параллельный build (Phase 1 Step 6)")
+            import asyncio as _asyncio
+            from job_context import JobContext as _JobContext
+            runs_root = Path(os.getenv("HF_RUNS_ROOT", str(HF_PROJECT.parent / "runs")))
+            job = _JobContext.create(script_text, runs_root)
+            logger.info(f"[hf_broll] job workspace: {job.root}")
+            job.write_storyboard(storyboard)
+            total_cost += _asyncio.run(_run_build_phase_async(storyboard, job))
+
+        # Motion smoke-test gate (Phase 1 Step 6, по ревью GPT) — ловит
+        # scene_04-style баги (timeline есть, но визуально статично) ДО
+        # того как рендер сожрёт минуты. HF_SKIP_MOTION_GATE=1 → пропустить.
+        if not os.getenv("HF_SKIP_MOTION_GATE", "").strip() == "1":
+            try:
+                _run_motion_gate()
+                logger.info("[hf_broll] motion gate: все 6 сцен прошли")
+            except HyperFramesBrollError as e:
+                logger.error(f"[hf_broll] motion gate fail: {e}")
+                raise
 
         clips: list[Path] = []
         errors: list[str] = []
         fix_round = 0
+        # Выбор render-движка (Phase 1 Step 4 — наш по умолчанию, npx fallback)
+        use_npx_render = os.getenv("HF_USE_NPX_RENDER", "").strip() == "1"
+        _render_fn = _render_all if use_npx_render else _render_all_native
+        if use_npx_render:
+            logger.info("[hf_broll] render: npx hyperframes (HF_USE_NPX_RENDER=1)")
         while True:
             # 1) Layout-инспекция (дешевле рендера — ловим overlap/offscreen
             #    ДО траты времени на рендер). 2) Рендер.
             layout_by_scene = _inspect_all_scenes()
-            clips, errors = _render_all(out_dir)
+            clips, errors = _render_fn(out_dir)
 
             # Render-ошибки ФАТАЛЬНЫ (без них нет видео). Layout — QUALITY.
             problems: list[str] = []

@@ -25,6 +25,9 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "dummy")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "dummy")
 os.environ.setdefault("NOTION_DATABASE_ID", "dummy")
 os.environ.setdefault("CLAUDE_CODE_OAUTH_TOKEN", "dummy_oauth")
+os.environ["HF_LEGACY_BUILD"] = "1"  # тесты на старый flow, Step 6 default = async
+os.environ["HF_SKIP_MOTION_GATE"] = "1"  # моки не создают валидных HTML
+os.environ["HF_USE_NPX_RENDER"] = "1"  # тесты мокают legacy _render_all
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
