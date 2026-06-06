@@ -165,6 +165,15 @@ from tg_post_handlers import (
     handle_tgpost_text,
     is_tgpost_state,
 )
+import tg_post_writer
+from publish_helpers import (
+    needs_description,
+    build_ig_caption,
+    extract_script_text,
+    extract_video_topic,
+)
+from selfie import handlers as selfie_handlers
+from assemble_helpers import music_button_label
 from fal_handlers import (
     register_fal_handlers,
     is_fal_state,
@@ -6460,6 +6469,49 @@ def _selfie_hook_keyboard(hooks: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+async def _maksim_selfie_title_picker(
+    message_or_query, context, user_id: int, transcript_text: str, first_sentence: str,
+) -> None:
+    """Title-picker injected into the selfie module: 5 Claude-Opus hooks.
+
+    Called from selfie.handlers._finalize_with_cover when the new selfie module
+    is ready to show the title-pick step. Replaces the module's built-in
+    "Утвердить простое название" UI with a proper 5-hook picker — same UI
+    Артём's bot used to show before the module port (8 June 2026).
+
+    Existing callbacks selfie_hook_pick:N / selfie_more_hooks / selfie_own_title
+    already live in handle_callback, so we only need to seed pending and render
+    the keyboard.
+    """
+    # Generate 5 hooks (best-effort). On Claude failure fall back to first
+    # sentence so the user always has at least one choice.
+    hooks = await asyncio.to_thread(_generate_hook_options, transcript_text)
+    if not hooks:
+        fallback = first_sentence or (transcript_text.split(".")[0].strip()[:80] or "Живое видео")
+        hooks = [fallback]
+
+    # Seed pending the way the legacy selfie flow expected.
+    pending[user_id]["selfie_hook_options"] = hooks
+    pending[user_id]["selfie_shown_hooks"] = list(hooks)
+    _save_pending(pending)
+
+    hooks_block = "\n".join(f"  • {h}" for h in hooks)
+    text = (
+        f"📝 Расшифровка:\n{transcript_text[:500]}"
+        f"{'…' if len(transcript_text) > 500 else ''}\n\n"
+        f"———\n"
+        f"🎣 Варианты названия (нажми на один — станет заголовком карточки):\n\n"
+        f"{hooks_block}\n\n"
+        f"Или жми «🔄 Ещё варианты» / «✏️ Свой текстом»."
+    )
+    kb = _selfie_hook_keyboard(hooks)
+
+    if hasattr(message_or_query, "edit_message_text"):
+        await message_or_query.edit_message_text(text, reply_markup=kb)
+    else:
+        await message_or_query.reply_text(text, reply_markup=kb)
+
+
 async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Live video pipeline — user films on phone, bot adds subtitles."""
     user_id = update.effective_user.id
@@ -7000,8 +7052,21 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
             "format": ["Short video"],
         }
 
+        # Загрузить обложку на публичный URL → передать в Notion, иначе она
+        # сохранялась только в проект-папку и НЕ показывалась в карточке Notion
+        # (Артём 9 июня: «зашёл в Notion — не увидел выбранную обложку»).
+        cover_url = None
+        if cover_path and Path(cover_path).exists():
+            try:
+                cover_url = await asyncio.to_thread(
+                    save_media_permanent, str(cover_path), "cover"
+                )
+                logger.info(f"[selfie] Cover uploaded for Notion: {cover_url}")
+            except Exception as e:
+                logger.warning(f"[selfie] Cover upload for Notion failed: {e}")
+
         notion_url, notion_page_id = await asyncio.to_thread(
-            create_notion_card, card_data, transcript,
+            create_notion_card, card_data, transcript, cover_url,
         )
 
         # Move to "Готово к публикации" since video is already done
@@ -7019,38 +7084,11 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
         pending[user_id] = data
         _save_pending(pending)
 
-        # ═══ Generate Telegram-channel post (Pipeline #1 second artifact) ═══
-        # Per maksim_pipelines_final.md the Selfie pipeline must produce TWO
-        # text artifacts on top of the video: (a) caption for Reels/Shorts/
-        # TikTok/VK (handled by crosspost description elsewhere), and
-        # (b) a LONG TG-channel post — the «retention» piece. The post is
-        # generated through `tg_post_writer` with brand="maksim" so it
-        # follows Maksim's tone (review_essay format: opening hook, body
-        # broken into sub-categories, образный finale, no AI jargon).
-        # Stored in: data["selfie_tg_post"] (in-memory for crosspost reuse)
-        # AND appended to the Notion card body as a separate H2 block so
-        # Maksim/SMM can review/edit before posting.
-        # Only runs for `maksim` brand — for default brand TG-post is opt-in
-        # via /tgpost.
-        tg_post_text = None
-        if _get_active_brand_name() == "maksim":
-            try:
-                import tg_post_writer
-                tg_post_text = await asyncio.to_thread(
-                    tg_post_writer.generate_post,
-                    tg_post_writer.PostInput(
-                        post_type="review_essay",
-                        facts=transcript,
-                    ),
-                    claude,
-                    brand="maksim",
-                )
-                data["selfie_tg_post"] = tg_post_text
-                pending[user_id] = data
-                _save_pending(pending)
-                logger.info(f"[selfie] TG-post generated ({len(tg_post_text)} chars)")
-            except Exception as e:
-                logger.warning(f"[selfie] TG-post generation failed: {e}")
+        # TG-пост для канала больше НЕ генерируется автоматически (Артём
+        # 9 июня: «написался без спроса + это давало паузу 1.5 мин»). Теперь
+        # это кнопка «📰 TG-пост» на финальном экране — генерится по запросу
+        # через tgpost_from_script (handler ниже). data["script"] = transcript
+        # (выставлен выше) служит источником.
 
         # Save files to project directory
         proj = _project_dir(data)
@@ -7064,39 +7102,7 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
             if cover_path and Path(cover_path).exists():
                 shutil.copy2(cover_path, str(proj / "cover.jpg"))
                 logger.info(f"[selfie] Saved cover to {proj.name}/cover.jpg")
-            # Save transcript and TG-post (if generated)
             _save_text_to_project(data, "transcript.txt", transcript)
-            if tg_post_text:
-                _save_text_to_project(data, "tg_post.md", tg_post_text)
-
-        # Append the TG-post to the Notion card as a dedicated heading block
-        # so it's visible/editable in Notion (in addition to in-memory data).
-        # Done AFTER create_notion_card so we patch the existing page rather
-        # than fight with create_notion_card's body builder.
-        # Uses the same _notion_paragraph_blocks helper as create_notion_card
-        # to chunk under Notion's 2000-char rich_text limit (sentence/paragraph
-        # boundary aware).
-        if tg_post_text and notion_page_id:
-            try:
-                tg_blocks = [{
-                    "object": "block",
-                    "type": "heading_2",
-                    "heading_2": {
-                        "rich_text": [{"text": {"content": "📨 Пост в Telegram-канал"}}],
-                    },
-                }]
-                tg_blocks.extend(_notion_paragraph_blocks(tg_post_text))
-                await asyncio.to_thread(
-                    notion.blocks.children.append,
-                    block_id=notion_page_id,
-                    children=tg_blocks,
-                )
-                logger.info(
-                    f"[selfie] TG-post appended to Notion "
-                    f"({len(tg_blocks) - 1} paragraph blocks)"
-                )
-            except Exception as e:
-                logger.warning(f"[selfie] Failed to append TG-post to Notion: {e}")
 
         # Order fix (8 May 2026): previously status_msg.edit_text() was called
         # AFTER send_video, but Telegram renders messages in chronological
@@ -7125,56 +7131,14 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
             except Exception as e:
                 logger.warning(f"[selfie] Failed to send preview: {e}")
 
-        # Send TG-post preview as a separate message (so user sees it before
-        # the action buttons and can copy or read in full). Telegram's per-
-        # message limit is 4096 chars; review_essay typical 800-1500, fits.
-        # If somehow longer — split into chunks.
-        if tg_post_text:
-            tg_msg = (
-                f"📨 *Пост в Telegram-канал*\n"
-                f"_(сгенерирован для @yumsunov\\_realbiz, можно копировать или править в Notion)_\n\n"
-                f"{tg_post_text}"
-            )
-            # Split if exceeds Telegram per-message limit
-            CHUNK = 3800
-            if len(tg_msg) <= CHUNK:
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=tg_msg,
-                        parse_mode="Markdown",
-                        disable_web_page_preview=True,
-                    )
-                except Exception as e:
-                    logger.warning(f"[selfie] TG-post preview send failed: {e}")
-                    # Fallback without markdown in case of parse issues
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"📨 Пост в Telegram-канал:\n\n{tg_post_text}",
-                            disable_web_page_preview=True,
-                        )
-                    except Exception:
-                        pass
-            else:
-                # Split long post
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text="📨 Пост в Telegram-канал (длинный, в нескольких частях):",
-                    )
-                    for i in range(0, len(tg_post_text), CHUNK):
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=tg_post_text[i:i + CHUNK],
-                            disable_web_page_preview=True,
-                        )
-                except Exception as e:
-                    logger.warning(f"[selfie] TG-post chunked send failed: {e}")
-
         card_prefix = notion_page_id[:8] if notion_page_id else ""
 
+        # Финальный экран: описание для публикации + TG-пост (оба ОПЦИОНАЛЬНЫ,
+        # по кнопке) перед кросспостингом. Раньше TG-пост писался автоматом
+        # без спроса, а описание вообще пропускалось (Артём 9 июня).
         buttons = [
+            [InlineKeyboardButton("📝 Описание для публикации", callback_data="gen_description")],
+            [InlineKeyboardButton("📰 TG-пост по сценарию", callback_data="tgpost_from_script")],
             [InlineKeyboardButton("📢 Кросс-постинг", callback_data=f"crosspost:{card_prefix}")],
             [InlineKeyboardButton("📋 Карточка в Notion", url=notion_url)],
         ]
@@ -7190,7 +7154,10 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
                 f"📋 {title}\n"
                 f"🔗 {notion_url}\n"
                 f"📊 Статус: Готово к публикации\n\n"
-                f"Видео с субтитрами сохранено как final_video.mp4 для кросс-постинга."
+                f"Дальше по желанию:\n"
+                f"• «📝 Описание» — подпись для Reels/Shorts/TikTok\n"
+                f"• «📰 TG-пост» — длинный пост в канал\n"
+                f"• «📢 Кросс-постинг» — публикация на площадках"
             ),
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -7406,6 +7373,16 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _restore_brand_from_pending(user_id)
 
     state = pending.get(user_id, {}).get("state")
+
+    # ─── Selfie v2 — cover upload routed to the dedicated module ─────
+    if state == "selfie_cover_uploading":
+        if await selfie_handlers.handle_cover_photo_message(update, context):
+            return
+
+    # ─── Selfie v2 / Pipeline 2 — B-roll photo upload ─────
+    if state == "selfie_broll_uploading_photo":
+        if await selfie_handlers.handle_broll_upload_photo_message(update, context):
+            return
 
     # ─── Maksim TG-post photo attachment via reply ───────────────────
     # When the user clicks «📤 Прислать сейчас» in the TG-photo menu,
@@ -8259,8 +8236,27 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Handle selfie (live video) pipeline — user sends a phone-filmed video
+    # Selfie pipeline v2 — text-edit state goes through the selfie module.
+    if user_id in pending and pending[user_id].get("state") == "selfie_text_editing":
+        if await selfie_handlers.handle_text_edit_message(update, context):
+            return
+
+    # Pipeline 2 — B-roll video upload (selfie + B-roll mix).
+    if user_id in pending and pending[user_id].get("state") == "selfie_broll_uploading_video":
+        if await selfie_handlers.handle_broll_upload_video_message(update, context):
+            return
+
+    # Selfie pipeline v2 — video intake routed to the selfie module.
+    # Замещает старый inline-блок (~130 строк) на полнофункциональный модуль
+    # с шагами правки субтитров → музыка → выбор обложки.
     if user_id in pending and pending[user_id].get("state") == "selfie_waiting_video":
+        await selfie_handlers.process_video(update, context)
+        return
+
+    # ── Legacy selfie (unused after v2 migration) ──────────────────────────
+    # Keep dead branch only as a guard sentinel — never executed because the
+    # state is consumed above. Removing in a follow-up cleanup PR.
+    if False:  # pragma: no cover
         video_file = update.message.video or update.message.document
         if video_file and (update.message.video or (video_file.mime_type and video_file.mime_type.startswith("video/"))):
             msg = await update.message.reply_text("📥 Загружаю видео...")
@@ -10724,6 +10720,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = pending.get(user_id)
     effective_action = query.data  # may be remapped by card_* handlers below
 
+    # Selfie v2 callbacks — handled by the dedicated module. Registered first
+    # so the prefixes (selfie_text:* / selfie_broll:* / selfie_music:* /
+    # selfie_cover:*) hit before any generic action below.
+    if query.data:
+        if query.data.startswith("selfie_text:"):
+            await selfie_handlers.handle_text_review_callback(update, context)
+            return
+        if query.data.startswith("selfie_montage:"):
+            await selfie_handlers.handle_montage_callback(update, context)
+            return
+        if query.data.startswith("selfie_broll:"):
+            await selfie_handlers.handle_broll_callback(update, context)
+            return
+        if query.data.startswith("selfie_music:"):
+            await selfie_handlers.handle_music_callback(update, context)
+            return
+        if query.data.startswith("selfie_cover:"):
+            await selfie_handlers.handle_cover_callback(update, context)
+            return
+
     # Restore brand context for deep callbacks (heygen_looks, assemble, cover).
     # Source: pending[user_id]["card_brand"] — cached when the card was
     # pre-saved in `approve` or loaded via _pick_card_apply_brand. Survives
@@ -11251,11 +11267,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not thesis:
                 await query.answer("⚠️ У идеи пустой тезис, нечего раскрывать", show_alert=True)
                 return
-            try:
-                import tg_post_writer
-            except Exception as e:
-                await query.answer(f"❌ tg_post_writer не загружен: {e}", show_alert=True)
-                return
+            # tg_post_writer импортирован на уровне модуля (стр. 168). Локальный
+            # `import` здесь делал имя локальным для ВСЕЙ handle_callback →
+            # UnboundLocalError в ветке tgpost_from_script выше (Артём 9 июня).
             status_msg = await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text=f"📝 Пишу TG-пост по идее «{title}»… ~30-40 сек\n"
@@ -13220,8 +13234,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_id, card.get("id"), trigger="download_final",
             )
 
+            # Музыка прямо на финальном экране сборки — иначе пользователь
+            # уйдёт в кросс-пост, не вспомнив про музыку (Артём 8 июня:
+            # «звук либо пропустил, либо не наложился»). Корневая причина —
+            # кнопки не было, она жила только в card_menu отдельным шагом.
+            _music_btn = InlineKeyboardButton(
+                music_button_label(proj_dir),
+                callback_data=f"music_pick:{card['id'][:20]}",
+            )
             buttons = [
                 [InlineKeyboardButton("📢 Кросс-постинг", callback_data=f"crosspost:{card['id'][:20]}")],
+                [_music_btn],
                 [InlineKeyboardButton("🔄 Пересобрать", callback_data=f"card_assemble:{card['id'][:20]}")],
                 [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card['id'][:20]}")],
             ]
@@ -13579,6 +13602,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"card_to_carousel:{full_id[:20]}",
                 )])
             buttons.append([InlineKeyboardButton("📝 Описание для публикации", callback_data="gen_description")])
+            buttons.append([InlineKeyboardButton("📰 TG-пост по сценарию", callback_data="tgpost_from_script")])
             buttons.append([InlineKeyboardButton("🖼 Сменить обложку", callback_data=f"card_cover:{full_id[:20]}")])
 
             # Check if project folder has files
@@ -14221,6 +14245,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not data.get("broll_approved"):
                     voice_done_buttons.append([InlineKeyboardButton("🎬 Подобрать B-roll", callback_data="broll")])
                 voice_done_buttons.append([InlineKeyboardButton("📝 Описание для публикации", callback_data="gen_description")])
+                voice_done_buttons.append([InlineKeyboardButton("📰 TG-пост по сценарию", callback_data="tgpost_from_script")])
                 voice_done_buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
                 await query.edit_message_text(
                     "✅ Все части утверждены!\n\n"
@@ -14446,6 +14471,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not data.get("broll_approved"):
                 voice_done_buttons.append([InlineKeyboardButton("🎬 Подобрать B-roll", callback_data="broll")])
             voice_done_buttons.append([InlineKeyboardButton("📝 Описание для публикации", callback_data="gen_description")])
+            voice_done_buttons.append([InlineKeyboardButton("📰 TG-пост по сценарию", callback_data="tgpost_from_script")])
             voice_done_buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
             await query.edit_message_text(
                 "✅ Все части утверждены!\n\n"
@@ -15265,16 +15291,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if query.data == "crosspost_go":
+    if query.data in ("crosspost_go", "crosspost_force_publish"):
+        if query.data == "crosspost_force_publish":
+            data["_skip_description_check"] = True
+
         selected = data.get("crosspost_selected", [])
 
         if not selected:
             await query.answer("Сначала выбери хотя бы одну площадку")
             return
 
-        # Pre-publish validation: warn about missing description
-        if not data.get("description"):
-            await query.answer("⚠️ Описание не заполнено — будет из сценария", show_alert=True)
+        # Description-guard: blocking opt-in if description is missing.
+        # Without it the caption falls back to a raw script[:500] cut, which
+        # is what Артём complained about on 8 June 2026 ("не увидел описания
+        # в пайплайне"). User must either generate one or explicitly accept
+        # the script fallback.
+        if needs_description(data) and not data.get("_skip_description_check"):
+            buttons = [
+                [InlineKeyboardButton("🪄 Сгенерировать описание сейчас", callback_data="gen_description")],
+                [InlineKeyboardButton("➡️ Опубликовать без (обрезка сценария)", callback_data="crosspost_force_publish")],
+                [InlineKeyboardButton("⬅️ Назад к выбору площадок", callback_data="crosspost")],
+            ]
+            await query.edit_message_text(
+                "📝 У карточки нет описания для публикации.\n\n"
+                "Без описания в подпись пойдёт первые 500 символов сценария — "
+                "это редко читается как нормальное описание.\n\n"
+                "Что делаем?",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        # Consume one-shot skip flag so the next publish gets the guard again.
+        data.pop("_skip_description_check", None)
 
         # Get card info
         card_title = data.get("card_data", {}).get("title", "") or data.get("notion_edit_title", "")
@@ -15396,10 +15444,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ig_cover_url = None
                     if thumbnail_path:
                         ig_cover_url = save_media_permanent(thumbnail_path, prefix="cover")
-                    # Use description if available, otherwise script
-                    ig_description = data.get("description", "")
-                    ig_caption = f"{card_title}\n\n{ig_description}" if ig_description else (f"{card_title}\n\n{script_text[:500]}" if script_text else card_title)
-                    ig_caption += AI_DISCLOSURE
+                    ig_caption = build_ig_caption(
+                        card_title=card_title,
+                        description=data.get("description", ""),
+                        script_text=script_text,
+                        ai_disclosure=AI_DISCLOSURE,
+                    )
                     result = await asyncio.to_thread(
                         instagram_upload_reel,
                         video_url=public_url,
@@ -18021,6 +18071,78 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ── TG-пост по сценарию: переиспользует tg_post_writer.rewrite_for_telegram ──
+    if query.data == "tgpost_from_script":
+        script_text = extract_script_text(data)
+        # Fallback to script.txt in the project folder if data lost it.
+        if not script_text:
+            proj = _project_dir(data)
+            if proj and (proj / "script.txt").exists():
+                try:
+                    script_text = (proj / "script.txt").read_text(encoding="utf-8").strip()
+                except Exception:
+                    pass
+        if not script_text:
+            await query.answer("Нет сценария — сначала создай его", show_alert=True)
+            return
+
+        card_title = (
+            data.get("card_data", {}).get("title", "")
+            or data.get("notion_edit_title", "")
+        )
+        video_topic = extract_video_topic(data, card_title)
+        description = data.get("description", "")
+
+        await query.answer()
+        status_msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="📰 Пишу TG-пост по сценарию ролика... ~30-40 сек",
+        )
+
+        try:
+            post_text = await asyncio.to_thread(
+                tg_post_writer.rewrite_for_telegram,
+                script_text,
+                description,
+                video_topic,
+                claude,
+            )
+            data["tg_post_from_script"] = post_text
+            _save_pending(pending)
+
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Опубликовать в TG-канал", callback_data="tgpost_from_script:publish")],
+                [InlineKeyboardButton("🔄 Перегенерировать", callback_data="tgpost_from_script")],
+            ])
+            # Markdown disabled here — generated post may contain unescaped
+            # underscores/asterisks that would break parser. Plain text is fine.
+            await status_msg.edit_text(
+                f"📰 TG-пост по сценарию:\n\n{post_text}",
+                reply_markup=kb,
+            )
+        except Exception as e:
+            logger.error(f"tgpost_from_script error: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ Не удалось сгенерировать TG-пост: {e}")
+        return
+
+    if query.data == "tgpost_from_script:publish":
+        post_text = data.get("tg_post_from_script", "")
+        if not post_text:
+            await query.answer("Нет поста для публикации", show_alert=True)
+            return
+        try:
+            msg = await context.bot.send_message(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                text=post_text,
+            )
+            await query.edit_message_text(
+                f"✅ TG-пост опубликован (message_id={msg.message_id})"
+            )
+        except Exception as e:
+            logger.error(f"tgpost_from_script publish error: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Ошибка публикации в TG: {e}")
+        return
+
     if query.data == "desc_edit":
         data["state"] = "desc_editing"
         _save_pending(pending)
@@ -18140,7 +18262,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cats = music_mixer.list_categories()
         if not cats:
             await query.edit_message_text(
-                "❌ Музыкальная библиотека пуста. Проверь /root/maksim-bot/music/",
+                "❌ Музыкальная библиотека пуста. Проверь "
+                f"{os.getenv('MAKSIM_MUSIC_DIR', '/srv/bot-music-maksim')}/",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")
                 ]]),
@@ -18546,6 +18669,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if NOTION_GUIDES_DB and not data.get("guide_created"):
             buttons.append([InlineKeyboardButton("📎 Создать гайд", callback_data="create_guide")])
         buttons.append([InlineKeyboardButton("📝 Описание для публикации", callback_data="gen_description")])
+        buttons.append([InlineKeyboardButton("📰 TG-пост по сценарию", callback_data="tgpost_from_script")])
         buttons.append([InlineKeyboardButton("🖼 Сменить обложку", callback_data="change_avatar")])
 
         # Auto-montage + Crosspost — always visible, hint what's missing
@@ -20574,6 +20698,24 @@ def main():
         get_brand_fn=_get_active_brand_name,
     )
 
+    # Selfie pipeline v2 (ported from content-bot-2 on 8 June 2026).
+    # State machine: waiting_video → text_review → text_editing → music_picking
+    # → cover_picking → cover_uploading → waiting_title → _selfie_finalize.
+    # Callbacks selfie_text:* / selfie_music:* / selfie_cover:* routed in
+    # handle_callback below. Video/text/photo state guards in process_idea
+    # and process_photo.
+    selfie_handlers.init(
+        pending=pending,
+        save_pending=_save_pending,
+        assets_dir=ASSETS_DIR,
+        logger=logger,
+        selfie_finalize=_selfie_finalize,
+        # Replace the module's built-in trivial title-picker with our richer
+        # Claude-Opus 5-hook picker. Existing selfie_hook_pick:N callbacks in
+        # handle_callback take it from there.
+        title_picker=_maksim_selfie_title_picker,
+    )
+
     # fal.ai on-demand generators — /image (Nano Banana Pro) and /video
     # (Kling 3.0 Pro). Registered BEFORE general CallbackQueryHandler so
     # the fal:dur:* pattern resolves first.
@@ -20581,7 +20723,7 @@ def main():
 
     # HeyGen Image-to-Video test command — /heygen_test (one-off photo+audio
     # → animated mp4). И фото и аудио хостятся через /media/ (nginx alias
-    # на /srv/maksim-bot-media/, симлинк-точка /root/maksim-bot/media).
+    # на /srv/bot-media-maksim/ — см. MEDIA_DIR/MEDIA_BASE_URL выше).
     #
     # Note: для /heygen_test намеренно используем save_media_permanent
     # (а не save_cover_permanent) даже для фото-входа — потому что:
@@ -20642,7 +20784,15 @@ def main():
                      exc_info=True)
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_idea))
-    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO | filters.Document.MimeType("video/mp4"), process_idea))
+    # filters.Document.Category("video/") ловит ВСЕ video-mime типы (mp4,
+    # quicktime/mov, x-matroska/mkv, webm, avi и т.д.) — иначе Telegram Web
+    # часто шлёт .MOV как document с mime "video/quicktime" и фильтр на
+    # MimeType("video/mp4") его не пропускает → бот молчит на /selfie + видео.
+    # (Артём, 9 июня 2026, в продакшене на IMG_1566.MOV)
+    app.add_handler(MessageHandler(
+        filters.VIDEO | filters.Document.VIDEO | filters.Document.Category("video/"),
+        process_idea,
+    ))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, process_voice))
     # Photo handler — only active inside «📥 Готовые материалы» flow (state
     # broll_ready_material). Outside that state photos are ignored silently.
