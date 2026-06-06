@@ -10809,6 +10809,158 @@ async def _render_tgphoto_menu(query, context, data: dict) -> None:
         )
 
 
+def _compose_publication_descriptions(script_text: str) -> tuple[list[str], str]:
+    """Сгенерировать 3 варианта описания для публикации + извлечённый CTA.
+
+    Вынесено из handler'а `gen_description` (10 июня) чтобы переиспользовать
+    в других пайплайнах (caption Instagram-карусели). Бренд-aware: автор,
+    TG-канал и CTA тянутся из активного бренда. Без хэштегов (сознательно —
+    алгоритм их не учитывает). Возвращает (variants, extracted_cta).
+    """
+    # Бренд-зависимые подстановки. Раньше промпт жёстко вшивал
+    # «Артём Панфёров / @panferovai / AI-студия» — для бренда maksim
+    # это давало неверное описание. Теперь автор + TG-канал + CTA
+    # тянутся из активного бренда.
+    _brand_d = _get_active_brand()
+    if _get_active_brand_name() == "maksim":
+        _author = "Максима Юмсунова"
+        _author_bio = (
+            "Максим Юмсунов — владелец Life Drive (картинг + "
+            "глэмпинг в Тюмени). Канал про реальный бизнес из "
+            "своей практики."
+        )
+        _tg_handle = _brand_d.get("telegram_channel_handle", "@yumsunov_realbiz")
+        _tg_display = _brand_d.get(
+            "telegram_channel_display", "Юмсунов | Про реальный бизнес"
+        )
+        _cta_default = (
+            f"Подписывайся на канал «{_tg_display}» {_tg_handle} — "
+            f"там больше про реальный бизнес 👇"
+        )
+        _cta_ex_script = (
+            f"Подпишись на канал {_tg_handle}, там разборы из практики"
+        )
+        _cta_ex_descr = (
+            f"Подписывайся на канал «{_tg_display}» {_tg_handle} — "
+            f"там разборы из практики 👇"
+        )
+    else:
+        _author = "Артёма Панфёрова"
+        _author_bio = (
+            "Артём Панфёров, 15 лет в бизнесе, сооснователь AI-студии. "
+            "Строит личный бренд с нуля с помощью ИИ."
+        )
+        _tg_handle = "@panferovai"
+        _cta_default = (
+            f"Подпишись на Телеграм {_tg_handle} — там ещё больше про AI 👇"
+        )
+        _cta_ex_script = (
+            f"Подпишись на мой Телеграм {_tg_handle}, там ещё больше"
+        )
+        _cta_ex_descr = (
+            f"Подписывайся на мой Телеграм {_tg_handle} — "
+            f"там ещё больше разборов 👇"
+        )
+
+    desc_prompt = (
+        f"Ты — SMM-специалист. Пишешь описание для публикации короткого "
+        f"видео (Reels/Shorts/TikTok) {_author}.\n\n"
+
+        "═══ ШАГ 1 — НАЙДИ CTA В СЦЕНАРИИ ═══\n"
+        "Прочитай сценарий внимательно и найди, к какому действию автор призывает "
+        "зрителя В КОНЦЕ ролика. Это и есть CTA.\n\n"
+        "Примеры того, как CTA звучит в сценарии и как его переписать для описания:\n"
+        f"• Сценарий: «{_cta_ex_script}»\n"
+        f"  → CTA для описания: «{_cta_ex_descr}»\n"
+        "• Сценарий: «Подписывайся на канал, чтобы не пропустить»\n"
+        "  → CTA для описания: «Подпишись на канал, чтобы не пропустить новые разборы 👇»\n"
+        "• Сценарий: «Напиши в комментах слово магия, расскажу как»\n"
+        "  → CTA для описания: «Напиши слово «магия» в комментах — расскажу, как повторить 👇»\n"
+        "• Сценарий: «Ставь лайк, если полезно»\n"
+        "  → CTA для описания: «Лайк, если полезно 👇»\n\n"
+        "КРИТИЧЕСКИ ВАЖНО:\n"
+        "— CTA в описании должен по СМЫСЛУ соответствовать CTA в сценарии. "
+        "Если в сценарии автор зовёт в Телеграм — CTA про Телеграм. "
+        "Если зовёт писать коммент — CTA про коммент. НЕ придумывай свой CTA.\n"
+        "— CTA одинаковый во ВСЕХ 3 вариантах описания. Различаются только хуки.\n"
+        f"— Если в сценарии ВООБЩЕ нет явного CTA — по умолчанию «{_cta_default}».\n\n"
+
+        "═══ ШАГ 2 — НАПИШИ 3 ВАРИАНТА ОПИСАНИЯ ═══\n"
+        "Структура каждого варианта:\n"
+        "1) Хук — 1-2 строки. Цепляющая фраза, ДРУГОЙ угол на тему ролика "
+        "(не пересказ сценария).\n"
+        "2) Контекст — 1-2 строки. Одним предложением раскрой, что конкретно "
+        "в ролике / чем он полезен зрителю.\n"
+        "3) Пустая строка.\n"
+        "4) CTA — ОДНА строка, из ШАГА 1. Один раз, в конце.\n\n"
+        "ДЛИНА: 250–400 символов, 3–5 строк. Не короче 200, не длиннее 450.\n"
+        "Варианты должны быть РАЗНЫМИ по углу хука (провокация / польза / "
+        "инсайт / эмоция — выбери 3 разных угла).\n\n"
+
+        "═══ ЗАПРЕЩЕНО ═══\n"
+        "— Хештеги (алгоритм их не учитывает)\n"
+        "— Копировать или пересказывать фразы из сценария дословно. Описание — "
+        "ДРУГОЙ текст, другой угол. Считай, что ты не читал сценарий, а только "
+        "знаешь тему и CTA.\n"
+        "— Выдумывать факты об авторе (цифры, даты, достижения)\n"
+        "— Клише: «Многие спрашивают», «Сегодня многие», «Честно говоря», «Друзья»\n"
+        "— Слово «бесплатно» / «ноль бюджета» (у автора есть расходы на подписки)\n"
+        "— Смайлы и эмодзи (максимум одна стрелка 👇 перед CTA)\n"
+        "— Придумывать свой CTA, если в сценарии уже есть — бери из сценария\n\n"
+
+        "═══ ОБ АВТОРЕ (используй только если уместно) ═══\n"
+        f"{_author_bio}\n\n"
+
+        "═══ ФОРМАТ ОТВЕТА ═══\n"
+        "Сначала одна строка: `CTA: <перефразированный CTA из сценария>`\n"
+        "Затем пустая строка и разделитель `---`\n"
+        "Затем 3 варианта описания, каждый отделён строкой `---`\n"
+        "Внутри одного варианта НЕ используй `---` — это разделитель вариантов.\n"
+        "Каждый вариант должен заканчиваться той же CTA-строкой, что ты выдал в начале.\n"
+    )
+
+    response = claude.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=2048,
+        system=desc_prompt,
+        messages=[
+            {"role": "user", "content": f"Сценарий ролика:\n\n{script_text}"},
+        ],
+    )
+    raw = response.content[0].text.strip()
+
+    # Parse: first block is CTA line, then variants separated by ---
+    blocks = [b.strip() for b in re.split(r'\n\s*-{3,}\s*\n', raw) if b.strip()]
+    extracted_cta = ""
+    variants: list[str] = []
+    for b in blocks:
+        # CTA marker block — log it and skip (first block only, usually)
+        m = re.match(r'^CTA\s*:\s*(.+)$', b, flags=re.IGNORECASE | re.DOTALL)
+        if m and not extracted_cta and len(b) < 200:
+            extracted_cta = m.group(1).strip()
+            continue
+        variants.append(b)
+
+    # Strip any "Вариант N:" prefix + any stray "CTA:" header inside
+    cleaned = []
+    for v in variants:
+        v = re.sub(
+            r'^(?:Вариант\s*\d+[:\.]?\s*|[\d]+[.\)]\s*)',
+            '', v, flags=re.IGNORECASE,
+        ).strip()
+        if v:
+            cleaned.append(v)
+    variants = cleaned[:3] if cleaned else [raw]
+
+    logger.info(
+        "[description] extracted_cta=%r variants=%d lengths=%s",
+        extracted_cta[:120],
+        len(variants),
+        [len(v) for v in variants],
+    )
+    return variants, extracted_cta
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses."""
     query = update.callback_query
@@ -12086,6 +12238,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"[carousel_set_status] update failed: {e}", exc_info=True)
             await query.message.reply_text(f"❌ Не смог сменить статус: {e}")
+        return
+
+    if query.data == "carousel_ig_publish":
+        # Публикация готовой карусели в Instagram (10 июня). PNG-слайды →
+        # JPEG → nginx-media → Graph API carousel. Логика в модуле карусели.
+        try:
+            await query.answer("📲 Публикую в Instagram…")
+        except Exception:
+            pass
+        try:
+            from carousel.handlers import publish_carousel_to_instagram
+        except Exception as e:
+            logger.error(f"[carousel] import publish_carousel_to_instagram failed: {e}", exc_info=True)
+            await query.message.reply_text(f"❌ Модуль карусели не загружен: {e}")
+            return
+        # Снимаем кнопку чтобы не было двойного клика во время заливки.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await publish_carousel_to_instagram(
+            update, context, chat_id=query.message.chat_id,
+        )
         return
 
     if query.data == "carousel_finalize":
@@ -18007,147 +18182,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         try:
-            # Бренд-зависимые подстановки. Раньше промпт жёстко вшивал
-            # «Артём Панфёров / @panferovai / AI-студия» — для бренда maksim
-            # это давало неверное описание. Теперь автор + TG-канал + CTA
-            # тянутся из активного бренда.
-            _brand_d = _get_active_brand()
-            if _get_active_brand_name() == "maksim":
-                _author = "Максима Юмсунова"
-                _author_bio = (
-                    "Максим Юмсунов — владелец Life Drive (картинг + "
-                    "глэмпинг в Тюмени). Канал про реальный бизнес из "
-                    "своей практики."
-                )
-                _tg_handle = _brand_d.get("telegram_channel_handle", "@yumsunov_realbiz")
-                _tg_display = _brand_d.get(
-                    "telegram_channel_display", "Юмсунов | Про реальный бизнес"
-                )
-                _cta_default = (
-                    f"Подписывайся на канал «{_tg_display}» {_tg_handle} — "
-                    f"там больше про реальный бизнес 👇"
-                )
-                _cta_ex_script = (
-                    f"Подпишись на канал {_tg_handle}, там разборы из практики"
-                )
-                _cta_ex_descr = (
-                    f"Подписывайся на канал «{_tg_display}» {_tg_handle} — "
-                    f"там разборы из практики 👇"
-                )
-            else:
-                _author = "Артёма Панфёрова"
-                _author_bio = (
-                    "Артём Панфёров, 15 лет в бизнесе, сооснователь AI-студии. "
-                    "Строит личный бренд с нуля с помощью ИИ."
-                )
-                _tg_handle = "@panferovai"
-                _cta_default = (
-                    f"Подпишись на Телеграм {_tg_handle} — там ещё больше про AI 👇"
-                )
-                _cta_ex_script = (
-                    f"Подпишись на мой Телеграм {_tg_handle}, там ещё больше"
-                )
-                _cta_ex_descr = (
-                    f"Подписывайся на мой Телеграм {_tg_handle} — "
-                    f"там ещё больше разборов 👇"
-                )
-
-            desc_prompt = (
-                f"Ты — SMM-специалист. Пишешь описание для публикации короткого "
-                f"видео (Reels/Shorts/TikTok) {_author}.\n\n"
-
-                "═══ ШАГ 1 — НАЙДИ CTA В СЦЕНАРИИ ═══\n"
-                "Прочитай сценарий внимательно и найди, к какому действию автор призывает "
-                "зрителя В КОНЦЕ ролика. Это и есть CTA.\n\n"
-                "Примеры того, как CTA звучит в сценарии и как его переписать для описания:\n"
-                f"• Сценарий: «{_cta_ex_script}»\n"
-                f"  → CTA для описания: «{_cta_ex_descr}»\n"
-                "• Сценарий: «Подписывайся на канал, чтобы не пропустить»\n"
-                "  → CTA для описания: «Подпишись на канал, чтобы не пропустить новые разборы 👇»\n"
-                "• Сценарий: «Напиши в комментах слово магия, расскажу как»\n"
-                "  → CTA для описания: «Напиши слово «магия» в комментах — расскажу, как повторить 👇»\n"
-                "• Сценарий: «Ставь лайк, если полезно»\n"
-                "  → CTA для описания: «Лайк, если полезно 👇»\n\n"
-                "КРИТИЧЕСКИ ВАЖНО:\n"
-                "— CTA в описании должен по СМЫСЛУ соответствовать CTA в сценарии. "
-                "Если в сценарии автор зовёт в Телеграм — CTA про Телеграм. "
-                "Если зовёт писать коммент — CTA про коммент. НЕ придумывай свой CTA.\n"
-                "— CTA одинаковый во ВСЕХ 3 вариантах описания. Различаются только хуки.\n"
-                f"— Если в сценарии ВООБЩЕ нет явного CTA — по умолчанию «{_cta_default}».\n\n"
-
-                "═══ ШАГ 2 — НАПИШИ 3 ВАРИАНТА ОПИСАНИЯ ═══\n"
-                "Структура каждого варианта:\n"
-                "1) Хук — 1-2 строки. Цепляющая фраза, ДРУГОЙ угол на тему ролика "
-                "(не пересказ сценария).\n"
-                "2) Контекст — 1-2 строки. Одним предложением раскрой, что конкретно "
-                "в ролике / чем он полезен зрителю.\n"
-                "3) Пустая строка.\n"
-                "4) CTA — ОДНА строка, из ШАГА 1. Один раз, в конце.\n\n"
-                "ДЛИНА: 250–400 символов, 3–5 строк. Не короче 200, не длиннее 450.\n"
-                "Варианты должны быть РАЗНЫМИ по углу хука (провокация / польза / "
-                "инсайт / эмоция — выбери 3 разных угла).\n\n"
-
-                "═══ ЗАПРЕЩЕНО ═══\n"
-                "— Хештеги (алгоритм их не учитывает)\n"
-                "— Копировать или пересказывать фразы из сценария дословно. Описание — "
-                "ДРУГОЙ текст, другой угол. Считай, что ты не читал сценарий, а только "
-                "знаешь тему и CTA.\n"
-                "— Выдумывать факты об авторе (цифры, даты, достижения)\n"
-                "— Клише: «Многие спрашивают», «Сегодня многие», «Честно говоря», «Друзья»\n"
-                "— Слово «бесплатно» / «ноль бюджета» (у автора есть расходы на подписки)\n"
-                "— Смайлы и эмодзи (максимум одна стрелка 👇 перед CTA)\n"
-                "— Придумывать свой CTA, если в сценарии уже есть — бери из сценария\n\n"
-
-                "═══ ОБ АВТОРЕ (используй только если уместно) ═══\n"
-                f"{_author_bio}\n\n"
-
-                "═══ ФОРМАТ ОТВЕТА ═══\n"
-                "Сначала одна строка: `CTA: <перефразированный CTA из сценария>`\n"
-                "Затем пустая строка и разделитель `---`\n"
-                "Затем 3 варианта описания, каждый отделён строкой `---`\n"
-                "Внутри одного варианта НЕ используй `---` — это разделитель вариантов.\n"
-                "Каждый вариант должен заканчиваться той же CTA-строкой, что ты выдал в начале.\n"
-            )
-
-            response = claude.messages.create(
-                model="claude-opus-4-7",
-                max_tokens=2048,
-                system=desc_prompt,
-                messages=[
-                    {"role": "user", "content": f"Сценарий ролика:\n\n{script_text}"},
-                ],
-            )
-            raw = response.content[0].text.strip()
-
-            # Parse: first block is CTA line, then variants separated by ---
-            blocks = [b.strip() for b in re.split(r'\n\s*-{3,}\s*\n', raw) if b.strip()]
-            extracted_cta = ""
-            variants: list[str] = []
-            for b in blocks:
-                # CTA marker block — log it and skip (first block only, usually)
-                m = re.match(r'^CTA\s*:\s*(.+)$', b, flags=re.IGNORECASE | re.DOTALL)
-                if m and not extracted_cta and len(b) < 200:
-                    extracted_cta = m.group(1).strip()
-                    continue
-                variants.append(b)
-
-            # Strip any "Вариант N:" prefix + any stray "CTA:" header inside
-            cleaned = []
-            for v in variants:
-                v = re.sub(
-                    r'^(?:Вариант\s*\d+[:\.]?\s*|[\d]+[.\)]\s*)',
-                    '', v, flags=re.IGNORECASE,
-                ).strip()
-                if v:
-                    cleaned.append(v)
-            variants = cleaned[:3] if cleaned else [raw]
-
-            logger.info(
-                "[description] extracted_cta=%r variants=%d lengths=%s",
-                extracted_cta[:120],
-                len(variants),
-                [len(v) for v in variants],
-            )
+            variants, extracted_cta = _compose_publication_descriptions(script_text)
 
             data["description_variants"] = variants
             data["description_cta_extracted"] = extracted_cta

@@ -578,19 +578,42 @@ async def render_carousel_from_draft(
         f"✅ Статус карточки → <b>Готово к публикации</b>.\n"
         if notion_status_updated else ""
     )
+    # IG-автопостинг карусели (10 июня): доступен если IG-аккаунт подключён.
+    # PNG слайды → JPEG → nginx-media → Graph API carousel. Если не подключён —
+    # старая инструкция «скачай и запость вручную».
+    try:
+        import crosspost as _crosspost
+        _ig_connected = _crosspost.instagram_is_connected()
+    except Exception:
+        _ig_connected = False
+
+    if _ig_connected:
+        ig_line = (
+            f"📲 Можно сразу опубликовать карусель в Instagram кнопкой ниже."
+        )
+    else:
+        ig_line = (
+            f"📌 Для публикации в Instagram — скачать PNG (long-press на любом → "
+            f"Save) и постить через приложение.\n\n"
+            f"<i>(автопостинг в IG — подключи аккаунт)</i>"
+        )
     caption = (
         f"✅ <b>Карусель готова</b> — {len(slides)} слайдов\n\n"
         f"<i>{title.strip()}</i>\n"
         f"<i>{cover.get('subtitle', '')}</i>\n"
         f"{persist_line}{notion_line}{status_line}\n"
-        f"📌 Для публикации в Instagram — скачать PNG (long-press на любом → Save) "
-        f"и постить через @livedrive.tmn.\n\n"
-        f"<i>(автопостинг в IG в MVP не подключён)</i>"
+        f"{ig_line}"
     )
     # Draft НЕ удаляем сразу — оставляем чтобы юзер мог «✏️ Поправить ещё»
     # (вернуться к точечной правке прямо из финального сообщения).
     # Удалится при carousel_cancel / idea_back_to_menu / новой генерации.
-    action_kb_rows = [
+    action_kb_rows = []
+    if _ig_connected:
+        action_kb_rows.append([InlineKeyboardButton(
+            "📲 Опубликовать карусель в Instagram",
+            callback_data="carousel_ig_publish",
+        )])
+    action_kb_rows += [
         [InlineKeyboardButton(
             "✏️ Поправить ещё (вернуться к сценарию)",
             callback_data="carousel_back_to_preview",
@@ -624,6 +647,119 @@ async def render_carousel_from_draft(
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(action_kb_rows),
     )
+
+
+async def publish_carousel_to_instagram(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None = None,
+) -> None:
+    """Phase 3 (опц.): опубликовать готовую карусель в Instagram.
+
+    Источник слайдов — персистнутые PNG карточки (`<project>/carousel/slide_*`).
+    PNG → JPEG (IG требует JPEG) → выкладываем на nginx-media (тот же helper,
+    имена сохраняются) → `crosspost.instagram_upload_carousel`.
+
+    Caption: выбранное описание карточки (`data['description']`), иначе авто-
+    генерация из seed-текста карусели — переиспользует
+    `bot._compose_publication_descriptions` (тот же генератор, что у Reels).
+    """
+    uid = _user_id_from_update(update)
+    if chat_id is None:
+        chat_id = update.effective_chat.id
+
+    import bot as _bot
+    import crosspost as _crosspost
+    from bot_state import project_dir as _project_dir_fn
+
+    if not _crosspost.instagram_is_connected():
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Instagram не подключён. Подключи аккаунт и попробуй снова.",
+        )
+        return
+
+    draft = _load_carousel_draft(uid) or {}
+    data = pending.get(uid) or {}
+    seed_card_id = draft.get("seed_card_id") or draft.get("notion_page_id") or data.get("notion_page_id")
+
+    # ── Найти PNG-слайды: персистнутые в проекте карточки ──
+    png_paths: list[str] = []
+    if seed_card_id:
+        proj = _project_dir_fn({"notion_page_id": seed_card_id})
+        cdir = (Path(proj) / "carousel") if proj else None
+        if cdir and cdir.exists():
+            png_paths = sorted(str(p) for p in cdir.glob("slide_*.png"))
+    if len(png_paths) < 2:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Не нашёл слайды карусели (нужно ≥2). Сгенерируй карусель заново.",
+        )
+        return
+
+    brand = _bot._get_active_brand_name()
+    status = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"📲 Публикую карусель из {len(png_paths)} слайдов в Instagram…",
+    )
+
+    # ── Caption ──
+    caption = (data.get("description") or "").strip()
+    if not caption:
+        seed = data.get("carousel_seed") or {}
+        src_text = (
+            seed.get("text")
+            or draft.get("theme")
+            or ""
+        )
+        if src_text:
+            try:
+                variants, _cta = await asyncio.to_thread(
+                    _bot._compose_publication_descriptions, src_text
+                )
+                caption = (variants[0].strip() if variants else "")
+            except Exception as e:
+                logger.warning(f"[carousel/ig] caption gen failed (non-fatal): {e}")
+                caption = ""
+
+    # ── PNG → JPEG ──
+    out_dir = Path(tempfile.mkdtemp(prefix="carousel_jpg_"))
+    try:
+        jpegs = _crosspost.convert_pngs_to_jpegs(png_paths, out_dir, quality=90)
+        if len(jpegs) < 2:
+            await status.edit_text("❌ Не удалось подготовить JPEG-слайды (нужно ≥2).")
+            return
+
+        # ── JPEG → nginx-media (public URLs). Helper сохраняет имена. ──
+        jpeg_urls = _publish_carousel_pngs_to_media(
+            [str(j) for j in jpegs],
+            card_id_short=(seed_card_id or "adhoc")[:20],
+            brand=brand,
+        )
+        if len(jpeg_urls) < 2:
+            await status.edit_text(
+                "❌ Не удалось выложить слайды на хостинг для Instagram."
+            )
+            return
+
+        # ── Publish ──
+        result = await asyncio.to_thread(
+            _crosspost.instagram_upload_carousel, jpeg_urls, caption,
+        )
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+    if result and result.get("id"):
+        await status.edit_text(
+            f"✅ Карусель опубликована в Instagram!\n"
+            f"<code>media_id={result['id']}</code>",
+            parse_mode="HTML",
+        )
+    else:
+        await status.edit_text(
+            "❌ Не удалось опубликовать карусель в Instagram.\n"
+            "Проверь подключение аккаунта и логи (формат/доступность слайдов)."
+        )
 
 
 async def back_to_carousel_preview(

@@ -719,6 +719,137 @@ def instagram_upload_reel(
     }
 
 
+def convert_pngs_to_jpegs(png_paths, out_dir, quality: int = 90) -> list:
+    """PNG-слайды → JPEG (RGB, белый фон под альфой).
+
+    IG Graph API на `image_url` принимает ТОЛЬКО JPEG — карусель рендерит PNG.
+    Возвращает list of output Path (тот же порядок; битые/отсутствующие
+    пропускаются). Pure-функция (без сети) — покрыта unit-тестом.
+    """
+    from PIL import Image
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    jpegs: list = []
+    for src in png_paths:
+        src_p = Path(src)
+        if not src_p.exists():
+            continue
+        try:
+            im = Image.open(str(src_p))
+            if im.mode in ("RGBA", "LA", "P"):
+                im = im.convert("RGBA")
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.split()[-1])
+                im = bg
+            else:
+                im = im.convert("RGB")
+            dest = out / (src_p.stem + ".jpg")
+            im.save(str(dest), "JPEG", quality=quality)
+            jpegs.append(dest)
+        except Exception as e:
+            logger.warning(f"[carousel] PNG→JPEG failed for {src_p.name}: {e}")
+    return jpegs
+
+
+def instagram_upload_carousel(
+    image_urls: list,
+    caption: str = "",
+) -> dict | None:
+    """Опубликовать Instagram-карусель (2-10 изображений) через Graph API.
+
+    `image_urls` — ПУБЛИЧНЫЕ JPEG-URL (IG скачивает по ним; PNG отвергается —
+    сначала convert_pngs_to_jpegs + выложить на nginx-media). Зеркало
+    `instagram_upload_reel`: child-контейнер на каждое фото
+    (`is_carousel_item=true`) → parent `media_type=CAROUSEL` (children=...) →
+    defensive-poll готовности → `media_publish`.
+
+    Returns {"id", "platform"} при успехе, None при ошибке.
+    """
+    access_token = _get_instagram_access_token()
+    ig_user_id = _get_instagram_user_id()
+    if not access_token or not ig_user_id:
+        logger.error("Instagram not authorized.")
+        return None
+
+    urls = [u for u in (image_urls or []) if u]
+    if not (2 <= len(urls) <= 10):
+        logger.error(f"Instagram carousel needs 2-10 images, got {len(urls)}")
+        return None
+
+    # Step 1: child-контейнеры (по одному на изображение)
+    child_ids: list = []
+    for idx, url in enumerate(urls):
+        resp = requests.post(
+            f"https://graph.facebook.com/v21.0/{ig_user_id}/media",
+            data={
+                "image_url": url,
+                "is_carousel_item": "true",
+                "access_token": access_token,
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.error(f"IG carousel child {idx} failed: {resp.status_code} {resp.text[:300]}")
+            return None
+        cid = resp.json().get("id")
+        if not cid:
+            logger.error(f"IG carousel child {idx}: no container id")
+            return None
+        child_ids.append(cid)
+        logger.info(f"IG carousel child {idx + 1}/{len(urls)} created: {cid}")
+
+    # Step 2: parent CAROUSEL-контейнер
+    parent_resp = requests.post(
+        f"https://graph.facebook.com/v21.0/{ig_user_id}/media",
+        data={
+            "media_type": "CAROUSEL",
+            "children": ",".join(child_ids),
+            "caption": (caption or "")[:2200],
+            "access_token": access_token,
+        },
+        timeout=30,
+    )
+    if parent_resp.status_code != 200:
+        logger.error(f"IG carousel parent failed: {parent_resp.status_code} {parent_resp.text[:300]}")
+        return None
+    parent_id = parent_resp.json().get("id")
+    if not parent_id:
+        logger.error("IG carousel parent: no container id")
+        return None
+    logger.info(f"IG carousel parent created: {parent_id}")
+
+    # Step 3: defensive-poll готовности (фото обычно готовы сразу, но parent
+    # может секунду «собираться»). Не FINISHED после таймаута — всё равно
+    # пробуем publish, IG часто уже готов.
+    for _ in range(12):  # ~1 мин
+        status_resp = requests.get(
+            f"https://graph.facebook.com/v21.0/{parent_id}",
+            params={"fields": "status_code,status", "access_token": access_token},
+            timeout=15,
+        )
+        if status_resp.status_code == 200:
+            st = status_resp.json().get("status_code")
+            if st == "FINISHED":
+                break
+            if st == "ERROR":
+                logger.error(f"IG carousel parent ERROR: {status_resp.json().get('status', '')}")
+                return None
+        time.sleep(5)
+
+    # Step 4: publish
+    publish_resp = requests.post(
+        f"https://graph.facebook.com/v21.0/{ig_user_id}/media_publish",
+        data={"creation_id": parent_id, "access_token": access_token},
+        timeout=30,
+    )
+    if publish_resp.status_code != 200:
+        logger.error(f"IG carousel publish failed: {publish_resp.status_code} {publish_resp.text[:300]}")
+        return None
+    media_id = publish_resp.json().get("id")
+    logger.info(f"Instagram carousel published: {media_id}")
+    return {"id": media_id, "platform": "instagram"}
+
+
 # ══════════════════════════════════════════════
 #  TELEGRAM CHANNEL
 # ══════════════════════════════════════════════
