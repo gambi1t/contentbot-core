@@ -3,36 +3,54 @@
 Overlays a background music track onto the final video, ducking the music
 -18dB whenever voice is present (sidechain compression via ffmpeg).
 
-Tracks live under /root/maksim-bot/music/<category>/*.mp3
-Categories: energetic, chill, cinematic, corporate
+Tracks live under MAKSIM_MUSIC_DIR (default /srv/bot-music-maksim)
+in <category>/*.mp3 layout, indexed by tracks.json. Env-driven so
+both Артём's prod (/root/content-bot/music) and Максим's tenant
+(/srv/bot-music-maksim, writable by user maksim-bot) work without
+touching code.
 """
 
 import json
 import logging
+import os
 import random
 import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MUSIC_DIR = Path("/root/maksim-bot/music")
-TRACKS_JSON = MUSIC_DIR / "tracks.json"
+
+def _get_music_dir() -> Path:
+    """Resolve music library root from env (lazy, so tests can monkeypatch)."""
+    return Path(os.getenv("MAKSIM_MUSIC_DIR", "/srv/bot-music-maksim"))
+
+
+def _get_tracks_json() -> Path:
+    return _get_music_dir() / "tracks.json"
+
+
+# Backwards-compat aliases — some imports may use these. They snapshot the
+# env at import time; new code should call the _get_* helpers.
+MUSIC_DIR = _get_music_dir()
+TRACKS_JSON = _get_tracks_json()
 
 
 def list_categories() -> dict:
     """Return category meta from tracks.json."""
-    if not TRACKS_JSON.exists():
+    tj = _get_tracks_json()
+    if not tj.exists():
         return {}
-    with open(TRACKS_JSON) as f:
+    with open(tj) as f:
         data = json.load(f)
     return {cat: info.get("meta", {}) for cat, info in data.items()}
 
 
 def list_tracks(category: str) -> list:
     """Return list of tracks in a category."""
-    if not TRACKS_JSON.exists():
+    tj = _get_tracks_json()
+    if not tj.exists():
         return []
-    with open(TRACKS_JSON) as f:
+    with open(tj) as f:
         data = json.load(f)
     return data.get(category, {}).get("tracks", [])
 

@@ -2,11 +2,13 @@
 # Sync content-bot files between local and server
 # Usage: bash sync.sh [up|down|both]
 
-SERVER="root@178.104.133.148"
-REMOTE_DIR="/root/maksim-bot"
+# Env-overridable so the same script works for any tenant deploy.
+# Defaults match the current nox-maksim production layout.
+SERVER="${MAKSIM_BOT_SSH:-root@89.167.89.133}"
+REMOTE_DIR="${REMOTE_BOT_ROOT:-/home/maksim-bot/maksim-bot}"
 LOCAL_DIR="$(dirname "$0")"
-SSH_KEY="$HOME/.ssh/id_rsa"
-SSH_PORT=2222
+SSH_KEY="${MAKSIM_BOT_SSH_KEY:-$HOME/.ssh/id_rsa}"
+SSH_PORT="${MAKSIM_BOT_SSH_PORT:-22}"
 SSH_OPTS="-o StrictHostKeyChecking=no -i $SSH_KEY"
 SCP_OPTS="$SSH_OPTS -P $SSH_PORT"
 SSH_CMD_OPTS="$SSH_OPTS -p $SSH_PORT"

@@ -9,12 +9,14 @@ import sys
 import os
 from pathlib import Path
 
+import paths
+
 # Config
-SERVER = "178.104.133.148"
+SERVER = os.getenv("YT_HELPER_SERVER", "178.104.133.148")
 SSH_KEY = os.path.expanduser("~/.ssh/id_rsa")
-REMOTE_DIR = "/root/maksim-bot/assets/youtube_clips"
+REMOTE_DIR = paths.REMOTE_YOUTUBE_CLIPS_DIR
 LOCAL_DIR = Path(__file__).parent / "assets" / "youtube_clips"
-TASK_FILE = "/root/maksim-bot/yt_task.json"
+TASK_FILE = paths.REMOTE_YT_TASK_FILE
 CHECK_INTERVAL = 5  # seconds
 
 LOCAL_DIR.mkdir(parents=True, exist_ok=True)

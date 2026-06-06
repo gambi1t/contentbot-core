@@ -11,9 +11,9 @@ import json
 import time
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
-
 import requests
+
+import paths
 from requests_toolbelt import MultipartEncoder
 from dotenv import load_dotenv
 
@@ -869,10 +869,18 @@ async def telegram_post_to_channel(
 #  FILE HOSTING HELPER (for Instagram)
 # ══════════════════════════════════════════════
 
+_MEDIA_DIR = Path(os.getenv("MAKSIM_MEDIA_DIR", "/srv/bot-media-maksim"))
+_MEDIA_BASE_URL = os.getenv(
+    "MAKSIM_MEDIA_BASE_URL", "https://maksim-bot.panferov-ai.ru/media"
+).rstrip("/")
+
+
 def upload_video_to_temp_hosting(video_path: str) -> str | None:
     """
     Make video available via public URL for Instagram.
-    Copies to /root/maksim-bot/media/ served by nginx at maksim-bot.panferov-ai.ru/media/
+    Copies to MAKSIM_MEDIA_DIR (default /srv/bot-media-maksim/) served by nginx
+    at MAKSIM_MEDIA_BASE_URL (default https://maksim-bot.panferov-ai.ru/media/).
+    Same path as save_media_permanent() in bot.py — single source of truth.
     Returns public URL or None.
     """
     if not Path(video_path).exists():
@@ -880,16 +888,15 @@ def upload_video_to_temp_hosting(video_path: str) -> str | None:
 
     try:
         import hashlib, time as _time, shutil
-        media_dir = Path("/root/maksim-bot/media")
-        media_dir.mkdir(parents=True, exist_ok=True)
+        _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
         ext = Path(video_path).suffix or ".mp4"
         ts = str(_time.time()).encode()
         name_hash = hashlib.md5(ts + video_path.encode()).hexdigest()[:12]
         filename = f"video_{name_hash}{ext}"
-        dest = media_dir / filename
+        dest = _MEDIA_DIR / filename
         shutil.copy2(video_path, str(dest))
         dest.chmod(0o644)
-        url = f"https://maksim-bot.panferov-ai.ru/media/{filename}"
+        url = f"{_MEDIA_BASE_URL}/{filename}"
         logger.info(f"Video available at: {url}")
         return url
     except Exception as e:
@@ -986,7 +993,7 @@ def tiktok_upload_video(
         return None
 
     # Build the upload script — runs in a subprocess using the SAME Python
-    # interpreter as the bot (main venv at /root/maksim-bot/venv/bin/python).
+    # interpreter as the bot.
     # The old code referenced a separate /root/tiktok-env venv that no longer
     # exists; tiktokautouploader is installed directly in the main venv.
     tags = hashtags or ["#shorts", "#ai"]
@@ -1017,8 +1024,8 @@ print("TIKTOK_UPLOAD_OK")
             capture_output=True,
             text=True,
             timeout=600,  # 10 min max
-            cwd="/root/maksim-bot",  # cookies are here: TK_cookies_{account}.json
-            env={**os.environ, "HOME": "/root", "DISPLAY": ":99"},
+            cwd=str(paths.BOT_ROOT),  # cookies are here: TK_cookies_{account}.json
+            env={**os.environ, "DISPLAY": ":99"},
         )
 
         if "TIKTOK_UPLOAD_OK" in result.stdout:

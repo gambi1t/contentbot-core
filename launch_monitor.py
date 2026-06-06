@@ -32,6 +32,8 @@ from xml.etree import ElementTree as ET
 
 import requests
 
+import paths
+
 logger = logging.getLogger("content_bot.launch_monitor")
 
 # ---------------------------------------------------------------------------
@@ -1039,7 +1041,7 @@ def download_source_media(source_url: str, dest_path: Path, timeout: int = 120) 
     # version that strips most auth cookies.  Running twice destroys the file.
     # Workaround: copy to a throwaway temp path for each invocation, let yt-dlp
     # mutate the copy, discard afterwards.  The pristine master stays intact.
-    cookies_master = Path("/root/maksim-bot/assets/youtube_cookies.txt")
+    cookies_master = paths.YOUTUBE_COOKIES
     cookies_tmp: Path | None = None
     if cookies_master.exists() and cookies_master.stat().st_size > 500:
         fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
