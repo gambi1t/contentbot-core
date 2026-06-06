@@ -60,6 +60,7 @@ _ASSETS_DIR: Path | None = None
 _LOGGER = None
 _SELFIE_FINALIZE = None  # legacy bot.py finalizer
 _TITLE_PICKER = None  # optional override of the default first-sentence title UI
+_COVER_TEXT_STEP = None  # optional «текст на обложку?» step before title picker
 
 
 def init(
@@ -69,6 +70,7 @@ def init(
     logger,
     selfie_finalize=None,
     title_picker=None,
+    cover_text_step=None,
 ) -> None:
     """Inject bot.py dependencies. Call once at startup.
 
@@ -78,15 +80,22 @@ def init(
             invoked instead of the built-in "Утвердить простое название" UI after
             cover-picking. Lets the host bot replace the trivial first-sentence
             title with a richer picker (e.g. Claude-generated hooks).
-            When None — the built-in single-button UI is shown.
+        cover_text_step: optional async callable
+            ``(message_or_query, context, user_id, cover_path, transcript) -> None``
+            invoked AFTER cover photo is chosen — offers «текст на обложку?»
+            (С текстом/Без). The host bot owns this (needs generate_cover +
+            Claude). When done it calls the title_picker itself. If None —
+            cover-pick goes straight to title_picker (no text overlay step).
     """
-    global _PENDING, _SAVE_PENDING, _ASSETS_DIR, _LOGGER, _SELFIE_FINALIZE, _TITLE_PICKER
+    global _PENDING, _SAVE_PENDING, _ASSETS_DIR, _LOGGER, _SELFIE_FINALIZE
+    global _TITLE_PICKER, _COVER_TEXT_STEP
     _PENDING = pending
     _SAVE_PENDING = save_pending
     _ASSETS_DIR = assets_dir
     _LOGGER = logger
     _SELFIE_FINALIZE = selfie_finalize
     _TITLE_PICKER = title_picker
+    _COVER_TEXT_STEP = cover_text_step
 
 
 # ── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -1611,6 +1620,14 @@ async def _finalize_with_cover(
         "selfie_cover_note": cover_note,
     }
     _SAVE_PENDING(_PENDING)
+
+    # Шаг «текст на обложку?» (С текстом/Без) — если хост предоставил. Он сам
+    # потом вызовет title_picker. Иначе — сразу к title_picker.
+    if _COVER_TEXT_STEP is not None:
+        await _COVER_TEXT_STEP(
+            message_or_query, context, user_id, str(cover_path), transcript_text
+        )
+        return
 
     # If the host bot provided a richer title-picker (e.g. Claude-generated
     # hooks), delegate to it. Otherwise show the built-in single-button UI.

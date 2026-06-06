@@ -6495,12 +6495,18 @@ async def _maksim_selfie_title_picker(
     pending[user_id]["selfie_shown_hooks"] = list(hooks)
     _save_pending(pending)
 
+    wants_text = pending.get(user_id, {}).get("selfie_cover_wants_text")
+    role_line = (
+        "🎣 Варианты текста (нажми на один — ляжет на обложку И станет заголовком):"
+        if wants_text
+        else "🎣 Варианты названия (нажми на один — станет заголовком карточки):"
+    )
     hooks_block = "\n".join(f"  • {h}" for h in hooks)
     text = (
         f"📝 Расшифровка:\n{transcript_text[:500]}"
         f"{'…' if len(transcript_text) > 500 else ''}\n\n"
         f"———\n"
-        f"🎣 Варианты названия (нажми на один — станет заголовком карточки):\n\n"
+        f"{role_line}\n\n"
         f"{hooks_block}\n\n"
         f"Или жми «🔄 Ещё варианты» / «✏️ Свой текстом»."
     )
@@ -6510,6 +6516,72 @@ async def _maksim_selfie_title_picker(
         await message_or_query.edit_message_text(text, reply_markup=kb)
     else:
         await message_or_query.reply_text(text, reply_markup=kb)
+
+
+async def _apply_selfie_cover_text(context, user_id: int, chat_id: int, title: str) -> None:
+    """Если юзер выбрал «с текстом» — наложить выбранный хук на селфи-обложку
+    через generate_cover и показать результат. Источник текста — тот же хук,
+    что стал заголовком (merged 10 июня: один текст вместо двух генераций).
+    Мутирует data["selfie_cover"] на обложку-с-текстом. Best-effort.
+    """
+    data = pending.get(user_id, {})
+    if not data.get("selfie_cover_wants_text"):
+        return
+    base = data.get("selfie_cover_base")
+    if not base or not Path(base).exists():
+        logger.info("[selfie] cover-text wanted but no base photo — skip overlay")
+        return
+    try:
+        tmp_dir = Path(data.get("selfie_tmp_dir") or str(ASSETS_DIR))
+        out_path = str(tmp_dir / "cover_with_text.jpg")
+        await asyncio.to_thread(generate_cover, title, out_path, base)  # base = селфи-фото
+        data["selfie_cover"] = out_path
+        data["selfie_cover_text"] = title
+        _save_pending(pending)
+        try:
+            with open(out_path, "rb") as ph:
+                await context.bot.send_photo(
+                    chat_id=chat_id, photo=ph,
+                    caption=f"🖼 Обложка с текстом: «{title}»",
+                )
+        except Exception as e:
+            logger.warning(f"[selfie] cover preview send failed: {e}")
+    except Exception as e:
+        logger.warning(f"[selfie] cover-text overlay failed: {e}")
+
+
+async def _maksim_selfie_cover_text_step(
+    message_or_query, context, user_id: int, cover_path: str, transcript: str,
+) -> None:
+    """Шаг «текст на обложку?» после выбора фото-обложки (инъекция в selfie).
+
+    [✏️ С текстом] → 5 вариантов Opus → generate_cover поверх селфи-фото.
+    [➡️ Без текста] → как есть, дальше к title-picker.
+    Хранит базовое фото в selfie_cover_base для последующего наложения.
+    """
+    data = pending.get(user_id, {})
+    data["state"] = "selfie_covertext"
+    data["selfie_cover_base"] = cover_path  # фото без текста
+    pending[user_id] = data
+    _save_pending(pending)
+
+    chat_id = (
+        message_or_query.message.chat_id
+        if hasattr(message_or_query, "message") and message_or_query.message
+        else message_or_query.chat_id
+    )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "🖼 Наложить текст на обложку?\n\n"
+            "Сделаю обложку-превью с хук-заголовком поверх фото "
+            "(как ютуб-thumbnail). Или оставить чистое фото."
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ С текстом", callback_data="selfie_ct:on")],
+            [InlineKeyboardButton("➡️ Без текста (чистое фото)", callback_data="selfie_ct:off")],
+        ]),
+    )
 
 
 async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8393,7 +8465,8 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not custom_title:
             await update.message.reply_text("Напиши название для видео или нажми «Утвердить название».")
             return
-        # User typed a custom title — proceed to create Notion card
+        # Свой текст — тоже на обложку, если выбрано «с текстом» (merged flow).
+        await _apply_selfie_cover_text(context, user_id, update.message.chat_id, custom_title)
         await _selfie_finalize(update, context, user_id, custom_title)
         return
 
@@ -10739,6 +10812,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data.startswith("selfie_cover:"):
             await selfie_handlers.handle_cover_callback(update, context)
             return
+
+    # ── Селфи: текст на обложку (С текстом/Без) ──────────────────────────────
+    # MERGED 10 июня: убран отдельный (худший) генератор текста обложки. Теперь
+    # «С текстом/Без» только ставит флаг, а ЕДИНЫЙ источник текста — хук-
+    # генератор (_maksim_selfie_title_picker, 5 вариантов + Ещё/Свой). Выбранный
+    # хук → ложится на фото (если С текстом) И становится заголовком карточки.
+    # Один текст, одно качество (хуки были заметно лучше — Артём 10 июня).
+    if query.data in ("selfie_ct:on", "selfie_ct:off"):
+        await query.answer()
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        if data:
+            data["selfie_cover_wants_text"] = (query.data == "selfie_ct:on")
+            data["state"] = "selfie_waiting_title"
+            _save_pending(pending)
+        transcript = (data or {}).get("selfie_transcript", "")
+        first = (data or {}).get("selfie_auto_title", "")
+        await _maksim_selfie_title_picker(query.message, context, user_id, transcript, first)
+        return
 
     # Restore brand context for deep callbacks (heygen_looks, assemble, cover).
     # Source: pending[user_id]["card_brand"] — cached when the card was
@@ -13840,7 +13934,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Вариант не найден")
             return
         title = hooks[idx]
-        await query.edit_message_text(f"✅ Название: «{title}»\n\nСоздаю карточку…")
+        await query.edit_message_text(f"✅ Текст: «{title}»")
+        # Наложить на обложку, если юзер выбрал «с текстом» (merged flow).
+        await _apply_selfie_cover_text(context, user_id, query.message.chat_id, title)
+        await context.bot.send_message(chat_id=query.message.chat_id, text="📋 Создаю карточку…")
         await _selfie_finalize(query, context, user_id, title)
         return
 
@@ -20714,6 +20811,7 @@ def main():
         # Claude-Opus 5-hook picker. Existing selfie_hook_pick:N callbacks in
         # handle_callback take it from there.
         title_picker=_maksim_selfie_title_picker,
+        cover_text_step=_maksim_selfie_cover_text_step,
     )
 
     # fal.ai on-demand generators — /image (Nano Banana Pro) and /video
