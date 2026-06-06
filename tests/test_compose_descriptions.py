@@ -88,6 +88,9 @@ def test_parsing(errors):
     # system prompt должен был содержать бренд-инструкции (no-hashtag rule)
     _assert(fake.last_system and "Хештеги" in fake.last_system,
             "system-промпт содержит бренд-правила (no-hashtag)", errors)
+    # CTA для соцсетей — «ссылка в шапке профиля», не голый Telegram-хэндл
+    _assert(fake.last_system and "шапке профиля" in fake.last_system,
+            "system-промпт направляет CTA в шапку профиля (Telegram не кликабелен на IG)", errors)
 
 
 def test_fallback_no_separators(errors):
