@@ -7588,6 +7588,26 @@ def _idea_tgpost_keyboard(idx: int, photos_count: int = 0) -> InlineKeyboardMark
     ])
 
 
+def _tgpost_script_keyboard(photos_count: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура экрана «📰 TG-пост по сценарию» (селфи-финал).
+
+    Раньше тут было только [Опубликовать][Перегенерировать] — без выбора
+    фото. Артём 10 июня: в TG хочу СВОЮ фотографию (не ту, что в Instagram).
+    Подключаем тот же фото-механизм, что в idea→tgpost (`tgphoto_*` меню:
+    своё фото из чата + банк на сервере по категориям). Единый источник —
+    `selfie_tg_photos` + `_render_tgphoto_menu`, ничего нового.
+    """
+    photo_label = (
+        f"📷 Фото к посту ({photos_count} выбрано)"
+        if photos_count > 0 else "📷 Прикрепить фото"
+    )
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Опубликовать в TG-канал", callback_data="tgpost_from_script:publish")],
+        [InlineKeyboardButton(photo_label, callback_data="tgpost_script_photos")],
+        [InlineKeyboardButton("🔄 Перегенерировать", callback_data="tgpost_from_script")],
+    ])
+
+
 def _clear_carousel_surg_state(user_id: int) -> None:
     """Clear `awaiting_carousel_surg_edit` state for user (if set).
 
@@ -10765,8 +10785,14 @@ async def _render_tgphoto_menu(query, context, data: dict) -> None:
             f"🗑 Убрать прикреплённые фото ({len(tg_photos)})",
             callback_data="tgphoto_clear",
         )])
+    # Подпись кнопки возврата зависит от того, какой флоу открыл меню:
+    # сценарный TG-пост / idea→tgpost → «к посту»; крос-пост → «к кросс-постингу».
+    if data.get("tgphoto_return_script") or data.get("tgphoto_return_idea_idx") is not None:
+        _back_label = "◀️ Назад к посту"
+    else:
+        _back_label = "◀️ Назад к кросс-постингу"
     kb_rows.append([InlineKeyboardButton(
-        "◀️ Назад к кросс-постингу",
+        _back_label,
         callback_data="tgphoto_done",
     )])
 
@@ -11695,11 +11721,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         session_data = pending.get(user_id) or {}
         session_data["tgphoto_return_idea_idx"] = idx
+        session_data.pop("tgphoto_return_script", None)  # mutually exclusive flows
         pending[user_id] = session_data
         _save_pending(pending)
         await query.answer()
         # Re-use existing _render_tgphoto_menu helper (single source of
         # truth for the photo menu rendering).
+        await _render_tgphoto_menu(query, context, session_data)
+        return
+
+    # ─── Entry to photo menu from selfie script→tgpost screen ───
+    # Same menu (своё фото из чата + банк), но возврат не в idea-flow и не
+    # в крос-пост, а на экран «📰 TG-пост по сценарию». Маркер возврата —
+    # tgphoto_return_script (обрабатывается в tgphoto_done).
+    if query.data == "tgpost_script_photos":
+        session_data = pending.get(user_id) or {}
+        session_data["tgphoto_return_script"] = True
+        session_data.pop("tgphoto_return_idea_idx", None)  # mutually exclusive flows
+        pending[user_id] = session_data
+        _save_pending(pending)
+        await query.answer()
         await _render_tgphoto_menu(query, context, session_data)
         return
 
@@ -15294,6 +15335,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         #     refreshed photo counter on the button.
         tg_photos = data.get("selfie_tg_photos", []) or []
 
+        # ── Селфи script→tgpost return: перерисовать экран TG-поста по
+        # сценарию со свежим счётчиком фото на кнопке. ──
+        if data.get("tgphoto_return_script"):
+            data.pop("tgphoto_return_script", None)
+            _save_pending(pending)
+            post_text = data.get("tg_post_from_script") or ""
+            if not post_text:
+                await query.edit_message_text(
+                    f"✅ Прикреплено: *{len(tg_photos)}* фото.\n\n"
+                    "Текст поста потерян — сгенерируй заново кнопкой "
+                    "«📰 TG-пост по сценарию».",
+                    parse_mode="Markdown",
+                )
+                return
+            await query.edit_message_text(
+                f"📰 TG-пост по сценарию:\n\n{post_text}",
+                reply_markup=_tgpost_script_keyboard(len(tg_photos)),
+            )
+            return
+
         idea_idx_for_return = data.get("tgphoto_return_idea_idx")
         if idea_idx_for_return is not None:
             # ── Idea-flow return: re-render the post screen ──
@@ -18171,14 +18232,52 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── TG-пост по сценарию: переиспользует tg_post_writer.rewrite_for_telegram ──
     if query.data == "tgpost_from_script":
         script_text = extract_script_text(data)
-        # Fallback to script.txt in the project folder if data lost it.
+        # Fallback: достать сценарий из папки проекта, даже когда сессия его
+        # потеряла — карточка переоткрыта после рестарта, ИЛИ быстрый Telethon-
+        # тест прыгнул сразу на готовую карточку (без прогона селфи). Раньше
+        # читался только script.txt по notion_page_id, но finalize селфи пишет
+        # transcript.txt и кладёт лишь notion_edit_card → кнопка из меню
+        # переоткрытой карточки молча падала в «Нет сценария» (Артём 10 июня).
         if not script_text:
-            proj = _project_dir(data)
-            if proj and (proj / "script.txt").exists():
+            # Кандидаты папок проекта по убыванию точности. Точная папка из
+            # notion_edit_card+title — ПЕРВЕЕ префикс-глоба: префиксы Notion-id
+            # коллизятся (8 hex), и _project_dir_by_prefix вернул бы самую
+            # свежую папку с тем же префиксом → сценарий ЧУЖОЙ карточки.
+            _cand_dirs: list[Path] = []
+            _p1 = _project_dir(data)  # точная, если в сессии есть notion_page_id+title
+            if _p1:
+                _cand_dirs.append(_p1)
+            _vc = data.get("notion_edit_card")
+            _vt = data.get("notion_edit_title")
+            if _vc:
+                _p2 = _project_dir({"notion_page_id": _vc, "card_data": {"title": _vt or ""}})
+                if _p2:
+                    _cand_dirs.append(_p2)
+            _p3 = _project_dir_by_prefix(_vc or data.get("crosspost_card_id") or "")
+            if _p3:
+                _cand_dirs.append(_p3)
+            for _d in _cand_dirs:
+                for _fname in ("script.txt", "transcript.txt"):
+                    _fp = _d / _fname
+                    if _fp.exists():
+                        try:
+                            script_text = _fp.read_text(encoding="utf-8").strip()
+                        except Exception:
+                            script_text = ""
+                        if script_text:
+                            break
+                if script_text:
+                    break
+        # Последний резерв — тело страницы Notion (там лежит сценарий/расшифровка).
+        if not script_text:
+            _full_id = data.get("notion_edit_card") or data.get("notion_page_id")
+            if _full_id:
                 try:
-                    script_text = (proj / "script.txt").read_text(encoding="utf-8").strip()
-                except Exception:
-                    pass
+                    script_text = (await asyncio.to_thread(
+                        fetch_notion_page_script, _full_id
+                    ) or "").strip()
+                except Exception as e:
+                    logger.warning(f"[tgpost_from_script] Notion script fetch failed: {e}")
         if not script_text:
             await query.answer("Нет сценария — сначала создай его", show_alert=True)
             return
@@ -18207,15 +18306,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["tg_post_from_script"] = post_text
             _save_pending(pending)
 
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Опубликовать в TG-канал", callback_data="tgpost_from_script:publish")],
-                [InlineKeyboardButton("🔄 Перегенерировать", callback_data="tgpost_from_script")],
-            ])
+            photos_count = len(data.get("selfie_tg_photos") or [])
             # Markdown disabled here — generated post may contain unescaped
             # underscores/asterisks that would break parser. Plain text is fine.
             await status_msg.edit_text(
                 f"📰 TG-пост по сценарию:\n\n{post_text}",
-                reply_markup=kb,
+                reply_markup=_tgpost_script_keyboard(photos_count),
             )
         except Exception as e:
             logger.error(f"tgpost_from_script error: {e}", exc_info=True)
@@ -18227,17 +18323,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not post_text:
             await query.answer("Нет поста для публикации", show_alert=True)
             return
+        # Прикреплённые фото (своё из чата / из банка) — тот же ключ и тот же
+        # publish-путь, что у idea→tgpost. Если фото нет — telegram_post_to_channel
+        # шлёт просто текст (поведение как раньше).
+        tg_photos = data.get("selfie_tg_photos") or None
+        # Convert markdown **bold** → HTML <b> (как в idea_tgpost_publish).
+        post_escaped = html_mod.escape(post_text)
+        post_html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", post_escaped)
+        await query.answer("Публикую…")
         try:
-            msg = await context.bot.send_message(
-                chat_id=TELEGRAM_CHANNEL_ID,
-                text=post_text,
-            )
-            await query.edit_message_text(
-                f"✅ TG-пост опубликован (message_id={msg.message_id})"
+            from crosspost import telegram_post_to_channel
+            result = await telegram_post_to_channel(
+                context.bot, post_html, photos=tg_photos,
             )
         except Exception as e:
             logger.error(f"tgpost_from_script publish error: {e}", exc_info=True)
             await query.edit_message_text(f"❌ Ошибка публикации в TG: {e}")
+            return
+        if not result:
+            await query.edit_message_text(
+                "❌ Публикация не удалась. Проверь TELEGRAM_CHANNEL_ID "
+                "и что бот — админ канала."
+            )
+            return
+        # Снимаем фото, чтобы не утекли в следующий пост.
+        data["selfie_tg_photos"] = []
+        _save_pending(pending)
+        photos_part = f" + {len(tg_photos)} фото" if tg_photos else ""
+        await query.edit_message_text(
+            f"✅ TG-пост опубликован{photos_part}."
+        )
         return
 
     if query.data == "desc_edit":
