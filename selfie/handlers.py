@@ -1,0 +1,1641 @@
+"""selfie.handlers — Telegram-flow для selfie-pipeline с шагом редактирования
+транскрипции и выбором фоновой музыки.
+
+Архитектура: модуль зависит от bot.py (pending, _save_pending, ASSETS_DIR, logger).
+Эти зависимости инжектируются через init() при старте бота — циклический импорт
+исключён.
+
+State machine (значения pending[user_id]["state"]):
+  - "selfie_waiting_video"   → ждёт видео (handled by process_video)
+  - "selfie_text_review"     → показал текст, ждёт callback (handle_text_review_callback)
+  - "selfie_text_editing"    → ждёт текстовое сообщение с правкой (handle_text_edit_message)
+  - "selfie_music_picking"   → burn готов, юзер выбирает музыку (handle_music_callback)
+  - "selfie_cover_picking"   → музыка готова, юзер выбирает обложку (handle_cover_callback)
+  - "selfie_cover_uploading" → ждёт photo для обложки (handle_cover_photo_message)
+  - "selfie_waiting_title"   → всё готово → control bot.py (его существующий код)
+
+Callbacks "selfie_text:*":
+  - "ok" / "confirm"          → burn subtitles → music_picking
+  - "edit" / "edit_again"     → state selfie_text_editing
+  - "cancel_edit"             → возврат в selfie_text_review
+
+Callbacks "selfie_music:*":
+  - "cat:<category>"          → pick random track из категории → mix → preview
+  - "reroll:<category>"       → другой случайный трек той же категории → mix → preview
+  - "back"                    → вернуться к выбору категории
+  - "skip"                    → пропустить музыку → переход к COVER picker
+  - "accept"                  → подтвердить текущий микс → переход к COVER picker
+
+Callbacks "selfie_cover:*":
+  - "frame:start|mid|end"     → ffmpeg snapshot timestamp'а → к названию
+  - "upload"                  → state selfie_cover_uploading
+  - "library"                 → 6 случайных из broll-library/photos
+  - "lib_pick:<id>"           → выбрать конкретное фото → к названию
+  - "lib_reroll"              → ещё 6 (exclude уже показанные)
+  - "back"                    → вернуться к picker
+  - "skip"                    → дефолт = первый кадр → к названию
+"""
+from __future__ import annotations
+
+import asyncio
+import subprocess
+import tempfile
+from pathlib import Path
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes
+
+from selfie import broll_picker as selfie_broll
+from selfie import cover as selfie_cover
+from selfie import music as selfie_music
+from selfie.edit import apply_user_edits
+from selfie.transcribe import transcribe
+
+
+# ── Module-level injected state ─────────────────────────────────────────────
+# Set via init() at bot startup. NOT thread-safe but бот single-process.
+_PENDING: dict | None = None
+_SAVE_PENDING = None
+_ASSETS_DIR: Path | None = None
+_LOGGER = None
+_SELFIE_FINALIZE = None  # legacy bot.py finalizer
+_TITLE_PICKER = None  # optional override of the default first-sentence title UI
+
+
+def init(
+    pending: dict,
+    save_pending,
+    assets_dir: Path,
+    logger,
+    selfie_finalize=None,
+    title_picker=None,
+) -> None:
+    """Inject bot.py dependencies. Call once at startup.
+
+    Args:
+        title_picker: optional async callable
+            ``(message_or_query, context, user_id, transcript_text, first_sentence) -> None``
+            invoked instead of the built-in "Утвердить простое название" UI after
+            cover-picking. Lets the host bot replace the trivial first-sentence
+            title with a richer picker (e.g. Claude-generated hooks).
+            When None — the built-in single-button UI is shown.
+    """
+    global _PENDING, _SAVE_PENDING, _ASSETS_DIR, _LOGGER, _SELFIE_FINALIZE, _TITLE_PICKER
+    _PENDING = pending
+    _SAVE_PENDING = save_pending
+    _ASSETS_DIR = assets_dir
+    _LOGGER = logger
+    _SELFIE_FINALIZE = selfie_finalize
+    _TITLE_PICKER = title_picker
+
+
+# ── Pure helpers (unit-tested) ──────────────────────────────────────────────
+
+
+def truncate_for_preview(text: str, max_chars: int) -> str:
+    """Обрезать текст для preview, добавить ellipsis если урезали."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "…"
+
+
+def build_review_message(transcript: str, edited: bool = False) -> str:
+    """Собрать текст сообщения для шага review.
+
+    Args:
+        transcript: текущая транскрипция (после возможной правки).
+        edited: True если уже была правка (меняем заголовок).
+
+    Returns:
+        Готовая строка для send_message / edit_message_text. Гарантированно
+        короче 4096 символов (TG-лимит) — длинная транскрипция truncated.
+    """
+    # Резерв на статический текст: ~300 chars
+    preview = truncate_for_preview(transcript, 3500)
+    header = (
+        "✏️ <b>Расшифровка обновлена</b>" if edited
+        else "📝 <b>Расшифровка готова</b>"
+    )
+    hint = (
+        "\n\n<i>Проверь текст. Если есть ошибки в названиях AI-инструментов "
+        "(например, «Джеминай» → «Gemini») — нажми «✏️ Редактировать». "
+        "Если всё ок — нажми «✅ Использовать как есть».</i>"
+    )
+    return f"{header}\n\n{preview}{hint}"
+
+
+def detect_text_unchanged(original: str, edited: str) -> bool:
+    """Юзер прислал текст идентичный оригиналу (с учётом нормализации пробелов).
+
+    Используется чтобы не делать лишнюю работу если юзер случайно нажал
+    «Редактировать», скопировал текст и вернул без правок.
+    """
+    return original.split() == edited.split()
+
+
+# ── Telegram-flow ───────────────────────────────────────────────────────────
+
+
+def _review_keyboard(can_use_as_is: bool = True) -> InlineKeyboardMarkup:
+    """Кнопки шага review."""
+    rows = [[InlineKeyboardButton("✏️ Редактировать", callback_data="selfie_text:edit")]]
+    if can_use_as_is:
+        rows.append([InlineKeyboardButton("✅ Использовать как есть", callback_data="selfie_text:ok")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _post_edit_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки после применения правки."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить и продолжить", callback_data="selfie_text:confirm")],
+        [InlineKeyboardButton("✏️ Ещё правка", callback_data="selfie_text:edit_again")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+    ])
+
+
+def _editing_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки во время editing — даём возможность отменить."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Отмена правки", callback_data="selfie_text:cancel_edit")],
+    ])
+
+
+async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Принять видео от юзера в state 'selfie_waiting_video':
+    скачать → audio → transcribe (с brand biasing) → показать review с кнопками.
+
+    Не запускает burn subtitles — это произойдёт после подтверждения текста.
+    """
+    user_id = update.effective_user.id
+    video_file = update.message.video or update.message.document
+    if not video_file or not (
+        update.message.video
+        or (getattr(video_file, "mime_type", None) and video_file.mime_type.startswith("video/"))
+    ):
+        await update.message.reply_text("Отправь видеофайл (MP4). Жду видео, снятое на телефон.")
+        return
+
+    msg = await update.message.reply_text("📥 Загружаю видео...")
+    try:
+        tg_file = await context.bot.get_file(video_file.file_id)
+        selfie_tmp = Path(tempfile.mkdtemp(prefix="selfie_"))
+        source_path = selfie_tmp / "source.mp4"
+        await tg_file.download_to_drive(str(source_path))
+        file_size = source_path.stat().st_size / 1024 / 1024
+        _LOGGER.info(f"[selfie] Source video downloaded: {file_size:.1f} MB")
+
+        await msg.edit_text("🎙 Расшифровываю речь...")
+
+        # Extract audio
+        audio_tmp = selfie_tmp / "_tmp_audio.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(source_path),
+             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+             str(audio_tmp)],
+            capture_output=True, text=True, timeout=120,
+        )
+
+        # Transcribe with brand biasing (selfie.transcribe)
+        words = await asyncio.to_thread(transcribe, str(audio_tmp), language="ru")
+        transcript_text = " ".join(w["word"] for w in words) if words else ""
+        _LOGGER.info(f"[selfie] Transcribed: {len(words)} words, {len(transcript_text)} chars")
+
+        # Cleanup temp audio
+        try:
+            audio_tmp.unlink()
+        except OSError:
+            pass
+
+        if not transcript_text.strip():
+            await msg.edit_text(
+                "Не удалось распознать речь в видео. "
+                "Попробуй отправить другое видео с чёткой речью."
+            )
+            _PENDING[user_id]["state"] = "selfie_waiting_video"
+            _SAVE_PENDING(_PENDING)
+            return
+
+        # Save to pending — БЕЗ burn subtitles, ждём подтверждения текста
+        _PENDING[user_id] = {
+            "state": "selfie_text_review",
+            "selfie_tmp_dir": str(selfie_tmp),
+            "selfie_source": str(source_path),
+            "selfie_words": words,
+            "selfie_transcript": transcript_text,
+            "selfie_orig_transcript": transcript_text,  # сохраняем оригинал для diff
+        }
+        _SAVE_PENDING(_PENDING)
+
+        # Show review with buttons
+        await msg.edit_text(
+            build_review_message(transcript_text, edited=False),
+            reply_markup=_review_keyboard(can_use_as_is=True),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] process_video error: {e}", exc_info=True)
+        _PENDING[user_id]["state"] = "selfie_waiting_video"
+        _SAVE_PENDING(_PENDING)
+        await msg.edit_text(
+            f"Ошибка обработки видео: {e}\n\n"
+            "Попробуй отправить другое видео."
+        )
+
+
+async def handle_text_review_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Обработать selfie_text:* callbacks. Возвращает True если callback обработан
+    (для интеграции с диспетчером в bot.py)."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("selfie_text:"):
+        return False
+
+    user_id = update.effective_user.id
+    action = query.data.split(":", 1)[1]
+    await query.answer()
+
+    data = _PENDING.get(user_id)
+    if not data:
+        await query.edit_message_text("⚠️ Сессия selfie не найдена. Начни заново через /selfie.")
+        return True
+
+    if action == "ok":
+        # Текст ОК → спрашиваем про монтаж перед прожигом.
+        await _show_montage_choice(query, user_id, edited=False)
+        return True
+
+    if action == "confirm":
+        # Подтвердил после правки → спрашиваем про монтаж.
+        await _show_montage_choice(query, user_id, edited=True)
+        return True
+
+    if action == "edit" or action == "edit_again":
+        # Переходим в state ожидания нового текста
+        data["state"] = "selfie_text_editing"
+        _SAVE_PENDING(_PENDING)
+        current = data.get("selfie_transcript", "")
+        await query.edit_message_text(
+            "✏️ <b>Пришли исправленный текст ответом</b>\n\n"
+            "Правь только орфографию слов (Whisper иногда искажает названия). "
+            "<b>Количество слов должно остаться тем же.</b>\n\n"
+            f"<i>Текущая транскрипция:</i>\n{truncate_for_preview(current, 3000)}",
+            reply_markup=_editing_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    if action == "cancel_edit":
+        # Отмена режима правки — возвращаемся к review с теми же кнопками
+        data["state"] = "selfie_text_review"
+        _SAVE_PENDING(_PENDING)
+        current = data.get("selfie_transcript", "")
+        await query.edit_message_text(
+            build_review_message(current, edited=(current != data.get("selfie_orig_transcript", current))),
+            reply_markup=_review_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    return False
+
+
+async def handle_text_edit_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Обработать текстовое сообщение в state 'selfie_text_editing' — это новая
+    редакция транскрипции. Возвращает True если обработали."""
+    user_id = update.effective_user.id
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") != "selfie_text_editing":
+        return False
+
+    new_text = (update.message.text or "").strip()
+    if not new_text:
+        await update.message.reply_text("Пришли исправленный текст (не пустое сообщение).")
+        return True
+
+    orig_words: list[dict] = data.get("selfie_words", [])
+    current_transcript: str = data.get("selfie_transcript", "")
+
+    # Если идентично текущему — просто возвращаемся в review без warning
+    if detect_text_unchanged(current_transcript, new_text):
+        data["state"] = "selfie_text_review"
+        _SAVE_PENDING(_PENDING)
+        await update.message.reply_text(
+            "Текст не изменился. Возвращаюсь к выбору.",
+        )
+        await update.message.reply_text(
+            build_review_message(current_transcript, edited=False),
+            reply_markup=_review_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    # Apply edit
+    new_words, warning = apply_user_edits(orig_words, new_text)
+
+    if warning:
+        # Несоответствие кол-ва слов — показываем warning, остаёмся в editing
+        await update.message.reply_text(
+            warning,
+            reply_markup=_editing_keyboard(),
+        )
+        return True
+
+    # Успех — сохраняем правку и показываем результат с кнопкой подтверждения
+    data["selfie_words"] = new_words
+    new_transcript = " ".join(w["word"] for w in new_words)
+    data["selfie_transcript"] = new_transcript
+    data["state"] = "selfie_text_review"  # будем ждать confirm
+    _SAVE_PENDING(_PENDING)
+    _LOGGER.info(f"[selfie] User edited transcript: {len(new_words)} words")
+
+    await update.message.reply_text(
+        build_review_message(new_transcript, edited=True),
+        reply_markup=_post_edit_keyboard(),
+        parse_mode="HTML",
+    )
+    return True
+
+
+# ── Montage choice (с монтажом / без) перед прожигом ─────────────────────────
+
+
+async def _show_montage_choice(query, user_id: int, edited: bool) -> None:
+    """Спросить про динамичный монтаж перед burn. Запоминаем edited-флаг."""
+    data = _PENDING[user_id]
+    data["state"] = "selfie_montage_choice"
+    data["selfie_montage_edited"] = edited
+    _SAVE_PENDING(_PENDING)
+    await query.edit_message_text(
+        "🎬 <b>Динамичный монтаж?</b>\n\n"
+        "Меняю крупность по ходу речи (плавные наезды/отъезды на лицо) — "
+        "статичное селфи становится живее, как в интервью.\n\n"
+        "Или оставить как снято (без монтажа).",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 С монтажом", callback_data="selfie_montage:on")],
+            [InlineKeyboardButton("➡️ Без монтажа (как снято)", callback_data="selfie_montage:off")],
+        ]),
+        parse_mode="HTML",
+    )
+
+
+async def handle_montage_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Обработать selfie_montage:on|off — выбор динамичного монтажа.
+    Возвращает True если обработан."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("selfie_montage:"):
+        return False
+
+    user_id = update.effective_user.id
+    action = query.data.split(":", 1)[1]
+    await query.answer()
+
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") != "selfie_montage_choice":
+        await query.edit_message_text(
+            "⚠️ Сессия selfie не найдена или закончилась. Начни заново через /selfie."
+        )
+        return True
+
+    data["selfie_punch_in"] = (action == "on")
+    edited = bool(data.get("selfie_montage_edited", False))
+    _SAVE_PENDING(_PENDING)
+    _LOGGER.info(f"[selfie] Montage choice: punch_in={data['selfie_punch_in']}")
+    await _burn_and_request_title(query, context, user_id, edited=edited)
+    return True
+
+
+# ── Internal: burn subtitles after text confirmation ────────────────────────
+
+
+async def _burn_and_request_title(query, context, user_id: int, edited: bool) -> None:
+    """После подтверждения текста: burn subtitles → переход в music_picking.
+
+    После burn state = "selfie_music_picking" — юзер выбирает фоновую музыку
+    (или жмёт «Без музыки»). Финальное название запрашивается только после
+    подтверждения музыки (или skip) в handle_music_callback._proceed_to_title.
+    """
+    data = _PENDING[user_id]
+    words: list[dict] = data["selfie_words"]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    source_path = Path(data["selfie_source"])
+    transcript_text = data["selfie_transcript"]
+
+    status = await query.edit_message_text(
+        "🎬 Накладываю субтитры..." + (" (после правки)" if edited else "")
+    )
+
+    try:
+        # Lazy import — heavy module
+        from subtitle_burner import generate_ass, burn_subtitles, DEFAULT_FONT, DEFAULT_FONTSIZE, DEFAULT_MARGIN_V
+
+        font_dir = _ASSETS_DIR / "fonts"
+        font_dir_path = font_dir if font_dir.exists() else None
+
+        ass_path = selfie_tmp / "_tmp_subs.ass"
+        await asyncio.to_thread(
+            generate_ass,
+            words, ass_path,
+            font=DEFAULT_FONT,
+            fontsize=DEFAULT_FONTSIZE,
+            uppercase=True,
+            margin_v=DEFAULT_MARGIN_V,
+        )
+
+        # ── Punch-in монтаж (опц.) ДО прожига субтитров ──────────────────────
+        # Режем по границам предложений (Whisper-таймкоды) + меняем крупность
+        # (100/108/114%, якорь на лицо) → динамика в статичном селфи. Субтитры
+        # жгутся ПОВЕРХ уже смонтированного, поэтому остаются на месте.
+        # Длительность не меняется → ASS-тайминги валидны. Env SELFIE_PUNCH_IN=1.
+        burn_input = source_path
+        from selfie import punch_in as _pi
+        # Per-video выбор кнопкой (selfie_punch_in). Если ключа нет (старый
+        # flow) — фоллбэк на env SELFIE_PUNCH_IN.
+        _want_punch = data.get("selfie_punch_in")
+        if _want_punch is None:
+            _want_punch = _pi.punch_in_enabled()
+        if _want_punch:
+            try:
+                segments = _pi.plan_punch_in_segments(words)
+                if len(segments) > 1:
+                    await status.edit_text("🎬 Монтирую крупности (динамика кадра)...")
+                    punched_path = selfie_tmp / "punched.mp4"
+                    await asyncio.to_thread(
+                        _pi.render_punch_in, source_path, segments, punched_path
+                    )
+                    burn_input = punched_path
+                    _LOGGER.info(f"[selfie] Punch-in applied: {len(segments)} segments")
+            except Exception as e:
+                # Монтаж — не критичен; субтитры важнее. Fallback на source.
+                _LOGGER.warning(f"[selfie] Punch-in failed, using source: {e}")
+                burn_input = source_path
+            await status.edit_text("🎬 Накладываю субтитры...")
+
+        subtitled_path = selfie_tmp / "subtitled.mp4"
+        await asyncio.to_thread(
+            burn_subtitles,
+            burn_input, ass_path,
+            output_path=subtitled_path,
+            font_dir=font_dir_path,
+        )
+        try:
+            ass_path.unlink()
+        except OSError:
+            pass
+        _LOGGER.info(f"[selfie] Subtitles burned: {subtitled_path.stat().st_size / 1024 / 1024:.1f} MB")
+
+        # Save to pending — переходим в selfie_broll_offer (Pipeline 2 gate).
+        # selfie_subtitled — базовое видео с субтитрами (без B-roll и без музыки)
+        # selfie_final — то, что пойдёт в bot.py финализер (по умолчанию subtitled,
+        # после assemble_auto_montage перепишется на final_auto.mp4, после mix
+        # ещё раз — на final_with_music.mp4)
+        _PENDING[user_id] = {
+            "state": "selfie_broll_offer",
+            "selfie_tmp_dir": str(selfie_tmp),
+            "selfie_source": str(source_path),
+            "selfie_subtitled": str(subtitled_path),  # с субтитрами, без B-roll
+            "selfie_final": str(subtitled_path),       # пока совпадает
+            "selfie_transcript": transcript_text,
+            "selfie_edited": edited,
+            "selfie_broll_items": [],                  # будем накапливать в picker
+            "selfie_broll_shown_ids": {                # для reroll
+                "photo": [],
+                "clip": [],
+            },
+        }
+        _SAVE_PENDING(_PENDING)
+
+        edit_note = " ✏️ (после правки)" if edited else ""
+        await status.edit_text(
+            f"✅ Субтитры наложены!{edit_note}\n\n"
+            "🎬 Хочешь добавить B-roll-вставки в ролик (фото/видео поверх селфи)?",
+            reply_markup=selfie_broll.build_offer_keyboard(),
+        )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] _burn_and_request_title error: {e}", exc_info=True)
+        _PENDING[user_id]["state"] = "selfie_waiting_video"
+        _SAVE_PENDING(_PENDING)
+        await status.edit_text(
+            f"Ошибка наложения субтитров: {e}\n\n"
+            "Попробуй отправить видео заново."
+        )
+
+
+# ── Music picking ───────────────────────────────────────────────────────────
+
+
+def _category_label(cat: str) -> str:
+    """Удобный label для category из tracks.json (fallback на сам ключ)."""
+    for c in selfie_music.get_visible_categories():
+        if c["cat"] == cat:
+            return f"{c['emoji']} {c['label']}".strip()
+    return cat
+
+
+async def handle_music_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Обработать selfie_music:* callbacks. Возвращает True если обработан."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("selfie_music:"):
+        return False
+
+    user_id = update.effective_user.id
+    parts = query.data.split(":", 2)  # ["selfie_music", action, optional arg]
+    action = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else None
+    await query.answer()
+
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") != "selfie_music_picking":
+        await query.edit_message_text(
+            "⚠️ Сессия selfie не найдена или закончилась. Начни заново через /selfie."
+        )
+        return True
+
+    if action == "cat":
+        # Юзер выбрал категорию → шлём 3 трека на прослушивание (НЕ микс).
+        # Юзер слушает в нативном Telegram audio-плеере и выбирает.
+        await _send_track_previews(query, context, user_id, category=arg, exclude_ids=None)
+        return True
+
+    if action == "reroll":
+        # «Ещё 3 трека» — exclude всех показанных в этой сессии.
+        shown = data.get("selfie_music_shown_ids") or []
+        await _send_track_previews(query, context, user_id, category=arg, exclude_ids=shown)
+        return True
+
+    if action == "pick":
+        # Юзер выбрал конкретный трек после прослушивания.
+        # arg = "<category>:<track_id>"
+        if not arg or ":" not in arg:
+            await query.edit_message_text("⚠️ Неверный формат выбора трека.")
+            return True
+        cat, track_id = arg.split(":", 1)
+        await _mix_picked_track(query, context, user_id, category=cat, track_id=track_id)
+        return True
+
+    if action == "back":
+        # Возврат к выбору категории — финал тут не миксованный, сбрасываем
+        data["selfie_final"] = data.get("selfie_subtitled", data.get("selfie_final"))
+        data.pop("selfie_picked_music", None)
+        _SAVE_PENDING(_PENDING)
+        await query.edit_message_text(
+            f"✅ Субтитры наложены.\n\n{selfie_music.build_music_picker_message()}",
+            reply_markup=selfie_music.category_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    if action == "skip":
+        # Без музыки — selfie_final остаётся subtitled.mp4
+        data["selfie_final"] = data.get("selfie_subtitled", data.get("selfie_final"))
+        data.pop("selfie_picked_music", None)
+        _SAVE_PENDING(_PENDING)
+        _LOGGER.info(f"[selfie] User skipped music for user {user_id}")
+        await _proceed_to_cover_picker(query, context, user_id, music_note="без музыки")
+        return True
+
+    if action == "accept":
+        # Подтвердил текущий микс → к обложке
+        picked = data.get("selfie_picked_music") or {}
+        track_id = picked.get("track_id", "?")
+        _LOGGER.info(f"[selfie] User accepted music {track_id} for user {user_id}")
+        note = f"музыка: {track_id}" if track_id != "?" else "с музыкой"
+        await _proceed_to_cover_picker(query, context, user_id, music_note=note)
+        return True
+
+    return False
+
+
+async def _send_track_previews(
+    query, context, user_id: int, category: str | None, exclude_ids: list[str] | None,
+) -> None:
+    """Отправить 3 трека из категории как audio-файлы для прослушивания.
+
+    Каждый трек — отдельное audio-сообщение с inline-кнопкой «✅ Выбрать этот».
+    Юзер слушает прямо в Telegram (нативный audio-плеер) и решает.
+    После выбора — переход в _mix_picked_track.
+    """
+    if not category:
+        await query.edit_message_text(
+            "⚠️ Не указана категория. Возврат к выбору.",
+            reply_markup=selfie_music.category_keyboard(),
+        )
+        return
+
+    tracks = selfie_music.pick_n_tracks(category, n=3, exclude_ids=exclude_ids or [])
+    if not tracks:
+        await query.edit_message_text(
+            f"⚠️ В категории «{_category_label(category)}» больше нет новых треков.",
+            reply_markup=selfie_music.category_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    data = _PENDING[user_id]
+    # Запоминаем показанные ID для reroll
+    shown = data.get("selfie_music_shown_ids") or []
+    new_shown = list({*shown, *(t["id"] for t in tracks)})
+    data["selfie_music_shown_ids"] = new_shown
+    # Счётчик batch'ей — нужен для уникальности текста при reroll (иначе
+    # Telegram падает с "Message is not modified" если текст и кнопки те же).
+    batch_n = (data.get("selfie_music_batch_n") or 0) + 1
+    data["selfie_music_batch_n"] = batch_n
+    _SAVE_PENDING(_PENDING)
+
+    cat_label = _category_label(category)
+    chat_id = query.message.chat_id
+
+    # Сначала кратко обновляем исходное сообщение (откуда был callback) —
+    # иначе на нём остаются устаревшие кнопки категории, и юзер может кликнуть
+    # повторно. Текст с счётчиком партии — гарантирует уникальность для Telegram
+    # (иначе reroll падает с "Message is not modified").
+    batch_suffix = "" if batch_n == 1 else f" — партия #{batch_n}"
+    try:
+        await query.edit_message_text(
+            f"🎵 <b>{cat_label}</b> — подбираю треки{batch_suffix}...",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        _LOGGER.debug(f"[selfie] intro edit skipped: {e}")
+
+    # 1) Шлём 3 аудио-сообщения с кнопкой «✅ Выбрать этот» под каждым.
+    for i, track in enumerate(tracks, 1):
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                f"✅ Выбрать этот ({track['id']})",
+                callback_data=f"selfie_music:pick:{category}:{track['id']}",
+            )]])
+            with open(track["file"], "rb") as audio_f:
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=audio_f,
+                    title=f"{i}. {track['id']}",
+                    performer=cat_label,
+                    duration=int(track.get("duration", 0)),
+                    reply_markup=kb,
+                )
+        except Exception as e:
+            _LOGGER.error(f"[selfie] send_audio failed for {track['id']}: {e}")
+            # Не критично, продолжаем остальные
+
+    # 2) В конце шлём footer-сообщение с кнопками управления — оно остаётся
+    # последним в ленте, юзер видит управление сразу после прослушивания.
+    footer_text = (
+        f"☝️ Послушай {len(tracks)} трека выше и выбери «✅» под нужным.\n\n"
+        f"Если ни один не подошёл — «🔄 Ещё треки»"
+        + (f" (партия #{batch_n}, всего показано {len(new_shown)})" if batch_n > 1 else "")
+        + "."
+    )
+    footer_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Ещё треки", callback_data=f"selfie_music:reroll:{category}")],
+        [InlineKeyboardButton("⬅️ Сменить категорию", callback_data="selfie_music:back")],
+        [InlineKeyboardButton("❌ Без музыки", callback_data="selfie_music:skip")],
+    ])
+    await context.bot.send_message(
+        chat_id=chat_id, text=footer_text, reply_markup=footer_kb,
+    )
+
+
+async def _mix_picked_track(
+    query, context, user_id: int, category: str, track_id: str,
+) -> None:
+    """Юзер выбрал конкретный track_id — миксуем его в видео и шлём превью."""
+    # Найти track-dict по id (вместо random)
+    track = None
+    for t in selfie_music._list_tracks(category):
+        if t.get("id") == track_id:
+            track = t
+            break
+    if not track:
+        await query.edit_message_text(
+            f"⚠️ Трек {track_id} не найден. Выбери другую категорию.",
+            reply_markup=selfie_music.category_keyboard(),
+        )
+        return
+
+    data = _PENDING[user_id]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    subtitled_path = Path(data["selfie_subtitled"])
+    mixed_path = selfie_tmp / "subtitled_with_music.mp4"
+
+    # Статус новым сообщением (не edit-ом кнопки выбора) — чтобы лента не прыгала.
+    status = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"🎬 Микширую трек <code>{track['id']}</code> в видео...",
+        parse_mode="HTML",
+    )
+
+    try:
+        ok = await asyncio.to_thread(
+            selfie_music.mix_into_video,
+            str(subtitled_path),
+            track["file"],
+            str(mixed_path),
+        )
+        if not ok or not mixed_path.exists():
+            raise RuntimeError("ffmpeg mix вернул False или не создал файл")
+
+        size_mb = mixed_path.stat().st_size / 1024 / 1024
+        _LOGGER.info(f"[selfie] Music mixed (pick): {track['id']} -> {size_mb:.1f} MB")
+
+        data["selfie_picked_music"] = {
+            "category": category,
+            "track_id": track["id"],
+            "track_file": track["file"],
+        }
+        data["selfie_final"] = str(mixed_path)
+        _SAVE_PENDING(_PENDING)
+
+        cat_label = _category_label(category)
+        await status.edit_text(
+            selfie_music.build_picked_message(cat_label, track, video_size_mb=size_mb),
+            reply_markup=selfie_music.picked_keyboard(category),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] mix error: {e}", exc_info=True)
+        await status.edit_text(
+            f"⚠️ Не получилось смикшировать ({e}). Попробуй другой трек.",
+            reply_markup=selfie_music.picked_keyboard(category),
+        )
+
+
+async def _pick_and_mix(
+    query, context, user_id: int, category: str | None, exclude_id: str | None
+) -> None:
+    """LEGACY: оставлено для совместимости с picked_keyboard «🔄 Другой трек»
+    (микс случайного без прослушивания). Новый flow — _send_track_previews +
+    _mix_picked_track.
+
+    Выбрать случайный трек категории, смикшировать в subtitled.mp4, показать preview."""
+    if not category:
+        await query.edit_message_text(
+            "⚠️ Не указана категория. Возврат к выбору.",
+            reply_markup=selfie_music.category_keyboard(),
+        )
+        return
+
+    track = selfie_music.pick_random_track(category, exclude_id=exclude_id)
+    if not track:
+        await query.edit_message_text(
+            f"⚠️ В категории «{category}» нет треков. Выбери другую:",
+            reply_markup=selfie_music.category_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    data = _PENDING[user_id]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    subtitled_path = Path(data["selfie_subtitled"])  # источник для микса
+    mixed_path = selfie_tmp / "subtitled_with_music.mp4"
+
+    status = await query.edit_message_text(
+        f"🎵 Подбираю трек из «{_category_label(category)}»...\n"
+        f"<code>{track['id']}</code> · {track.get('duration', 0):.0f}s\n\n"
+        f"🎬 Микширую (ducking)...",
+        parse_mode="HTML",
+    )
+
+    try:
+        ok = await asyncio.to_thread(
+            selfie_music.mix_into_video,
+            str(subtitled_path),
+            track["file"],
+            str(mixed_path),
+        )
+        if not ok or not mixed_path.exists():
+            raise RuntimeError("ffmpeg mix вернул False или не создал файл")
+
+        size_mb = mixed_path.stat().st_size / 1024 / 1024
+        _LOGGER.info(f"[selfie] Music mixed: {track['id']} -> {size_mb:.1f} MB")
+
+        data["selfie_picked_music"] = {
+            "category": category,
+            "track_id": track["id"],
+            "track_file": track["file"],
+        }
+        data["selfie_final"] = str(mixed_path)
+        _SAVE_PENDING(_PENDING)
+
+        cat_label = next(
+            (f"{c['emoji']} {c['label']}".strip()
+             for c in selfie_music.get_visible_categories() if c["cat"] == category),
+            category,
+        )
+        await status.edit_text(
+            selfie_music.build_picked_message(cat_label, track, video_size_mb=size_mb),
+            reply_markup=selfie_music.picked_keyboard(category),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] mix error: {e}", exc_info=True)
+        await status.edit_text(
+            f"⚠️ Не получилось смикшировать ({e}). Попробуй другой трек или жми «Без музыки».",
+            reply_markup=selfie_music.picked_keyboard(category),
+        )
+
+
+async def _show_broll_picker_screen(query_or_msg, user_id: int) -> None:
+    """Re-render the main B-roll picker (sources + selected list)."""
+    data = _PENDING[user_id]
+    items = _items_from_pending(data)
+    text = selfie_broll.build_picker_message(items)
+    kb = selfie_broll.build_picker_keyboard(items)
+    # Plain text — labels may contain underscores/asterisks that break Markdown.
+    if hasattr(query_or_msg, "edit_message_text"):
+        try:
+            await query_or_msg.edit_message_text(text, reply_markup=kb)
+        except Exception:
+            # message may be a photo/video confirmation — can't edit text
+            await query_or_msg.message.reply_text(text, reply_markup=kb)
+    else:
+        await query_or_msg.reply_text(text, reply_markup=kb)
+
+
+def _items_from_pending(data: dict) -> list:
+    """Reconstruct list[BrollItem] from pending (stored as list[dict])."""
+    raw = data.get("selfie_broll_items", []) or []
+    out = []
+    for r in raw:
+        out.append(selfie_broll.BrollItem(
+            kind=r["kind"],
+            source=Path(r["source"]),
+            label=r.get("label"),
+        ))
+    return out
+
+
+def _store_item(data: dict, item) -> None:
+    """Append a BrollItem to pending (serialised as dict)."""
+    data.setdefault("selfie_broll_items", [])
+    data["selfie_broll_items"].append({
+        "kind": item.kind,
+        "source": str(item.source),
+        "label": item.label,
+    })
+
+
+async def handle_broll_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Обработать selfie_broll:* callbacks. Возвращает True если обработан."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("selfie_broll:"):
+        return False
+
+    user_id = update.effective_user.id
+    parts = query.data.split(":", 3)  # ["selfie_broll", action, optional_arg, optional_arg2]
+    action = parts[1] if len(parts) > 1 else ""
+    await query.answer()
+
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") not in (
+        "selfie_broll_offer", "selfie_broll_picking",
+        "selfie_broll_uploading_photo", "selfie_broll_uploading_video",
+    ):
+        await query.edit_message_text(
+            "⚠️ Сессия selfie не найдена или закончилась. Начни заново через /selfie."
+        )
+        return True
+
+    # ── Offer step ──────────────────────────────────────────────────────────
+    if action == "add":
+        data["state"] = "selfie_broll_picking"
+        _SAVE_PENDING(_PENDING)
+        await _show_broll_picker_screen(query, user_id)
+        return True
+
+    if action in ("skip", "cancel"):
+        # No B-roll → straight to music picker (legacy Pipeline 1 flow).
+        data["state"] = "selfie_music_picking"
+        data["selfie_broll_items"] = []
+        _SAVE_PENDING(_PENDING)
+        await query.edit_message_text(
+            "➡️ Без B-roll, продолжаем.\n\n"
+            f"{selfie_music.build_music_picker_message()}",
+            reply_markup=selfie_music.category_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    # ── Picker actions ──────────────────────────────────────────────────────
+    if action == "lib_photo":
+        samples = await asyncio.to_thread(
+            selfie_cover.list_library_sample, 6,
+            data.get("selfie_broll_shown_ids", {}).get("photo", []),
+        )
+        if samples:
+            data.setdefault("selfie_broll_shown_ids", {"photo": [], "clip": []})
+            data["selfie_broll_shown_ids"]["photo"] = (
+                list(data["selfie_broll_shown_ids"].get("photo", [])) +
+                [s["id"] for s in samples]
+            )
+            _SAVE_PENDING(_PENDING)
+        await query.edit_message_text(
+            "📷 Фото из библиотеки — нажми на нужное:" if samples else "⚠️ Библиотека фото пуста",
+            reply_markup=selfie_broll.build_library_keyboard(samples, kind="image"),
+        )
+        return True
+
+    if action == "lib_clip":
+        samples = await asyncio.to_thread(
+            selfie_broll.list_clip_library_sample, 6,
+            data.get("selfie_broll_shown_ids", {}).get("clip", []),
+        )
+        if samples:
+            data.setdefault("selfie_broll_shown_ids", {"photo": [], "clip": []})
+            data["selfie_broll_shown_ids"]["clip"] = (
+                list(data["selfie_broll_shown_ids"].get("clip", [])) +
+                [s["id"] for s in samples]
+            )
+            _SAVE_PENDING(_PENDING)
+        await query.edit_message_text(
+            "🎞 Клипы из библиотеки — нажми на нужное:" if samples else "⚠️ Библиотека клипов пуста",
+            reply_markup=selfie_broll.build_library_keyboard(samples, kind="video"),
+        )
+        return True
+
+    if action == "reroll":
+        src_tag = parts[2] if len(parts) > 2 else "photo"
+        if src_tag == "photo":
+            samples = await asyncio.to_thread(
+                selfie_cover.list_library_sample, 6,
+                data.get("selfie_broll_shown_ids", {}).get("photo", []),
+            )
+            data["selfie_broll_shown_ids"]["photo"] += [s["id"] for s in samples]
+            kind = "image"
+        else:
+            samples = await asyncio.to_thread(
+                selfie_broll.list_clip_library_sample, 6,
+                data.get("selfie_broll_shown_ids", {}).get("clip", []),
+            )
+            data["selfie_broll_shown_ids"]["clip"] += [s["id"] for s in samples]
+            kind = "video"
+        _SAVE_PENDING(_PENDING)
+        if not samples:
+            await query.edit_message_text(
+                "⚠️ Больше нечего показать. Вернись назад.",
+                reply_markup=selfie_broll.build_library_keyboard([], kind=kind),
+            )
+        else:
+            await query.edit_message_text(
+                "📷 Ещё варианты:" if kind == "image" else "🎞 Ещё варианты:",
+                reply_markup=selfie_broll.build_library_keyboard(samples, kind=kind),
+            )
+        return True
+
+    if action == "pick":
+        # selfie_broll:pick:<src>:<id>
+        src_tag = parts[2] if len(parts) > 2 else ""
+        item_id = parts[3] if len(parts) > 3 else ""
+        if src_tag == "photo":
+            src_path = selfie_cover.lookup_library_path(item_id)
+            kind = "image"
+        else:
+            src_path = selfie_broll.lookup_clip_path(item_id)
+            kind = "video"
+        if not src_path or not Path(src_path).exists():
+            await query.edit_message_text(
+                f"⚠️ Файл {item_id} не найден. Выбери другой.",
+            )
+            await _show_broll_picker_screen(query, user_id)
+            return True
+
+        new_item = selfie_broll.BrollItem(
+            kind=kind, source=Path(src_path), label=f"library/{item_id}",
+        )
+        items = _items_from_pending(data)
+        err = selfie_broll.validate_added(items, new_item)
+        if err:
+            await query.edit_message_text(f"⚠️ {err}")
+            await _show_broll_picker_screen(query, user_id)
+            return True
+
+        _store_item(data, new_item)
+        _SAVE_PENDING(_PENDING)
+        await _show_broll_picker_screen(query, user_id)
+        return True
+
+    if action == "remove_last":
+        items_raw = data.get("selfie_broll_items", [])
+        if items_raw:
+            items_raw.pop()
+            _SAVE_PENDING(_PENDING)
+        await _show_broll_picker_screen(query, user_id)
+        return True
+
+    if action == "back":
+        await _show_broll_picker_screen(query, user_id)
+        return True
+
+    if action == "upload_photo":
+        data["state"] = "selfie_broll_uploading_photo"
+        _SAVE_PENDING(_PENDING)
+        await query.edit_message_text(
+            "📤 Пришли фотографию (как фото, не как файл).\n\n"
+            "Она будет добавлена к B-roll как Ken Burns-вставка (~2.8 сек).\n\n"
+            "Или жми «⬅️ Назад» чтобы вернуться к picker'у.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back"),
+            ]]),
+        )
+        return True
+
+    if action == "upload_video":
+        data["state"] = "selfie_broll_uploading_video"
+        _SAVE_PENDING(_PENDING)
+        await query.edit_message_text(
+            "📤 Пришли видео-файл (короткий клип 2-5 сек идеально).\n\n"
+            "Он будет вставлен как B-roll-сегмент (звук от видео отключается).\n\n"
+            "Или жми «⬅️ Назад» чтобы вернуться к picker'у.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back"),
+            ]]),
+        )
+        return True
+
+    if action == "done":
+        items = _items_from_pending(data)
+        if not items:
+            await query.edit_message_text("⚠️ Список пуст. Выбери хотя бы один B-roll или жми «Отмена».")
+            await _show_broll_picker_screen(query, user_id)
+            return True
+        await _run_broll_assembly_and_proceed(query, context, user_id, items)
+        return True
+
+    return False
+
+
+async def handle_broll_upload_photo_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Photo message handler for state selfie_broll_uploading_photo.
+
+    Returns True if the photo was consumed (state advanced), False otherwise.
+    Called from bot.py:process_photo BEFORE other guards.
+    """
+    user_id = update.effective_user.id
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") != "selfie_broll_uploading_photo":
+        return False
+
+    photos = update.message.photo or []
+    if not photos:
+        await update.message.reply_text("Это не фото. Пришли photo (не файл).")
+        return True
+
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    uploads_dir = selfie_tmp / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    n_existing = len([p for p in uploads_dir.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")])
+    dest = uploads_dir / f"upload_photo_{n_existing + 1:03d}.jpg"
+
+    largest = photos[-1]  # highest resolution
+    tg_file = await context.bot.get_file(largest.file_id)
+    await tg_file.download_to_drive(str(dest))
+
+    new_item = selfie_broll.BrollItem(kind="image", source=dest, label=f"upload/{dest.name}")
+    items = _items_from_pending(data)
+    err = selfie_broll.validate_added(items, new_item)
+    if err:
+        await update.message.reply_text(f"⚠️ {err}")
+    else:
+        _store_item(data, new_item)
+    data["state"] = "selfie_broll_picking"
+    _SAVE_PENDING(_PENDING)
+
+    await _show_broll_picker_screen(update.message, user_id)
+    return True
+
+
+async def handle_broll_upload_video_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Video message handler for state selfie_broll_uploading_video."""
+    user_id = update.effective_user.id
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") != "selfie_broll_uploading_video":
+        return False
+
+    video_file = update.message.video or update.message.document
+    is_video = (
+        update.message.video is not None
+        or (video_file is not None and video_file.mime_type and video_file.mime_type.startswith("video/"))
+    )
+    if not is_video:
+        await update.message.reply_text("Это не видео. Пришли видеофайл (MP4).")
+        return True
+
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    uploads_dir = selfie_tmp / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    n_existing = len([p for p in uploads_dir.iterdir() if p.suffix.lower() in (".mp4", ".mov", ".m4v")])
+    dest = uploads_dir / f"upload_video_{n_existing + 1:03d}.mp4"
+
+    tg_file = await context.bot.get_file(video_file.file_id)
+    await tg_file.download_to_drive(str(dest))
+
+    new_item = selfie_broll.BrollItem(kind="video", source=dest, label=f"upload/{dest.name}")
+    items = _items_from_pending(data)
+    err = selfie_broll.validate_added(items, new_item)
+    if err:
+        await update.message.reply_text(f"⚠️ {err}")
+    else:
+        _store_item(data, new_item)
+    data["state"] = "selfie_broll_picking"
+    _SAVE_PENDING(_PENDING)
+
+    await _show_broll_picker_screen(update.message, user_id)
+    return True
+
+
+async def _run_broll_assembly_and_proceed(
+    query, context, user_id: int, items: list,
+) -> None:
+    """Assemble selfie + B-roll via existing video_assembler, advance to music."""
+    data = _PENDING[user_id]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    subtitled = Path(data["selfie_subtitled"])
+
+    await query.edit_message_text(
+        f"🎬 Собираю монтаж: селфи + {len(items)} B-roll-вставок... ~30-60 сек."
+    )
+
+    try:
+        # 1. Подложить subtitled.mp4 как «аватар» и B-roll в нужные слоты.
+        project_dir = selfie_tmp / "assembly"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(selfie_broll.place_selfie_as_avatar, subtitled, project_dir)
+        await asyncio.to_thread(selfie_broll.prepare_broll_in_project, items, project_dir)
+
+        # 2. Запустить существующий assembler. Layout 'smart' — видео полную
+        # длину как broll_full, фото 2.8с как split — то, что Артём описал
+        # как «как в Remotion».
+        from video_assembler import assemble_auto_montage
+        final_auto = await asyncio.to_thread(
+            assemble_auto_montage,
+            project_dir,
+            layout="smart",
+            broll_mode="real",
+            brand_name="maksim",
+        )
+        _LOGGER.info(f"[selfie] B-roll assembly done: {final_auto.stat().st_size / 1024 / 1024:.1f} MB")
+
+        # 3. Подменить selfie_subtitled на смонтированное видео — теперь music
+        # mixer добавит музыку на final_auto.mp4 а не на чистый selfie.
+        data["selfie_subtitled"] = str(final_auto)
+        data["selfie_final"] = str(final_auto)
+        data["state"] = "selfie_music_picking"
+        _SAVE_PENDING(_PENDING)
+
+        await query.edit_message_text(
+            f"✅ Монтаж готов ({len(items)} B-roll-вставок).\n\n"
+            f"{selfie_music.build_music_picker_message()}",
+            reply_markup=selfie_music.category_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] B-roll assembly failed: {e}", exc_info=True)
+        await query.edit_message_text(
+            f"❌ Не получилось собрать монтаж: {e}\n\n"
+            "Возвращаю к выбору B-roll. Можно убрать что-то и попробовать снова, "
+            "либо нажать «Отмена» чтобы пропустить B-roll.",
+        )
+        data["state"] = "selfie_broll_picking"
+        _SAVE_PENDING(_PENDING)
+        await _show_broll_picker_screen(query, user_id)
+
+
+async def _proceed_to_cover_picker(query, context, user_id: int, music_note: str) -> None:
+    """После выбора музыки (или skip) — переходим к выбору обложки."""
+    data = _PENDING[user_id]
+    data["state"] = "selfie_cover_picking"
+    data["selfie_music_note"] = music_note  # запомним для финального сообщения
+    # Reset shown library ids (для reroll)
+    data["selfie_cover_shown_lib_ids"] = []
+    _SAVE_PENDING(_PENDING)
+
+    await query.edit_message_text(
+        f"✅ Видео готово ({music_note}).\n\n{selfie_cover.build_picker_message()}",
+        reply_markup=selfie_cover.cover_picker_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+# ── Cover picking ───────────────────────────────────────────────────────────
+
+
+async def handle_cover_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Обработать selfie_cover:* callbacks. Возвращает True если обработан."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("selfie_cover:"):
+        return False
+
+    user_id = update.effective_user.id
+    parts = query.data.split(":", 2)  # ["selfie_cover", action, optional arg]
+    action = parts[1] if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else None
+    await query.answer()
+
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") not in (
+        "selfie_cover_picking", "selfie_cover_uploading", "selfie_cover_confirming",
+    ):
+        await query.edit_message_text(
+            "⚠️ Сессия selfie не найдена или закончилась. Начни заново через /selfie."
+        )
+        return True
+
+    if action == "frame":
+        await _pick_frame_cover(query, context, user_id, which=arg or "start")
+        return True
+
+    if action == "skip":
+        # Дефолт: первый кадр
+        await _pick_frame_cover(query, context, user_id, which="start", note="первый кадр (default)")
+        return True
+
+    if action == "confirm":
+        # Снимаем кнопки со старого фото-превью, чтобы повторный клик не дал
+        # ложное «сессия не найдена» (state уже уйдёт в waiting_title).
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        # Юзер подтвердил превью обложки → финализируем сохранённый путь.
+        cover_path = data.get("selfie_cover_pending_path")
+        note = data.get("selfie_cover_pending_note", "обложка")
+        if not cover_path or not Path(cover_path).exists():
+            await query.message.reply_text(
+                "⚠️ Превью обложки потерялось. Выбери заново:",
+                reply_markup=selfie_cover.cover_picker_keyboard(),
+            )
+            data["state"] = "selfie_cover_picking"
+            _SAVE_PENDING(_PENDING)
+            return True
+        await _finalize_with_cover(
+            message_or_query=query.message,
+            context=context,
+            user_id=user_id,
+            cover_path=Path(cover_path),
+            cover_note=note,
+        )
+        return True
+
+    if action == "reject":
+        # Снимаем кнопки со старого превью перед возвратом к picker'у.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        # «Выбрать другую» → назад к picker'у обложки.
+        data["state"] = "selfie_cover_picking"
+        data.pop("selfie_cover_pending_path", None)
+        data.pop("selfie_cover_pending_note", None)
+        _SAVE_PENDING(_PENDING)
+        await query.message.reply_text(
+            selfie_cover.build_picker_message(),
+            reply_markup=selfie_cover.cover_picker_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    if action == "upload":
+        data["state"] = "selfie_cover_uploading"
+        _SAVE_PENDING(_PENDING)
+        await query.edit_message_text(
+            selfie_cover.build_upload_prompt_message(),
+            reply_markup=selfie_cover.upload_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    if action == "library":
+        await _show_library(query, context, user_id, reroll=False)
+        return True
+
+    if action == "lib_reroll":
+        await _show_library(query, context, user_id, reroll=True)
+        return True
+
+    if action == "lib_pick" and arg:
+        await _pick_library_cover(query, context, user_id, photo_id=arg)
+        return True
+
+    if action == "back":
+        # Вернуться к picker
+        data["state"] = "selfie_cover_picking"
+        _SAVE_PENDING(_PENDING)
+        music_note = data.get("selfie_music_note", "")
+        await query.edit_message_text(
+            f"✅ Видео готово ({music_note}).\n\n{selfie_cover.build_picker_message()}",
+            reply_markup=selfie_cover.cover_picker_keyboard(),
+            parse_mode="HTML",
+        )
+        return True
+
+    return False
+
+
+async def handle_cover_photo_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Обработать photo-сообщение в state selfie_cover_uploading.
+
+    Возвращает True если обработали (для интеграции с bot.py photo handler).
+    """
+    user_id = update.effective_user.id
+    data = _PENDING.get(user_id)
+    if not data or data.get("state") != "selfie_cover_uploading":
+        return False
+
+    photo = update.message.photo
+    if not photo:
+        # Не фото — игнорируем (юзер может прислать текст по ошибке)
+        await update.message.reply_text(
+            "Жду фото (не текст). Или нажми «⬅️ Назад» в предыдущем сообщении."
+        )
+        return True
+
+    # Самая большая версия фото
+    best = photo[-1]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    cover_path = selfie_tmp / "cover_uploaded.jpg"
+
+    status_msg = await update.message.reply_text("📥 Сохраняю обложку...")
+
+    try:
+        tg_file = await context.bot.get_file(best.file_id)
+        await tg_file.download_to_drive(str(cover_path))
+        _LOGGER.info(f"[selfie] User uploaded cover: {cover_path.stat().st_size / 1024:.1f} KB")
+        await status_msg.delete()
+        # Без confirm — юзер сам прислал это фото и уже его видел.
+        await _finalize_with_cover(
+            message_or_query=update.message,
+            context=context,
+            user_id=user_id,
+            cover_path=cover_path,
+            cover_note="загруженное фото",
+        )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] cover upload error: {e}", exc_info=True)
+        await status_msg.edit_text(
+            f"⚠️ Не получилось сохранить ({e}). Попробуй ещё раз или жми «⬅️ Назад»."
+        )
+    return True
+
+
+async def _pick_frame_cover(query, context, user_id: int, which: str, note: str | None = None) -> None:
+    """Извлечь кадр (start/mid/end) и финализировать."""
+    data = _PENDING[user_id]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    source_path = Path(data["selfie_source"])
+    cover_path = selfie_tmp / f"cover_frame_{which}.jpg"
+
+    duration = await asyncio.to_thread(selfie_cover.probe_video_duration, str(source_path))
+    timestamps = selfie_cover.get_frame_timestamps(duration or 30.0)
+    ts_map = {"start": timestamps[0], "mid": timestamps[1], "end": timestamps[2]}
+    ts = ts_map.get(which, timestamps[0])
+
+    status = await query.edit_message_text(
+        f"🎞 Извлекаю кадр ({ts:.1f}s)..."
+    )
+
+    ok = await asyncio.to_thread(
+        selfie_cover.extract_frame, str(source_path), ts, str(cover_path)
+    )
+    if not ok or not cover_path.exists():
+        await status.edit_text(
+            "⚠️ Не получилось извлечь кадр. Попробуй другой вариант:",
+            reply_markup=selfie_cover.cover_picker_keyboard(),
+        )
+        return
+
+    _LOGGER.info(f"[selfie] Frame cover extracted: {which} @ {ts:.1f}s -> {cover_path.stat().st_size / 1024:.1f} KB")
+    if note is None:
+        labels = {"start": "начало", "mid": "середина", "end": "финал"}
+        note = f"кадр: {labels.get(which, which)} ({ts:.1f}s)"
+    # Не коммитим молча — показываем извлечённый кадр и просим подтвердить.
+    await _show_cover_confirm(query, context, user_id, cover_path, note=note)
+
+
+async def _show_cover_confirm(
+    query_or_msg, context, user_id: int, cover_path: Path, note: str,
+) -> None:
+    """Показать фото-превью обложки + кнопки [✅ Да / 🔄 Другую].
+
+    Единый confirm-шаг для ВСЕХ источников обложки (кадр / библиотека /
+    upload). Не коммитим обложку молча — юзер сначала видит фото и
+    подтверждает (правило preview/confirm, 9 июня).
+    """
+    data = _PENDING[user_id]
+    data["state"] = "selfie_cover_confirming"
+    data["selfie_cover_pending_path"] = str(cover_path)
+    data["selfie_cover_pending_note"] = note
+    _SAVE_PENDING(_PENDING)
+
+    chat_id = (
+        query_or_msg.message.chat_id
+        if hasattr(query_or_msg, "message") and query_or_msg.message
+        else query_or_msg.chat_id
+    )
+    try:
+        with open(cover_path, "rb") as ph:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=ph,
+                caption=f"🖼 Вот обложка ({note}). Подходит?",
+                reply_markup=selfie_cover.confirm_keyboard(),
+            )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] send_photo confirm failed: {e}")
+        # Fallback — текстовое подтверждение, чтобы флоу не залип.
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🖼 Обложка готова ({note}). Подходит?",
+            reply_markup=selfie_cover.confirm_keyboard(),
+        )
+
+
+async def _show_library(query, context, user_id: int, reroll: bool) -> None:
+    """Показать 6 случайных фото из библиотеки КАК ФОТО (send_photo).
+
+    Каждое фото — отдельное сообщение с кнопкой «✅ Выбрать эту» под ним,
+    чтобы юзер видел что выбирает. В конце footer с «Ещё 6 / Назад».
+    (Раньше слался текстовый список ID — юзер не видел фотографий, баг 9 июня.)
+    """
+    data = _PENDING[user_id]
+    shown = data.get("selfie_cover_shown_lib_ids", [])
+    exclude = shown if reroll else None
+    sample = await asyncio.to_thread(
+        selfie_cover.list_library_sample, 6, exclude
+    )
+
+    chat_id = query.message.chat_id
+
+    if not sample:
+        await query.edit_message_text(
+            selfie_cover.build_library_message([]),  # «библиотека пуста»
+            reply_markup=selfie_cover.cover_picker_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    # Запоминаем показанные id для reroll
+    if reroll:
+        data["selfie_cover_shown_lib_ids"] = list(shown) + [s["id"] for s in sample]
+    else:
+        data["selfie_cover_shown_lib_ids"] = [s["id"] for s in sample]
+    _SAVE_PENDING(_PENDING)
+
+    # Обновляем исходное сообщение коротким статусом (убираем старые кнопки).
+    suffix = " (ещё 6)" if reroll else ""
+    try:
+        await query.edit_message_text(f"📚 Загружаю фото из библиотеки{suffix}...")
+    except Exception as e:
+        _LOGGER.debug(f"[selfie] library intro edit skipped: {e}")
+
+    # 1) Каждое фото — отдельным сообщением с кнопкой «✅ Выбрать эту».
+    for item in sample:
+        try:
+            with open(item["path"], "rb") as ph:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=ph,
+                    caption=item["id"],
+                    reply_markup=selfie_cover.library_pick_keyboard(item["id"]),
+                )
+        except Exception as e:
+            _LOGGER.error(f"[selfie] library send_photo failed for {item['id']}: {e}")
+
+    # 2) Footer с «Ещё 6 / Назад» — остаётся последним в ленте.
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="☝️ Выбери фото кнопкой «✅ Выбрать эту» под нужным.\n"
+             "Или «🔄 Ещё 6» / «⬅️ Назад».",
+        reply_markup=selfie_cover.library_footer_keyboard(),
+    )
+
+
+async def _pick_library_cover(query, context, user_id: int, photo_id: str) -> None:
+    """Юзер выбрал фото из библиотеки → копируем в tmp и сразу финализируем.
+
+    БЕЗ confirm-шага: фото было видно в сетке превью, клик «✅ Выбрать эту»
+    = осознанный выбор (Артём 9 июня: повторный «Подходит?» избыточен).
+    Confirm остаётся только для кадра (там слепой выбор позиции)."""
+    import shutil as _shutil
+    data = _PENDING[user_id]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+
+    src = selfie_cover.lookup_library_path(photo_id)
+    if not src or not Path(src).exists():
+        await query.message.reply_text(
+            f"⚠️ Не нашёл фото {photo_id}. Выбери другое.",
+            reply_markup=selfie_cover.cover_picker_keyboard(),
+        )
+        return
+
+    # Сохраняем оригинальное расширение
+    ext = Path(src).suffix.lower() or ".jpg"
+    cover_path = selfie_tmp / f"cover_library{ext}"
+    try:
+        _shutil.copy2(src, str(cover_path))
+        _LOGGER.info(f"[selfie] Library cover picked: {photo_id} ({cover_path.stat().st_size / 1024:.1f} KB)")
+    except Exception as e:
+        _LOGGER.error(f"[selfie] library copy error: {e}")
+        await query.message.reply_text(
+            f"⚠️ Ошибка копирования: {e}",
+            reply_markup=selfie_cover.cover_picker_keyboard(),
+        )
+        return
+
+    # Снимаем кнопку «Выбрать эту» с выбранного фото, чтобы повторный клик
+    # не дал ложное «сессия не найдена» после ухода в waiting_title.
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _finalize_with_cover(
+        message_or_query=query.message,
+        context=context,
+        user_id=user_id,
+        cover_path=cover_path,
+        cover_note=f"библиотека: {photo_id}",
+    )
+
+
+async def _finalize_with_cover(
+    message_or_query, context, user_id: int, cover_path: Path, cover_note: str
+) -> None:
+    """Сохранить cover_path в pending и перейти в state selfie_waiting_title.
+
+    Совместимо с существующим bot.py-flow: state = selfie_waiting_title,
+    pending содержит selfie_subtitled = финальный файл (с музыкой или без)
+    и selfie_cover = выбранная обложка.
+    """
+    data = _PENDING[user_id]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    source_path = Path(data["selfie_source"])
+    transcript_text = data.get("selfie_transcript", "")
+    final_path = Path(data.get("selfie_final") or data.get("selfie_subtitled"))
+    music_note = data.get("selfie_music_note", "без музыки")
+
+    # Auto-title from first sentence
+    first_sentence = transcript_text.split(".")[0].strip()[:80] if transcript_text else "Живое видео"
+    if len(first_sentence) < 5:
+        first_sentence = transcript_text[:80].strip()
+    if not first_sentence:
+        first_sentence = "Живое видео"
+
+    _PENDING[user_id] = {
+        "state": "selfie_waiting_title",
+        "selfie_tmp_dir": str(selfie_tmp),
+        "selfie_source": str(source_path),
+        "selfie_subtitled": str(final_path),                # для legacy bot.py
+        "selfie_subtitled_nomusic": data.get("selfie_subtitled", str(final_path)),
+        "selfie_cover": str(cover_path),
+        "selfie_transcript": transcript_text,
+        "selfie_auto_title": first_sentence,
+        "selfie_picked_music": data.get("selfie_picked_music"),
+        "selfie_cover_note": cover_note,
+    }
+    _SAVE_PENDING(_PENDING)
+
+    # If the host bot provided a richer title-picker (e.g. Claude-generated
+    # hooks), delegate to it. Otherwise show the built-in single-button UI.
+    if _TITLE_PICKER is not None:
+        await _TITLE_PICKER(
+            message_or_query, context, user_id, transcript_text, first_sentence
+        )
+        return
+
+    text = (
+        f"✅ Готово (музыка: {music_note}; обложка: {cover_note}).\n\n"
+        f"📝 Расшифровка:\n{truncate_for_preview(transcript_text, 500)}\n\n"
+        f"———\n"
+        f"Предлагаю название: «{first_sentence}»\n\n"
+        f"Утверди или напиши своё название:"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Утвердить название", callback_data="selfie_auto_title")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+    ])
+
+    # message_or_query: CallbackQuery → edit; Message → reply
+    if hasattr(message_or_query, "edit_message_text"):
+        # CallbackQuery
+        await message_or_query.edit_message_text(text, reply_markup=kb)
+    else:
+        # Message
+        await message_or_query.reply_text(text, reply_markup=kb)

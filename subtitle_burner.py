@@ -234,6 +234,7 @@ def transcribe_words(
     audio_path: str | Path,
     language: str = "ru",
     model_size: str = WHISPER_MODEL,
+    initial_prompt: str | None = None,
 ) -> list[dict]:
     """Transcribe audio → word-level timestamps.
 
@@ -244,6 +245,12 @@ def transcribe_words(
     normalized via :func:`fix_brand_names` (windowed dictionary match).
     Then :func:`merge_whisper_fragments` attaches standalone punctuation
     tokens to the preceding word.
+
+    Args:
+        initial_prompt: optional context string passed to faster-whisper as
+            transcription prompt. Used for vocabulary biasing — pass a
+            comma-separated list of expected brand names to improve recognition
+            of mis-heard English terms. Default None = no biasing.
     """
     from faster_whisper import WhisperModel
 
@@ -255,6 +262,7 @@ def transcribe_words(
         language=language,
         word_timestamps=True,
         vad_filter=True,
+        initial_prompt=initial_prompt,
     )
 
     words = []
