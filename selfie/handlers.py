@@ -914,6 +914,21 @@ def _store_item(data: dict, item) -> None:
     })
 
 
+def _cleanup_selfie_gen_dirs(data: dict) -> None:
+    """Удалить временные папки Remotion-генерации (selfie_gen_*).
+
+    Вызывается после сборки (клипы уже скопированы в project_dir) и на
+    skip/cancel. Без этого /tmp подтекает на каждую AI-генерацию.
+    """
+    import shutil as _sh
+    for d in (data.get("selfie_gen_dirs") or []):
+        try:
+            _sh.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+    data["selfie_gen_dirs"] = []
+
+
 async def handle_broll_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
@@ -948,6 +963,7 @@ async def handle_broll_callback(
         # No B-roll → straight to music picker (legacy Pipeline 1 flow).
         data["state"] = "selfie_music_picking"
         data["selfie_broll_items"] = []
+        _cleanup_selfie_gen_dirs(data)  # снять tmp AI-генерации, если была
         _SAVE_PENDING(_PENDING)
         await query.edit_message_text(
             "➡️ Без B-roll, продолжаем.\n\n"
@@ -982,9 +998,13 @@ async def handle_broll_callback(
             "Это ~3-7 минут — рендер на сервере. Дождись, пришлю результат."
         )
         clips: list = []
+        # Трекаем gen_dir в pending → почистим после сборки (prepare копирует
+        # клипы в project_dir) и на skip/cancel. Иначе /tmp подтекает.
+        gen_dir = Path(tempfile.mkdtemp(prefix=f"selfie_gen_{user_id}_"))
+        data.setdefault("selfie_gen_dirs", []).append(str(gen_dir))
+        _SAVE_PENDING(_PENDING)
         try:
             import auto_broll
-            gen_dir = Path(tempfile.mkdtemp(prefix=f"selfie_gen_{user_id}_"))
             clips, _cost = await asyncio.to_thread(
                 auto_broll.generate_auto_broll, transcript, gen_dir,
             )
@@ -1271,6 +1291,8 @@ async def _run_broll_assembly_and_proceed(
         project_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(selfie_broll.place_selfie_as_avatar, subtitled, project_dir)
         await asyncio.to_thread(selfie_broll.prepare_broll_in_project, items, project_dir)
+        # Клипы скопированы в project_dir → tmp AI-генерации больше не нужен.
+        _cleanup_selfie_gen_dirs(data)
 
         # 2. Запустить существующий assembler. Layout 'smart' — видео полную
         # длину как broll_full, фото 2.8с как split — то, что Артём описал

@@ -726,6 +726,13 @@ async def publish_carousel_to_instagram(
     out_dir = Path(tempfile.mkdtemp(prefix="carousel_jpg_"))
     try:
         jpegs = _crosspost.convert_pngs_to_jpegs(png_paths, out_dir, quality=90)
+        if len(jpegs) != len(png_paths):
+            # Свеже-отрендеренные PNG битыми быть не должны, но если какой-то
+            # не сконвертился — слайд молча выпал бы. Логируем явно.
+            logger.warning(
+                f"[carousel/ig] JPEG-конвертация: {len(jpegs)}/{len(png_paths)} "
+                f"слайдов (часть PNG не сконвертилась)"
+            )
         if len(jpegs) < 2:
             await status.edit_text("❌ Не удалось подготовить JPEG-слайды (нужно ≥2).")
             return
