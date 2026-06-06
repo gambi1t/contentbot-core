@@ -183,55 +183,143 @@ def build_picker_message(items: list[BrollItem]) -> str:
 _IMG_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _VID_EXTS = (".mp4", ".mov", ".m4v")
 
+# Источники B-roll по виду. ФОТО берём из broll-library/photos/<brand>/<cat>
+# (категоризированный архив: глэмпинг/картинг/личные/...), а НЕ из обложечной
+# COVER_LIBRARY_DIR (портреты Максима) — портрет поверх селфи бессмыслен
+# (фикс 10 июня). Клипы — broll-library/clips/<brand>/<cat>.
+_LIBRARY_ROOTS = {"image": paths.LIBRARY_PHOTOS_DIR, "video": paths.LIBRARY_CLIPS_DIR}
+_EXTS_BY_KIND = {"image": _IMG_EXTS, "video": _VID_EXTS}
 
-def _scan_clip_library() -> list[dict]:
-    """Recursive scan of paths.LIBRARY_CLIPS_DIR for clip files.
+# Человекочитаемые подписи категорий (имя папки → emoji + RU).
+_CAT_LABELS = {
+    "glamping": "🏕 Глэмпинг", "karting": "🏎 Картинг", "sup": "🏄 Сап",
+    "personal": "👤 Личные", "maksim_self": "👤 Максим", "team": "👥 Команда",
+    "meetings": "🤝 Встречи", "nature": "🌅 Природа", "family": "👨‍👩‍👧 Семья",
+    "general": "📦 Общее",
+}
 
-    Returns list of {"id": str, "path": str, "label": str}. ID is a stable hash
-    of the relative path (so we can round-trip via callback_data).
+
+def _cat_label(cat: str) -> str:
+    return _CAT_LABELS.get(cat, cat.capitalize())
+
+
+def _kind_root(kind: str) -> Path | None:
+    return _LIBRARY_ROOTS.get(kind)
+
+
+def _brand_base(kind: str) -> Path | None:
+    """Папка, под которой лежат категории: ``<root>/<brand>/<cat>``.
+
+    В maksim-bot бренд-папка = ``maksim``. Если её нет — корень (плоская
+    структура), тогда категорий не будет.
     """
-    root = paths.LIBRARY_CLIPS_DIR
+    root = _kind_root(kind)
+    if not root:
+        return None
+    cand = root / "maksim"
+    return cand if cand.exists() else root
+
+
+def scan_library(kind: str, category: str | None = None) -> list[dict]:
+    """Файлы библиотеки ``kind`` (image/video), опц. в пределах ``category``.
+
+    Returns ``[{"id", "path", "label"}, ...]``. ``id`` — стабильный хэш пути
+    ОТНОСИТЕЛЬНО корня kind, поэтому lookup работает без знания категории.
+    """
+    root = _kind_root(kind)
+    exts = _EXTS_BY_KIND.get(kind, ())
     if not root or not root.exists():
         return []
+    base = (_brand_base(kind) / category) if category else root
+    if not base or not base.exists():
+        return []
     out: list[dict] = []
-    for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in _VID_EXTS:
+    for p in base.rglob("*"):
+        if p.is_file() and p.suffix.lower() in exts:
             rel = p.relative_to(root).as_posix()
-            clip_id = hashlib.md5(rel.encode("utf-8")).hexdigest()[:10]
-            out.append({"id": clip_id, "path": str(p), "label": rel})
+            iid = hashlib.md5(rel.encode("utf-8")).hexdigest()[:10]
+            out.append({"id": iid, "path": str(p), "label": rel})
     return out
 
 
-def list_clip_library_sample(
-    n: int = 6, exclude_ids: list[str] | None = None
+def list_library_categories(kind: str) -> list[tuple[str, int]]:
+    """``[(category, count)]`` НЕПУСТЫХ категорий под ``<root>/<brand>/``.
+
+    Пустые категории скрыты (Артём 10 июня: у Максима personal/team/meetings/
+    nature/maksim_self пока пусты — нет смысла показывать тупиковые кнопки).
+    """
+    base = _brand_base(kind)
+    if not base or not base.exists():
+        return []
+    exts = _EXTS_BY_KIND.get(kind, ())
+    out: list[tuple[str, int]] = []
+    for d in sorted(base.iterdir()):
+        if not d.is_dir():
+            continue
+        n = sum(1 for p in d.rglob("*") if p.is_file() and p.suffix.lower() in exts)
+        if n > 0:
+            out.append((d.name, n))
+    return out
+
+
+def list_library_sample(
+    kind: str, category: str | None = None,
+    n: int = 6, exclude_ids: list[str] | None = None,
 ) -> list[dict]:
-    """Случайные n клипов из библиотеки, исключая уже показанные."""
+    """Случайные n файлов из (категории) библиотеки, исключая показанные."""
     exclude = set(exclude_ids or [])
-    pool = [c for c in _scan_clip_library() if c["id"] not in exclude]
+    pool = [c for c in scan_library(kind, category) if c["id"] not in exclude]
     if not pool:
         return []
     return random.sample(pool, min(n, len(pool)))
 
 
-def lookup_clip_path(clip_id: str) -> str | None:
-    """Найти путь клипа по ID (для применения pick)."""
-    for c in _scan_clip_library():
-        if c["id"] == clip_id:
+def lookup_library_path(kind: str, item_id: str) -> str | None:
+    """Найти путь файла по ID во всей kind-библиотеке (для применения pick)."""
+    for c in scan_library(kind, None):
+        if c["id"] == item_id:
             return c["path"]
     return None
+
+
+# ── back-compat тонкие обёртки (clip-only API, используется в других местах) ──
+def _scan_clip_library() -> list[dict]:
+    return scan_library("video", None)
+
+
+def list_clip_library_sample(n: int = 6, exclude_ids: list[str] | None = None) -> list[dict]:
+    return list_library_sample("video", None, n, exclude_ids)
+
+
+def lookup_clip_path(clip_id: str) -> str | None:
+    return lookup_library_path("video", clip_id)
+
+
+def build_category_keyboard(
+    kind: Literal["image", "video"],
+    categories: list[tuple[str, int]],
+) -> InlineKeyboardMarkup:
+    """Подменю выбора категории библиотеки (только непустые) + назад."""
+    src_tag = "photo" if kind == "image" else "clip"
+    rows: list[list[InlineKeyboardButton]] = []
+    for cat, n in categories:
+        rows.append([InlineKeyboardButton(
+            f"{_cat_label(cat)} ({n})",
+            callback_data=f"selfie_broll:cat:{src_tag}:{cat}",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def build_library_keyboard(
     samples: list[dict],
     kind: Literal["image", "video"],
+    category: str | None = None,
 ) -> InlineKeyboardMarkup:
-    """6 кнопок выбора из библиотеки + reroll + back.
+    """6 кнопок выбора из библиотеки + reroll (в пределах категории) + назад.
 
-    Args:
-        samples: list of ``{"id": str, "path": str, "label": str (optional)}``.
-        kind: ``"image"`` для фото, ``"video"`` для клипов — определяет
-            префикс callback (``pick:photo:<id>`` vs ``pick:clip:<id>``)
-            и кнопку reroll.
+    ``category`` пробрасывается в reroll, чтобы «Ещё 6» оставались в той же
+    категории. «Назад» ведёт обратно в подменю категорий.
     """
     src_tag = "photo" if kind == "image" else "clip"
     rows: list[list[InlineKeyboardButton]] = []
@@ -242,8 +330,12 @@ def build_library_keyboard(
             label[:60],
             callback_data=f"selfie_broll:pick:{src_tag}:{sid}",
         )])
+    reroll_cb = (
+        f"selfie_broll:reroll:{src_tag}:{category}" if category
+        else f"selfie_broll:reroll:{src_tag}"
+    )
     rows.append([
-        InlineKeyboardButton("🔄 Ещё 6", callback_data=f"selfie_broll:reroll:{src_tag}"),
-        InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back"),
+        InlineKeyboardButton("🔄 Ещё 6", callback_data=reroll_cb),
+        InlineKeyboardButton("⬅️ Назад", callback_data=f"selfie_broll:catback:{src_tag}"),
     ])
     return InlineKeyboardMarkup(rows)
