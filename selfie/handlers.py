@@ -958,6 +958,72 @@ async def handle_broll_callback(
         return True
 
     # ── Picker actions ──────────────────────────────────────────────────────
+    # «🎨 Сгенерировать графику (AI)» → Remotion-движок (auto_broll) генерит
+    # 6 динамических сцен ИЗ ТЕКСТА селфи. Тяжело (~3-7 мин, рендер на сервере,
+    # Claude Code по подписке, свой _GEN_LOCK). Клипы кладём как обычные
+    # video-B-roll items → дальше тот же assemble_auto_montage (broll_mode=real).
+    if action == "gen":
+        transcript = (data.get("selfie_edited") or data.get("selfie_transcript") or "").strip()
+        items = _items_from_pending(data)
+        free = selfie_broll.MAX_BROLL_ITEMS - len(items)
+        chat_id = query.message.chat_id
+        if not transcript:
+            await query.edit_message_text("⚠️ Нет текста для генерации графики.")
+            return True
+        if free <= 0:
+            await query.edit_message_text(
+                f"Достигнут лимит {selfie_broll.MAX_BROLL_ITEMS} вставок — "
+                "убери что-то, потом генерируй.",
+                reply_markup=selfie_broll.build_picker_keyboard(items),
+            )
+            return True
+        await query.edit_message_text(
+            "🎨 Генерю динамическую графику из текста (Remotion)…\n"
+            "Это ~3-7 минут — рендер на сервере. Дождись, пришлю результат."
+        )
+        clips: list = []
+        try:
+            import auto_broll
+            gen_dir = Path(tempfile.mkdtemp(prefix=f"selfie_gen_{user_id}_"))
+            clips, _cost = await asyncio.to_thread(
+                auto_broll.generate_auto_broll, transcript, gen_dir,
+            )
+        except Exception as e:
+            _LOGGER.error(f"[selfie/gen] auto_broll failed: {e}", exc_info=True)
+            clips = []
+        if not clips:
+            items = _items_from_pending(data)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "❌ Не удалось сгенерировать графику. Попробуй ещё раз "
+                    "или выбери B-roll из библиотеки.\n\n"
+                    + selfie_broll.build_picker_message(items)
+                ),
+                reply_markup=selfie_broll.build_picker_keyboard(items),
+            )
+            return True
+        added = 0
+        for clip in clips[:free]:
+            _store_item(data, selfie_broll.BrollItem(
+                kind="video", source=Path(clip), label=f"[AI] {Path(clip).stem}",
+            ))
+            added += 1
+        _SAVE_PENDING(_PENDING)
+        items = _items_from_pending(data)
+        capped = "" if len(clips) <= free else (
+            f" (лимит {selfie_broll.MAX_BROLL_ITEMS} — лишние не добавил)"
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🎨 Готово — добавил {added} AI-сцен{capped}.\n\n"
+                + selfie_broll.build_picker_message(items)
+            ),
+            reply_markup=selfie_broll.build_picker_keyboard(items),
+        )
+        return True
+
     # «Из библиотеки» (фото/клипы) → подменю КАТЕГОРИЙ (только непустые).
     # Источник фото — broll-library/photos/<brand>/<cat> (НЕ обложки), фикс
     # 10 июня. Если одна категория — сразу её сэмплы; если пусто — сообщение.

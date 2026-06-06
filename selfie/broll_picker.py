@@ -136,6 +136,7 @@ def build_picker_keyboard(items: list[BrollItem]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("🎞 Клипы из библиотеки", callback_data="selfie_broll:lib_clip")])
         rows.append([InlineKeyboardButton("📤 Загрузить своё фото", callback_data="selfie_broll:upload_photo")])
         rows.append([InlineKeyboardButton("📤 Загрузить своё видео", callback_data="selfie_broll:upload_video")])
+        rows.append([InlineKeyboardButton("🎨 Сгенерировать графику (AI)", callback_data="selfie_broll:gen")])
 
     if items:
         rows.append([InlineKeyboardButton("🗑 Убрать последний", callback_data="selfie_broll:remove_last")])
