@@ -163,6 +163,29 @@ def _publish_carousel_pngs_to_media(
     return urls
 
 
+def _resolve_carousel_slides(draft: dict, seed_card_id: str | None) -> list[str]:
+    """Найти PNG-слайды карусели для IG-публикации (в порядке надёжности).
+
+    1) Пути, записанные в draft при рендере — работает для ЛЮБОЙ карусели
+       (и из карточки, и из темы через cmd_carousel; фикс 11 июня — раньше
+       карусель из темы не имела seed_card_id → publish не находил слайды).
+    2) Фолбэк — персист в папке проекта по seed_card_id (карусель из карточки,
+       обратная совместимость со старыми draft'ами без carousel_png_paths).
+
+    Возвращает отсортированный список существующих slide_*.png (или []).
+    """
+    paths = [p for p in (draft.get("carousel_png_paths") or []) if Path(p).exists()]
+    if len(paths) >= 2:
+        return sorted(paths)
+    if seed_card_id:
+        from bot_state import project_dir as _pdir
+        proj = _pdir({"notion_page_id": seed_card_id})
+        cdir = (Path(proj) / "carousel") if proj else None
+        if cdir and cdir.exists():
+            return sorted(str(p) for p in cdir.glob("slide_*.png"))
+    return []
+
+
 def _build_carousel_notion_blocks(image_urls: list[str]) -> list[dict]:
     """Список Notion-блоков для добавления карусели в страницу карточки.
 
@@ -564,6 +587,25 @@ async def render_carousel_from_draft(
         except Exception as e:
             logger.warning(f"[carousel/notion] status update failed (non-fatal): {e}")
 
+    # ── Пути PNG в draft для IG-публикации (ЛЮБАЯ карусель: из карточки И из
+    # темы). Фикс 11 июня: карусель из темы (cmd_carousel) не имеет
+    # seed_card_id → раньше publish_carousel_to_instagram не находил слайды.
+    # Персистим в стабильную папку и пишем пути в draft.
+    try:
+        from bot_state import PROJECTS_DIR as _PROJ_ROOT
+        import shutil as _sh2
+        _stable = _PROJ_ROOT / f"_carousel_{uid}"
+        _sh2.rmtree(_stable, ignore_errors=True)  # не смешивать с прошлой каруселью
+        _target = _persist_carousel_pngs(png_paths, _stable)  # → _stable/carousel/slide_*.png
+        if _target:
+            draft["carousel_png_paths"] = sorted(
+                str(p) for p in Path(_target).glob("slide_*.png")
+            )
+            _save_carousel_draft(uid, draft)
+            logger.info(f"[carousel] {len(draft['carousel_png_paths'])} PNG → draft (IG-ready)")
+    except Exception as e:
+        logger.warning(f"[carousel] persist for IG (draft) failed: {e}")
+
     cover = slides[0]
     title = (cover.get("title_main") or "") + " " + (cover.get("title_accent") or "")
     persist_line = (
@@ -670,7 +712,6 @@ async def publish_carousel_to_instagram(
 
     import bot as _bot
     import crosspost as _crosspost
-    from bot_state import project_dir as _project_dir_fn
 
     if not _crosspost.instagram_is_connected():
         await context.bot.send_message(
@@ -683,13 +724,8 @@ async def publish_carousel_to_instagram(
     data = pending.get(uid) or {}
     seed_card_id = draft.get("seed_card_id") or draft.get("notion_page_id") or data.get("notion_page_id")
 
-    # ── Найти PNG-слайды: персистнутые в проекте карточки ──
-    png_paths: list[str] = []
-    if seed_card_id:
-        proj = _project_dir_fn({"notion_page_id": seed_card_id})
-        cdir = (Path(proj) / "carousel") if proj else None
-        if cdir and cdir.exists():
-            png_paths = sorted(str(p) for p in cdir.glob("slide_*.png"))
+    # ── Найти PNG-слайды: draft-пути (любая карусель) → фолбэк по карточке ──
+    png_paths = _resolve_carousel_slides(draft, seed_card_id)
     if len(png_paths) < 2:
         await context.bot.send_message(
             chat_id=chat_id,
