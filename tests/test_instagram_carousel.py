@@ -169,12 +169,32 @@ def test_carousel_child_failure(errors: list) -> None:
         crosspost._get_instagram_user_id = orig_uid
 
 
+def test_carousel_empty_media_id(errors: list) -> None:
+    print("\n[instagram_upload_carousel — publish 200 без id → None]")
+    fake = _FakeRequests()
+    fake.published_id = ""  # 200, но id пустой
+    orig_req = crosspost.requests
+    orig_tok = crosspost._get_instagram_access_token
+    orig_uid = crosspost._get_instagram_user_id
+    crosspost.requests = fake
+    crosspost._get_instagram_access_token = lambda: "TOKEN"
+    crosspost._get_instagram_user_id = lambda: "IG_USER"
+    try:
+        res = crosspost.instagram_upload_carousel([f"u{i}.jpg" for i in range(3)], "c")
+        _assert(res is None, f"пустой media_id → None (не {{'id': None}}), got {res}", errors)
+    finally:
+        crosspost.requests = orig_req
+        crosspost._get_instagram_access_token = orig_tok
+        crosspost._get_instagram_user_id = orig_uid
+
+
 def main() -> int:
     errors: list = []
     test_convert_pngs_to_jpegs(errors)
     test_carousel_validation(errors)
     test_carousel_happy_path(errors)
     test_carousel_child_failure(errors)
+    test_carousel_empty_media_id(errors)
     print()
     if errors:
         print(f"❌ FAIL — {len(errors)} ошибок:")

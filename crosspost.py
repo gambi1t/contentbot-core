@@ -846,6 +846,10 @@ def instagram_upload_carousel(
         logger.error(f"IG carousel publish failed: {publish_resp.status_code} {publish_resp.text[:300]}")
         return None
     media_id = publish_resp.json().get("id")
+    if not media_id:
+        # 200, но без id — НЕ считаем успехом (иначе вернули бы {"id": None}).
+        logger.error(f"IG carousel publish: 200 без media id, resp={publish_resp.text[:300]}")
+        return None
     logger.info(f"Instagram carousel published: {media_id}")
     return {"id": media_id, "platform": "instagram"}
 

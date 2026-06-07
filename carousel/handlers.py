@@ -698,75 +698,102 @@ async def publish_carousel_to_instagram(
         return
 
     brand = _bot._get_active_brand_name()
+
+    # ── Idempotency: защита от double-click / повторного callback (Critical 1).
+    # Состояние публикации на карточку: "running" | {"media_id": ...}.
+    data = pending.setdefault(uid, {})
+    pub_state = data.setdefault("carousel_ig_pub", {})
+    pkey = seed_card_id or "adhoc"
+    cur = pub_state.get(pkey)
+    if cur == "running":
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏳ Эта карусель уже публикуется — дождись результата.",
+        )
+        return
+    if isinstance(cur, dict) and cur.get("media_id"):
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"✅ Эта карусель уже опубликована (media_id={cur['media_id']}).\n"
+                "Чтобы запостить заново — сделай новую карусель."
+            ),
+        )
+        return
+    pub_state[pkey] = "running"
+    save_pending(pending)
+
     status = await context.bot.send_message(
         chat_id=chat_id,
         text=f"📲 Публикую карусель из {len(png_paths)} слайдов в Instagram…",
     )
 
-    # ── Caption ──
-    caption = (data.get("description") or "").strip()
-    if not caption:
-        seed = data.get("carousel_seed") or {}
-        src_text = (
-            seed.get("text")
-            or draft.get("theme")
-            or ""
-        )
-        if src_text:
-            try:
-                variants, _cta = await asyncio.to_thread(
-                    _bot._compose_publication_descriptions, src_text
-                )
-                caption = (variants[0].strip() if variants else "")
-            except Exception as e:
-                logger.warning(f"[carousel/ig] caption gen failed (non-fatal): {e}")
-                caption = ""
-
-    # ── PNG → JPEG ──
+    # Весь flow в try/except — любое исключение даёт понятный ответ юзеру,
+    # finally снимает "running" (на успех — пишет media_id) (Major 1).
     out_dir = Path(tempfile.mkdtemp(prefix="carousel_jpg_"))
+    result = None
     try:
+        # ── Caption ──
+        caption = (data.get("description") or "").strip()
+        if not caption:
+            seed = data.get("carousel_seed") or {}
+            src_text = seed.get("text") or draft.get("theme") or ""
+            if src_text:
+                try:
+                    variants, _cta = await asyncio.to_thread(
+                        _bot._compose_publication_descriptions, src_text
+                    )
+                    caption = (variants[0].strip() if variants else "")
+                except Exception as e:
+                    logger.warning(f"[carousel/ig] caption gen failed (non-fatal): {e}")
+                    caption = ""
+
+        # ── PNG → JPEG ──
         jpegs = _crosspost.convert_pngs_to_jpegs(png_paths, out_dir, quality=90)
         if len(jpegs) != len(png_paths):
-            # Свеже-отрендеренные PNG битыми быть не должны, но если какой-то
-            # не сконвертился — слайд молча выпал бы. Логируем явно.
             logger.warning(
                 f"[carousel/ig] JPEG-конвертация: {len(jpegs)}/{len(png_paths)} "
                 f"слайдов (часть PNG не сконвертилась)"
             )
-        if len(jpegs) < 2:
-            await status.edit_text("❌ Не удалось подготовить JPEG-слайды (нужно ≥2).")
-            return
-
-        # ── JPEG → nginx-media (public URLs). Helper сохраняет имена. ──
-        jpeg_urls = _publish_carousel_pngs_to_media(
-            [str(j) for j in jpegs],
-            card_id_short=(seed_card_id or "adhoc")[:20],
-            brand=brand,
-        )
-        if len(jpeg_urls) < 2:
-            await status.edit_text(
-                "❌ Не удалось выложить слайды на хостинг для Instagram."
+        if len(jpegs) >= 2:
+            # ── JPEG → nginx-media (public URLs). Helper сохраняет имена. ──
+            jpeg_urls = _publish_carousel_pngs_to_media(
+                [str(j) for j in jpegs],
+                card_id_short=(seed_card_id or "adhoc")[:20],
+                brand=brand,
             )
-            return
-
-        # ── Publish ──
-        result = await asyncio.to_thread(
-            _crosspost.instagram_upload_carousel, jpeg_urls, caption,
-        )
+            if len(jpeg_urls) >= 2:
+                # ── Publish ──
+                result = await asyncio.to_thread(
+                    _crosspost.instagram_upload_carousel, jpeg_urls, caption,
+                )
+                if result and result.get("id"):
+                    await status.edit_text(
+                        f"✅ Карусель опубликована в Instagram!\n"
+                        f"<code>media_id={result['id']}</code>",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await status.edit_text(
+                        "❌ Не удалось опубликовать карусель в Instagram.\n"
+                        "Проверь подключение аккаунта и логи."
+                    )
+            else:
+                await status.edit_text(
+                    "❌ Не удалось выложить слайды на хостинг для Instagram."
+                )
+        else:
+            await status.edit_text("❌ Не удалось подготовить JPEG-слайды (нужно ≥2).")
+    except Exception as e:
+        logger.error(f"[carousel/ig] publish flow failed: {e}", exc_info=True)
+        try:
+            await status.edit_text(f"❌ Ошибка публикации в Instagram: {e}")
+        except Exception:
+            pass
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
-
-    if result and result.get("id"):
-        await status.edit_text(
-            f"✅ Карусель опубликована в Instagram!\n"
-            f"<code>media_id={result['id']}</code>",
-            parse_mode="HTML",
-        )
-    else:
-        await status.edit_text(
-            "❌ Не удалось опубликовать карусель в Instagram.\n"
-            "Проверь подключение аккаунта и логи (формат/доступность слайдов)."
-        )
+        pub_state[pkey] = {"media_id": result["id"]} if (result and result.get("id")) else None
+        save_pending(pending)
 
 
 async def back_to_carousel_preview(

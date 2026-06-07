@@ -929,6 +929,17 @@ def _cleanup_selfie_gen_dirs(data: dict) -> None:
     data["selfie_gen_dirs"] = []
 
 
+def _drop_gen_dir(data: dict, gen_dir) -> None:
+    """Точечно удалить ОДНУ gen-папку (на failure/discard генерации) + убрать
+    её из selfie_gen_dirs. rmtree безусловный (диск освобождаем в любом случае)."""
+    import shutil as _sh
+    _sh.rmtree(gen_dir, ignore_errors=True)
+    try:
+        data.get("selfie_gen_dirs", []).remove(str(gen_dir))
+    except (ValueError, AttributeError):
+        pass
+
+
 async def handle_broll_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
@@ -993,11 +1004,18 @@ async def handle_broll_callback(
                 reply_markup=selfie_broll.build_picker_keyboard(items),
             )
             return True
+        # Идентичность джоба: за 5-8 мин генерации юзер может перегенерить,
+        # отменить сценарий или начать новый flow. Сверим job_id+state ПЕРЕД
+        # применением результата (Critical 2 из GPT-ревью).
+        import uuid
+        job_id = uuid.uuid4().hex[:12]
+        data["selfie_ai_job_id"] = job_id
         await query.edit_message_text(
             "🎨 Генерю динамическую графику из текста (Remotion)…\n"
             "Это ~3-7 минут — рендер на сервере. Дождись, пришлю результат."
         )
         clips: list = []
+        gen_err = ""
         # Трекаем gen_dir в pending → почистим после сборки (prepare копирует
         # клипы в project_dir) и на skip/cancel. Иначе /tmp подтекает.
         gen_dir = Path(tempfile.mkdtemp(prefix=f"selfie_gen_{user_id}_"))
@@ -1011,27 +1029,53 @@ async def handle_broll_callback(
         except Exception as e:
             _LOGGER.error(f"[selfie/gen] auto_broll failed: {e}", exc_info=True)
             clips = []
+            gen_err = str(e)[:150]
+
+        # Перечитать АКТУАЛЬНОЕ состояние — могло смениться за время генерации.
+        cur = _PENDING.get(user_id) or {}
+        _PICK_STATES = (
+            "selfie_broll_offer", "selfie_broll_picking",
+            "selfie_broll_uploading_photo", "selfie_broll_uploading_video",
+        )
+        if cur.get("selfie_ai_job_id") != job_id or cur.get("state") not in _PICK_STATES:
+            # Флоу сменился / перегенерили / отменили — результат НЕ применяем.
+            _drop_gen_dir(cur, gen_dir)
+            _SAVE_PENDING(_PENDING)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="ℹ️ Сценарий изменился за время генерации — графику не применил.",
+            )
+            return True
+
         if not clips:
-            items = _items_from_pending(data)
+            _drop_gen_dir(cur, gen_dir)  # Fix 5: чистим tmp на failure
+            _SAVE_PENDING(_PENDING)
+            items = _items_from_pending(cur)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "❌ Не удалось сгенерировать графику. Попробуй ещё раз "
-                    "или выбери B-roll из библиотеки.\n\n"
+                    "❌ Не удалось сгенерировать графику. "
+                    + (f"({gen_err}) " if gen_err else "")
+                    + "Попробуй ещё раз или выбери B-roll из библиотеки.\n\n"
                     + selfie_broll.build_picker_message(items)
                 ),
                 reply_markup=selfie_broll.build_picker_keyboard(items),
             )
             return True
+
+        # Пересчёт лимита по АКТУАЛЬНОМУ состоянию (Critical 2).
+        items = _items_from_pending(cur)
+        free_now = selfie_broll.MAX_BROLL_ITEMS - len(items)
         added = 0
-        for clip in clips[:free]:
-            _store_item(data, selfie_broll.BrollItem(
+        for clip in clips[:max(0, free_now)]:
+            _store_item(cur, selfie_broll.BrollItem(
                 kind="video", source=Path(clip), label=f"[AI] {Path(clip).stem}",
             ))
             added += 1
+        cur.pop("selfie_ai_job_id", None)
         _SAVE_PENDING(_PENDING)
-        items = _items_from_pending(data)
-        capped = "" if len(clips) <= free else (
+        items = _items_from_pending(cur)
+        capped = "" if added >= len(clips) else (
             f" (лимит {selfie_broll.MAX_BROLL_ITEMS} — лишние не добавил)"
         )
         await context.bot.send_message(

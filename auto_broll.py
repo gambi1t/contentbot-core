@@ -264,12 +264,21 @@ def generate_auto_broll(
     if not BROLL_PROJECT.exists():
         raise AutoBrollError(f"Нет проекта Remotion: {BROLL_PROJECT}")
 
-    # Один прогон за раз — AutoBroll.tsx общий для всех роликов.
+    # Один прогон за раз — AutoBroll.tsx общий для всех роликов (in-process).
     if not _GEN_LOCK.acquire(blocking=False):
         raise AutoBrollError(
             "Генерация графики уже идёт для другого ролика — "
             "подожди ~10 минут и повтори."
         )
+    # Межпроцессный flock: один OAuth-токен подписки шарится между процессами
+    # (deep-research, Cursor, второй бот, HyperFrames). Сериализуем тяжёлые
+    # генерации хотя бы межпроцессно (Fix 6 / Critical 3, дешёвая часть).
+    from claude_gen_lock import acquire_gen_flock, release_gen_flock, ClaudeGenBusy
+    try:
+        _flock = acquire_gen_flock("auto_broll")
+    except ClaudeGenBusy as e:
+        _GEN_LOCK.release()
+        raise AutoBrollError(str(e))
     total_cost = 0.0
     try:
         ensure_git_baseline()
@@ -298,6 +307,7 @@ def generate_auto_broll(
                 f"Ошибки: {'; '.join(e[:120] for e in errors)}"
             )
     finally:
+        release_gen_flock(_flock)
         _GEN_LOCK.release()
 
     logger.info(
