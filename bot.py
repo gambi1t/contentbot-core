@@ -10601,6 +10601,27 @@ def _voice_panel_keyboard(data: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+# Развилка ДО запуска TTS: ИИ-голос (ElevenLabs) или свой голос — чтобы при
+# «свой голос» не гонять ElevenLabs впустую (Артём 11 июня).
+_VOICEOVER_CHOICE_TEXT = (
+    "🎙 Как озвучить ролик?\n\n"
+    "🤖 ИИ-голос — синтез ElevenLabs (клон голоса Максима).\n"
+    "🎤 Своим голосом — пришлёшь запись, она станет озвучкой; "
+    "ElevenLabs не используется."
+)
+
+
+def _voiceover_choice_keyboard(back_cb: str | None = None) -> InlineKeyboardMarkup:
+    """Клавиатура развилки озвучки: ИИ-голос / свой голос (+опц. назад)."""
+    rows = [
+        [InlineKeyboardButton("🤖 ИИ-голос (ElevenLabs)", callback_data="voiceover")],
+        [InlineKeyboardButton("🎤 Своим голосом", callback_data="voiceover_ownvoice")],
+    ]
+    if back_cb:
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=back_cb)])
+    return InlineKeyboardMarkup(rows)
+
+
 def _voice_part_ps_default() -> dict:
     """Дефолтные настройки part_settings — учитывают модель активного бренда.
 
@@ -13726,6 +13747,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _save_pending(pending)
             data = pending[user_id]
 
+            # Развилка ДО TTS (только свежая озвучка; existing-voice выше уже
+            # показал панель): выбрать ИИ-голос или свой голос, чтобы не гонять
+            # ElevenLabs впустую (Артём 11 июня).
+            if action == "card_voice":
+                pending[user_id]["state"] = None
+                _save_pending(pending)
+                await query.edit_message_text(
+                    _VOICEOVER_CHOICE_TEXT,
+                    reply_markup=_voiceover_choice_keyboard(
+                        back_cb=f"notion_card:{full_id[:20]}"
+                    ),
+                )
+                return
+
             # Remap to standard action
             effective_action = {"card_broll": "broll", "card_voice": "voiceover", "card_guide": "create_guide", "card_avatar": "heygen_looks", "card_cover": "change_avatar"}[action]
             logger.info(f"Remapped {action} -> {effective_action}")
@@ -14891,7 +14926,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         [InlineKeyboardButton("🎬 Нарезать из другого видео", callback_data="broll_youtube")],
                     ]
                     if elevenlabs_client and not data.get("voice_parts"):
-                        buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                        buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
                     buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
                     await context.bot.send_message(
@@ -14976,7 +15011,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if _brand_now != "maksim":
                     buttons.append([InlineKeyboardButton("🔍 Искать на стоках", callback_data="broll_stock")])
                 if elevenlabs_client and not data.get("voice_parts"):
-                    buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                    buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
                 buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
                 await _send_or_edit(
@@ -15048,7 +15083,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔄 Подобрать другие", callback_data="broll")],
             ]
             if elevenlabs_client and not data.get("voice_parts"):
-                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
             buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
             await context.bot.send_message(
@@ -16258,7 +16293,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔍 Искать на стоках", callback_data="broll_stock")],
             ]
             if elevenlabs_client and not data.get("voice_parts"):
-                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
             buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
             await context.bot.send_message(
@@ -16394,7 +16429,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔍 Искать на стоках", callback_data="broll_stock")],
             ]
             if elevenlabs_client and not data.get("voice_parts"):
-                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
             buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
             await context.bot.send_message(
@@ -17065,7 +17100,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔄 Подобрать другие", callback_data="broll_stock")],
             ]
             if elevenlabs_client and not data.get("voice_parts"):
-                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
             buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
             await context.bot.send_message(
@@ -17374,7 +17409,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             buttons = []
             if (elevenlabs_client or (FISH_API_KEY and FISH_VOICE_ID)) and not data.get("voice_parts"):
-                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
             card_id_prefix = data.get("notion_page_id", "")[:20]
             if card_id_prefix:
                 buttons.append([InlineKeyboardButton(f"📋 Управление B-roll ({saved_count} клипов)", callback_data=f"broll_manage:{card_id_prefix}")])
@@ -17435,7 +17470,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if PEXELS_API_KEY or PIXABAY_API_KEY:
                 buttons.append([InlineKeyboardButton("🎬 Видеоряд (B-roll)", callback_data="broll")])
             if elevenlabs_client:
-                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
             buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
             notion_url = data.get("notion_url", "")
@@ -17512,7 +17547,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = []
         buttons.append([InlineKeyboardButton("🔄 Переписать гайд", callback_data="guide_rewrite")])
         if elevenlabs_client and not data.get("voice_parts"):
-            buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+            buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
         if not data.get("broll_approved"):
             buttons.append([InlineKeyboardButton("🎬 Видеоряд (B-roll)", callback_data="broll")])
         buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
@@ -18884,6 +18919,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
+    if query.data == "voiceover_choose":
+        # Развилка озвучки (для «🎙 Озвучить» кнопок вне card-меню).
+        await query.answer()
+        data = pending.get(user_id) or {}
+        if not data.get("script"):
+            await query.edit_message_text("Нет сценария для озвучки.")
+            return
+        await query.edit_message_text(
+            _VOICEOVER_CHOICE_TEXT,
+            reply_markup=_voiceover_choice_keyboard(),
+        )
+        return
+
     if query.data == "voiceover_ownvoice":
         # Озвучить ролик своим голосом вместо TTS (с шага озвучки).
         data["state"] = "awaiting_voiceover_ownvoice"
@@ -18910,7 +18958,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if HEYGEN_API_KEY and data.get("voice_parts"):
             buttons.append([InlineKeyboardButton("🤖 Сгенерировать аватар", callback_data="heygen_looks")])
         if elevenlabs_client and not data.get("voice_parts"):
-            buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+            buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
         if not data.get("broll_approved"):
             buttons.append([InlineKeyboardButton("🎬 Подобрать B-roll", callback_data="broll")])
         if NOTION_GUIDES_DB and not data.get("guide_created"):
@@ -19523,7 +19571,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if PEXELS_API_KEY or PIXABAY_API_KEY:
                 buttons.append([InlineKeyboardButton("🎬 Видеоряд (B-roll)", callback_data="broll")])
             if elevenlabs_client:
-                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover")])
+                buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
             buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
             await query.get_bot().send_message(

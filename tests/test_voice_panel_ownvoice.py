@@ -56,6 +56,16 @@ def main():
         _assert(any("своим голосом" in t.lower() for t in txt),
                 f"текст «своим голосом» есть (частей={n})", errors)
 
+    print("\n[_voiceover_choice_keyboard — развилка ИИ-голос / свой голос]")
+    kb = bot._voiceover_choice_keyboard()
+    cbs = _cbs(kb)
+    _assert("voiceover" in cbs, "есть выбор ИИ-голос (callback voiceover)", errors)
+    _assert("voiceover_ownvoice" in cbs, "есть выбор свой голос (callback voiceover_ownvoice)", errors)
+    _assert(not any("voiceover" not in c for c in cbs),
+            f"без лишних callback'ов, got {cbs}", errors)
+    kb_back = bot._voiceover_choice_keyboard(back_cb="notion_card:abc")
+    _assert("notion_card:abc" in _cbs(kb_back), "back_cb добавляет кнопку назад", errors)
+
     print()
     if errors:
         print(f"❌ FAIL — {len(errors)}:")
