@@ -41,7 +41,7 @@ BRAND = {
     "font_title": "'Inter Tight', sans-serif",
     "font_body":  "'Inter', sans-serif",
     "font_mono":  "'JetBrains Mono', monospace",
-    "brand_handle": "@livedrive.tmn",
+    "brand_handle": "@yumsunov86",
     "brand_name":   "LIVE DRIVE",
 }
 

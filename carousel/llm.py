@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """Ты — content-strategist для Максима Юмсунова — \
 ПРЕДПРИНИМАТЕЛЯ (16 лет в бизнесе) который ведёт личный бренд через Life Drive \
-(картинг + глэмпинг + SUP, Тюмень). Делаешь карусели для Instagram @livedrive.tmn.
+(картинг + глэмпинг + SUP, Тюмень). Делаешь карусели для Instagram @yumsunov86 (личный бренд Максима).
 
 🎯 Главная нить контента — МЫСЛИ Максима как предпринимателя, его взгляд \
 на бизнес, команду, продукт, клиентов, операционку, риски, рост. Картинг и \
@@ -113,7 +113,7 @@ COVER SLIDE (slide 1) — JSON schema
   "title_accent": "ЗАЕЗДА",                          // строка 2, в gradient/orange
   "subtitle":     "которые превратят новичка в призёра за один сезон — без курсов, без зала, без хайпа",  // 1-2 предложения, italic. Конкретика, тизер одного из пунктов, личный опыт. НЕ обобщения.
   "counter":      "01 / 07",                         // ВСЕГДА 01 / N (N = общее число слайдов)
-  "handle":       "@livedrive.tmn"                   // ВСЕГДА это
+  "handle":       "@yumsunov86"                      // ВСЕГДА это (личный аккаунт)
 }
 
 ═══════════════════════════════════════════════════════════════════════
@@ -128,7 +128,7 @@ INNER SLIDE (slides 2..N) — JSON schema
   "body":        "1-2 предложения. Конкретика. Italic. Без воды.",
   "pull_quote":  null,                               // ТОЛЬКО для slide_type C — фраза-ядро 6-12 слов. Для A/B — null.
   "counter":     "02 / 05",                          // 02/N, 03/N, ...
-  "handle":      "@livedrive.tmn"
+  "handle":      "@yumsunov86"
 }
 
 ТИПЫ INNER-ТАЙЛА (slide_type) — графическая система:
@@ -194,7 +194,7 @@ INNER SLIDE (slides 2..N) — JSON schema
 - Каждый title — мощный, отрывистый. ALL CAPS. 2-5 слов.
 - Каждый body — конкретика, личный опыт, цифры если есть в исходных данных.
 - Counter ВСЕГДА в формате "NN / NN" с пробелами вокруг "/".
-- Handle ВСЕГДА @livedrive.tmn.
+- Handle ВСЕГДА @yumsunov86.
 - accent_word — точное слово из title (одно из слов).
 
 ❌ НЕ делай:
@@ -261,6 +261,13 @@ def _parse_json_array(raw: str) -> list[dict]:
     return arr
 
 
+# Карусели идут на ЛИЧНЫЙ аккаунт Максима @yumsunov86 (instagram.com/yumsunov86),
+# а НЕ на картинговый @livedrive.tmn. Хэндл в футере/подвале слайдов = адрес
+# поста = личный аккаунт (Артём 10 июня).
+BRAND_IG_HANDLE = "@yumsunov86"
+_WRONG_HANDLE = "@livedrive.tmn"
+
+
 def _validate_slides(slides: list[dict], n: int) -> list[dict]:
     """Sanity checks. Raises ValueError on hard problems, warns on soft.
 
@@ -303,8 +310,17 @@ def _validate_slides(slides: list[dict], n: int) -> list[dict]:
         miss = [f for f in inner_required if not str(sl.get(f, "")).strip()]
         if miss:
             raise ValueError(f"inner slide #{i} missing: {miss}")
-        sl.setdefault("handle", "@livedrive.tmn")
+        sl.setdefault("handle", BRAND_IG_HANDLE)
         sl.setdefault("accent_word", None)
+
+    # ── Нормализация бренд-хэндла (детерминированно, независимо от LLM) ──
+    # Форсим handle на личный аккаунт + вычищаем любой @livedrive.tmn из всех
+    # текстовых полей (LLM/кэш мог дописать его в subtitle/body вопреки промпту).
+    for sl in slides:
+        sl["handle"] = BRAND_IG_HANDLE
+        for k, v in list(sl.items()):
+            if isinstance(v, str) and _WRONG_HANDLE in v:
+                sl[k] = v.replace(_WRONG_HANDLE, BRAND_IG_HANDLE)
 
     return slides
 
