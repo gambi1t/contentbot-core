@@ -8850,13 +8850,9 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             caption=f"🎙 Часть {idx+1}/{len(parts)} (без style):\n\n«{part_text}»",
                         )
 
-                    buttons = []
-                    for i in range(len(parts)):
-                        buttons.append([InlineKeyboardButton(f"🔄 Переозвучить часть {i+1}", callback_data=f"revoice:{i}")])
-                    buttons.append([InlineKeyboardButton("🔄 Переозвучить всё", callback_data="voiceover")])
-                    buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
-
-                    keyboard = InlineKeyboardMarkup(buttons)
+                    # Полная панель озвучки (вкл. «🎤 Озвучить своим голосом»),
+                    # чтобы кнопка была во ВСЕХ меню озвучки, не только в главной.
+                    keyboard = _voice_panel_keyboard(pending[user_id])
                     await status_msg.edit_text(
                         f"✅ Часть {idx+1} переозвучена (style=0)!\n\n"
                         + "\n".join(f"Часть {i+1}: «{p[:50]}{'...' if len(p) > 50 else ''}»" for i, p in enumerate(parts))
@@ -8901,13 +8897,9 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             caption=f"🎙 Часть {idx+1}/{len(parts)} (новый текст):\n\n«{new_text}»",
                         )
 
-                    buttons = []
-                    for i in range(len(parts)):
-                        buttons.append([InlineKeyboardButton(f"🔄 Переозвучить часть {i+1}", callback_data=f"revoice:{i}")])
-                    buttons.append([InlineKeyboardButton("🔄 Переозвучить всё", callback_data="voiceover")])
-                    buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
-
-                    keyboard = InlineKeyboardMarkup(buttons)
+                    # Полная панель озвучки (вкл. «🎤 Озвучить своим голосом»),
+                    # чтобы кнопка была во ВСЕХ меню озвучки, не только в главной.
+                    keyboard = _voice_panel_keyboard(pending[user_id])
                     await status_msg.edit_text(
                         f"✅ Часть {idx+1} переозвучена!\n\n"
                         + "\n".join(f"Часть {i+1}: «{p[:50]}{'...' if len(p) > 50 else ''}»" for i, p in enumerate(parts))
