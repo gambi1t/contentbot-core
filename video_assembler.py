@@ -1717,8 +1717,13 @@ def assemble_auto_montage(
             broll_paths = list(broll_paths) + photo_clips
             # Shuffle so videos and photos interleave throughout the montage
             # rather than all videos first, then all photos at the tail.
-            import random
-            random.shuffle(broll_paths)
+            # НО: если montage_plan задан явно (Про-/ИИ-монтаж), broll_index в
+            # нём осмыслен (Claude выбрал клип под фразу по его описанию) —
+            # перемешивать НЕЛЬЗЯ, иначе индексы укажут на чужой клип. Shuffle
+            # только для авто-лейаутов без плана (split/dynamic). [8 июня]
+            if not montage_plan:
+                import random
+                random.shuffle(broll_paths)
             used_photo_mix = True
 
     # ── Library-photo fallback ──────────────────────────────────────────────

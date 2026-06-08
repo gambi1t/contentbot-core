@@ -1534,9 +1534,12 @@ async def _run_broll_assembly_and_proceed(
                 )
                 from bot import generate_montage_plan
                 script_text = data.get("selfie_transcript", "") or ""
-                descs = [f"B-roll #{i + 1}" for i in range(n_broll)]
+                # Реальные описания выбранных клипов из .json-сайдкаров библиотеки
+                # (а не «B-roll #1») — Claude кладёт клип под фразу осмысленно.
+                descs = selfie_broll.build_broll_descriptions(items)
+                _has_photo = any(getattr(it, "kind", None) == "image" for it in items)
                 montage_plan = await asyncio.to_thread(
-                    generate_montage_plan, script_text, descs, avatar_dur,
+                    generate_montage_plan, script_text, descs, avatar_dur, _has_photo,
                 )
             else:
                 montage_plan = await asyncio.to_thread(

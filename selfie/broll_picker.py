@@ -313,6 +313,56 @@ def build_category_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def _probe_dur(path) -> float | None:
+    """Длительность файла через ffprobe (сек) или None."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        return None
+
+
+def build_broll_descriptions(items: list) -> list[str]:
+    """Описания выбранных B-roll для монтажного плана (ИИ-монтаж).
+
+    Читает готовый ``.json``-сайдкар рядом с ``item.source`` (его пишет
+    tag_clips при загрузке клипа в библиотеку) → берёт поле ``description``.
+    Это НЕ онлайн-анализ видео: только чтение текста, который уже на диске.
+
+    Порядок — [все видео, затем все фото]: ровно так ассемблер строит
+    ``broll_paths = video_paths + photo_clips`` (когда montage_plan задан и
+    shuffle отключён), поэтому ``broll_index`` плана совпадает с этим списком.
+    Длительность в скобках — план не должен резать клип длиннее него.
+    """
+    import json as _json
+    videos = [it for it in items if getattr(it, "kind", None) == "video"]
+    photos = [it for it in items if getattr(it, "kind", None) == "image"]
+    out: list[str] = []
+    for it in videos + photos:
+        desc = None
+        sidecar = Path(str(it.source) + ".json")
+        if sidecar.exists():
+            try:
+                d = _json.load(open(sidecar, encoding="utf-8"))
+                desc = (d.get("description") or "").strip() or None
+            except Exception:
+                desc = None
+        if not desc:
+            # Без сайдкара — имя файла (stem), НЕ служебная метка library/<id>
+            # (она для Claude мусор).
+            desc = Path(it.source).stem
+        if getattr(it, "kind", None) == "video":
+            dur = _probe_dur(it.source)
+            out.append(f"{desc} ({dur:.1f}s видео)" if dur else f"{desc} (видео)")
+        else:
+            out.append(f"{desc} (фото, ~3с)")
+    return out
+
+
 def make_image_preview(src: str, dst: str, max_side: int = 1280, quality: int = 82) -> str | None:
     """Уменьшенная JPEG-копия фото для превью (исходники с телефона 3-8 МБ →
     media_group упирался бы в лимит Telegram). Pure — переиспользуется в picker
