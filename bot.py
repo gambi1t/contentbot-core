@@ -13165,7 +13165,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔲 **Сплит** — B-roll сверху + аватар снизу (50/50)\n"
             "🎥 **Динамический** — аватар ↔ B-roll на весь экран\n"
             "🎬 **Про-монтаж** — фикс. формат: хук-аватар → 50/50 → CTA\n"
-            "🧠 **ИИ-монтаж** — Opus читает сценарий и B-roll, сам решает "
+            "🧠 **ИИ-монтаж** — Claude читает сценарий и B-roll, сам решает "
             "где полный экран, где 50/50, где сменить план. Для разнотипного "
             "B-roll (реальное видео + графика + фото).\n"
             "🎯 **Смарт-микс** — видео целиком на весь экран + фото в сплит.\n\n"
@@ -13188,7 +13188,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"card_asm_go:p:1:{cid}",
                 )],
                 [InlineKeyboardButton(
-                    "🧠 ИИ-монтаж + субтитры (Opus решает раскладку)",
+                    "🧠 ИИ-монтаж + субтитры (Claude решает раскладку)",
                     callback_data=f"card_asm_go:a:1:{cid}",
                 )],
                 [InlineKeyboardButton(
@@ -13202,9 +13202,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🎬 **Про-монтаж** — фикс. формат: хук-аватар на весь экран → "
                 "50/50 (B-roll сверху, аватар снизу) → аватар-CTA. Стабильно, "
                 "для типовых роликов.\n\n"
-                "🧠 **ИИ-монтаж** — Opus читает сценарий + B-roll и сам решает "
+                "🧠 **ИИ-монтаж** — Claude читает сценарий + B-roll и сам решает "
                 "раскладку посегментно (где полный экран, где 50/50). Для "
-                "разнотипного материала. Чуть дороже (+1 вызов Opus).\n\n"
+                "разнотипного материала. Чуть дороже (+1 вызов Claude).\n\n"
                 "Оба варианта — с субтитрами. «🔧 Другие форматы» — сплит / "
                 "смарт-микс / динамический."
             )
@@ -13320,13 +13320,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "smart": "Смарт-микс (видео full + фото split)",
             "fullscreen": "Full-screen (всё на полный экран, без сплитов)",
         }
-        layout_label = "ИИ-монтаж (Opus решает раскладку)" if _ai_montage else layout_labels.get(layout, layout)
+        layout_label = "ИИ-монтаж (Claude решает раскладку)" if _ai_montage else layout_labels.get(layout, layout)
         subs_label = " + субтитры" if with_subs else ""
 
         # For pro layout, generate montage plan first
         montage_plan = None
         if layout == "pro":
-            _plan_kind = "Opus анализирует сценарий + B-roll" if _ai_montage else "Claude создаёт монтажный план"
+            _plan_kind = "Claude анализирует сценарий + B-roll" if _ai_montage else "Claude создаёт монтажный план"
             await query.edit_message_text(
                 f"{'🧠 ИИ-монтаж' if _ai_montage else '🎬 Про-монтаж'} «{card['title']}»\n\n"
                 f"📋 Шаг 1/2: {_plan_kind}..."

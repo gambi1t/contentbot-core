@@ -1350,7 +1350,21 @@ async def handle_broll_callback(
             await query.edit_message_text("⚠️ Список пуст. Выбери хотя бы один B-roll или жми «Отмена».")
             await _show_broll_picker_screen(query, user_id)
             return True
-        await _run_broll_assembly_and_proceed(query, context, user_id, items)
+        # Вместо авто-смарт — показать выбор формата сборки (как в card-пути).
+        await query.edit_message_text(
+            _montage_format_message(len(items)),
+            reply_markup=_montage_format_keyboard(),
+        )
+        return True
+
+    if action == "asm":
+        code = parts[2] if len(parts) > 2 else "m"
+        items = _items_from_pending(data)
+        if not items:
+            await query.edit_message_text("⚠️ Список B-roll пуст. Начни заново через /selfie.")
+            return True
+        await _run_broll_assembly_and_proceed(
+            query, context, user_id, items, layout_code=code)
         return True
 
     return False
@@ -1439,16 +1453,61 @@ async def handle_broll_upload_video_message(
     return True
 
 
+# Форматы сборки — тот же набор, что и в card-пути (card_asm_go). Код кнопки →
+# (название, описание). Селфи уже с прожжёнными субтитрами, поэтому без
+# «+ субтитры» toggle.
+_MONTAGE_FORMATS = {
+    "m": ("🎯 Смарт-микс", "видео целиком на весь экран + фото в сплит"),
+    "s": ("🔲 Сплит", "B-roll сверху + аватар снизу (50/50)"),
+    "d": ("🎥 Динамический", "аватар ↔ B-roll на весь экран"),
+    "p": ("🎬 Про-монтаж", "хук-аватар → 50/50 → CTA (фикс. формат)"),
+    "a": ("🧠 ИИ-монтаж", "Claude читает сценарий и B-roll, сам решает раскладку"),
+}
+# Порядок кнопок в меню.
+_MONTAGE_ORDER = ("m", "s", "d", "p", "a")
+# Код кнопки → layout для assemble_auto_montage. 'a' (ИИ) тоже идёт через 'pro',
+# но с планом от Claude (generate_montage_plan), а не детерминированным bookend.
+_SELFIE_LAYOUT_MAP = {"s": "split", "d": "dynamic", "p": "pro", "a": "pro", "m": "smart"}
+
+
+def _montage_format_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(_MONTAGE_FORMATS[c][0], callback_data=f"selfie_broll:asm:{c}")]
+        for c in _MONTAGE_ORDER
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Назад к B-roll", callback_data="selfie_broll:back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _montage_format_message(n_items: int) -> str:
+    lines = [f"🎬 Выбери формат сборки (B-roll: {n_items}):\n"]
+    for c in _MONTAGE_ORDER:
+        name, desc = _MONTAGE_FORMATS[c]
+        lines.append(f"{name} — {desc}")
+    lines.append(
+        "\n💡 Под видео+фото вместе: Смарт-микс (предсказуемо) или ИИ-монтаж "
+        "(умнее, но +вызов Claude)."
+    )
+    return "\n".join(lines)
+
+
 async def _run_broll_assembly_and_proceed(
-    query, context, user_id: int, items: list,
+    query, context, user_id: int, items: list, layout_code: str = "m",
 ) -> None:
-    """Assemble selfie + B-roll via existing video_assembler, advance to music."""
+    """Assemble selfie + B-roll via existing video_assembler, advance to music.
+
+    layout_code: m=smart, s=split, d=dynamic, p=pro(bookend), a=pro(ИИ-план).
+    Логика сборки целиком переиспользует assemble_auto_montage / build_bookend_
+    montage_plan / generate_montage_plan (тот же движок, что и card-путь)."""
     data = _PENDING[user_id]
     selfie_tmp = Path(data["selfie_tmp_dir"])
     subtitled = Path(data["selfie_subtitled"])
+    fmt_name = _MONTAGE_FORMATS.get(layout_code, _MONTAGE_FORMATS["m"])[0]
+    layout = _SELFIE_LAYOUT_MAP.get(layout_code, "smart")
+    is_ai = layout_code == "a"
 
     await query.edit_message_text(
-        f"🎬 Собираю монтаж: селфи + {len(items)} B-roll-вставок... ~30-60 сек."
+        f"{fmt_name}: собираю монтаж — селфи + {len(items)} B-roll… ~30-90 сек."
     )
 
     try:
@@ -1460,34 +1519,64 @@ async def _run_broll_assembly_and_proceed(
         # Клипы скопированы в project_dir → tmp AI-генерации больше не нужен.
         _cleanup_selfie_gen_dirs(data)
 
-        # 2. Запустить существующий assembler. Layout 'smart' — видео полную
-        # длину как broll_full, фото 2.8с как split — то, что Артём описал
-        # как «как в Remotion».
-        from video_assembler import assemble_auto_montage
+        from video_assembler import (
+            assemble_auto_montage, build_bookend_montage_plan, _probe_duration,
+        )
+
+        # 2. Для Про-монтажа / ИИ-монтажа (layout="pro") нужен montage_plan.
+        montage_plan = None
+        if layout == "pro":
+            avatar_dur = await asyncio.to_thread(_probe_duration, subtitled)
+            n_broll = len(items)
+            if is_ai:
+                await query.edit_message_text(
+                    f"{fmt_name}: Claude строит план по сценарию… ~10-20 сек."
+                )
+                from bot import generate_montage_plan
+                script_text = data.get("selfie_transcript", "") or ""
+                descs = [f"B-roll #{i + 1}" for i in range(n_broll)]
+                montage_plan = await asyncio.to_thread(
+                    generate_montage_plan, script_text, descs, avatar_dur,
+                )
+            else:
+                montage_plan = await asyncio.to_thread(
+                    build_bookend_montage_plan, avatar_dur, n_broll,
+                )
+            await query.edit_message_text(
+                f"{fmt_name}: собираю видео по плану… ~1-3 мин."
+            )
+
+        # 3. Запустить существующий assembler выбранным форматом.
         final_auto = await asyncio.to_thread(
             assemble_auto_montage,
             project_dir,
-            layout="smart",
+            layout=layout,
+            montage_plan=montage_plan,
             broll_mode="real",
             brand_name="maksim",
         )
-        _LOGGER.info(f"[selfie] B-roll assembly done: {final_auto.stat().st_size / 1024 / 1024:.1f} MB")
+        _LOGGER.info(
+            f"[selfie] B-roll assembly ({layout_code}/{layout}) done: "
+            f"{final_auto.stat().st_size / 1024 / 1024:.1f} MB"
+        )
 
-        # 3. Подменить selfie_subtitled на смонтированное видео — теперь music
+        # 4. Подменить selfie_subtitled на смонтированное видео — теперь music
         # mixer добавит музыку на final_auto.mp4 а не на чистый selfie.
         data["selfie_subtitled"] = str(final_auto)
         data["selfie_final"] = str(final_auto)
+        data["selfie_montage_format"] = layout_code
         data["state"] = "selfie_music_picking"
         _SAVE_PENDING(_PENDING)
 
         await query.edit_message_text(
-            f"✅ Монтаж готов ({len(items)} B-roll-вставок).\n\n"
+            f"✅ Монтаж готов ({fmt_name}, {len(items)} B-roll).\n\n"
             f"{selfie_music.build_music_picker_message()}",
             reply_markup=selfie_music.category_keyboard(),
             parse_mode="HTML",
         )
     except Exception as e:
-        _LOGGER.error(f"[selfie] B-roll assembly failed: {e}", exc_info=True)
+        _LOGGER.error(
+            f"[selfie] B-roll assembly failed ({layout_code}): {e}", exc_info=True)
         await query.edit_message_text(
             f"❌ Не получилось собрать монтаж: {e}\n\n"
             "Возвращаю к выбору B-roll. Можно убрать что-то и попробовать снова, "
