@@ -1479,6 +1479,7 @@ def assemble_auto_montage(
     layout: str = "split",
     subtitles: bool = False,
     subtitle_language: str = "ru",
+    subtitle_words: list[dict] | None = None,
     montage_plan: list[dict] | None = None,
     brand_name: str = "default",
     smart_mix_cfg: dict | None = None,
@@ -1834,6 +1835,7 @@ def assemble_auto_montage(
                     uppercase=True,
                     margin_v=sub_margin_v,
                     montage_plan=sub_plan,
+                    words=subtitle_words,  # готовый транскрипт селфи (без ре-транскрибации)
                 )
                 subs_size = result.stat().st_size / 1024 / 1024
                 logger.info(

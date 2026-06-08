@@ -475,18 +475,26 @@ def add_subtitles_to_video(
     uppercase: bool = True,
     margin_v: int = DEFAULT_MARGIN_V,
     montage_plan: list[dict] | None = None,
+    words: list[dict] | None = None,
 ) -> Path:
-    """Full pipeline: transcribe → ASS → burn.
+    """Full pipeline: (transcribe →) ASS → burn.
 
     *audio_path* — if ``None``, extracts audio from the video.
     *montage_plan* — if provided, subtitle position adapts per layout segment.
+    *words* — готовые word-тайминги (например уже отредактированный транскрипт
+    селфи). Если переданы — Whisper НЕ запускается (сохраняем правки + время).
     Returns path to the new video with subtitles.
     """
     video_path = Path(video_path)
     cleanup_audio = False
 
-    # ── extract audio if needed ──
-    if audio_path is None:
+    # Готовые words (отредактированный транскрипт) → пропускаем извлечение
+    # аудио и транскрибацию целиком.
+    if words is not None:
+        audio_path = audio_path or video_path  # не используется, но для единообразия
+
+    # ── extract audio if needed (только если надо транскрибировать) ──
+    if words is None and audio_path is None:
         audio_path = video_path.parent / f"_tmp_sub_audio.wav"
         cmd = [
             "ffmpeg", "-y", "-i", str(video_path),
@@ -499,21 +507,22 @@ def add_subtitles_to_video(
         cleanup_audio = True
 
     try:
-        # Log audio duration for debugging
-        try:
-            probe = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", str(audio_path)],
-                capture_output=True, text=True, timeout=10,
-            )
-            logger.info(f"[subs] Audio for transcription: {audio_path.name}, duration={probe.stdout.strip()}s")
-        except Exception:
-            pass
-
-        # 1. Transcribe
-        words = transcribe_words(audio_path, language=language)
+        # 1. Transcribe — только если words не переданы
+        if words is None:
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(audio_path)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                logger.info(f"[subs] Audio for transcription: {audio_path.name}, duration={probe.stdout.strip()}s")
+            except Exception:
+                pass
+            words = transcribe_words(audio_path, language=language)
+        else:
+            logger.info(f"[subs] Using {len(words)} provided words (no re-transcription)")
         if not words:
-            logger.warning("No words transcribed — returning video as-is")
+            logger.warning("No words — returning video as-is")
             return video_path
 
         # 2. Generate ASS

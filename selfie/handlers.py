@@ -1518,10 +1518,14 @@ async def _run_broll_assembly_and_proceed(
     )
 
     try:
-        # 1. Подложить subtitled.mp4 как «аватар» и B-roll в нужные слоты.
+        # 1. Подложить ЧИСТОЕ селфи (без субтитров) как «аватар». Субтитры
+        # наложим на ФИНАЛЬНЫЙ монтаж с адаптивной позицией (split→стык 50/50,
+        # fullscreen→низ) — иначе они пропадали в broll_full и ужимались в split
+        # (раньше брали subtitled.mp4, субтитры ехали вместе с аватаром).
+        clean_selfie = Path(data.get("selfie_source") or subtitled)
         project_dir = selfie_tmp / "assembly"
         project_dir.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(selfie_broll.place_selfie_as_avatar, subtitled, project_dir)
+        await asyncio.to_thread(selfie_broll.place_selfie_as_avatar, clean_selfie, project_dir)
         await asyncio.to_thread(selfie_broll.prepare_broll_in_project, items, project_dir)
         # Клипы скопированы в project_dir → tmp AI-генерации больше не нужен.
         _cleanup_selfie_gen_dirs(data)
@@ -1533,7 +1537,7 @@ async def _run_broll_assembly_and_proceed(
         # 2. Для Про-монтажа / ИИ-монтажа (layout="pro") нужен montage_plan.
         montage_plan = None
         if layout == "pro":
-            avatar_dur = await asyncio.to_thread(_probe_duration, subtitled)
+            avatar_dur = await asyncio.to_thread(_probe_duration, clean_selfie)
             n_broll = len(items)
             if is_ai:
                 await query.edit_message_text(
@@ -1556,12 +1560,16 @@ async def _run_broll_assembly_and_proceed(
                 f"{fmt_name}: собираю видео по плану… ~1-3 мин."
             )
 
-        # 3. Запустить существующий assembler выбранным форматом.
+        # 3. Запустить assembler выбранным форматом + субтитры НА ФИНАЛЬНОМ
+        # монтаже с готовыми (отредактированными) словами — адаптивная позиция
+        # по лейауту сегмента, без ре-транскрибации.
         final_auto = await asyncio.to_thread(
             assemble_auto_montage,
             project_dir,
             layout=layout,
             montage_plan=montage_plan,
+            subtitles=True,
+            subtitle_words=(data.get("selfie_words") or None),
             broll_mode="real",
             brand_name="maksim",
         )

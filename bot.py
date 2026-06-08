@@ -6581,8 +6581,8 @@ async def _maksim_selfie_cover_text_step(
         chat_id=chat_id,
         text=(
             "🖼 Наложить текст на обложку?\n\n"
-            "Сделаю обложку-превью с хук-заголовком поверх фото "
-            "(как ютуб-thumbnail). Или оставить чистое фото."
+            "Сделаю обложку-превью с хук-заголовком поверх фото. "
+            "Или оставить чистое фото."
         ),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ С текстом", callback_data="selfie_ct:on")],
