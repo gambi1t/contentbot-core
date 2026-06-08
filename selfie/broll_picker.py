@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import random
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -310,6 +311,37 @@ def build_category_keyboard(
         )])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back")])
     return InlineKeyboardMarkup(rows)
+
+
+def make_image_preview(src: str, dst: str, max_side: int = 1280, quality: int = 82) -> str | None:
+    """Уменьшенная JPEG-копия фото для превью (исходники с телефона 3-8 МБ →
+    media_group упирался бы в лимит Telegram). Pure — переиспользуется в picker
+    и менеджере библиотеки."""
+    try:
+        from PIL import Image
+        im = Image.open(src)
+        im.thumbnail((max_side, max_side))
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGB")
+        im.save(dst, "JPEG", quality=quality)
+        return dst if Path(dst).exists() and Path(dst).stat().st_size > 0 else None
+    except Exception:
+        return None
+
+
+def make_clip_preview(src: str, dst: str, seconds: int = 4) -> str | None:
+    """Лёгкое видео-превью: первые N сек, ширина 360, без звука. Исходные клипы
+    30-90 МБ (>лимита бота 50 МБ) — целиком не отправить."""
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "0", "-t", str(seconds), "-i", src,
+             "-vf", "scale=360:-2", "-an", "-c:v", "libx264", "-crf", "30",
+             "-preset", "veryfast", "-movflags", "+faststart", dst],
+            capture_output=True, timeout=60,
+        )
+        return dst if Path(dst).exists() and Path(dst).stat().st_size > 0 else None
+    except Exception:
+        return None
 
 
 def build_toggle_keyboard(

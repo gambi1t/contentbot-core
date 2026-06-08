@@ -173,6 +173,7 @@ from publish_helpers import (
     extract_video_topic,
 )
 from selfie import handlers as selfie_handlers
+import library_manager
 from assemble_helpers import music_button_label
 from fal_handlers import (
     register_fal_handlers,
@@ -993,6 +994,12 @@ def _build_maksim_start_kb(last_card: dict | None = None) -> InlineKeyboardMarku
             InlineKeyboardButton(
                 "🎨 Карусель для Instagram",
                 callback_data="cmd_carousel",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "📁 Библиотека B-roll",
+                callback_data="lib_admin:menu",
             ),
         ],
         [
@@ -7444,6 +7451,11 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     _restore_brand_from_pending(user_id)
 
+    # Менеджер библиотеки B-roll: приём загружаемого фото в библиотеку.
+    if library_manager.is_upload_state(user_id):
+        if await library_manager.handle_upload_message(update, context):
+            return
+
     state = pending.get(user_id, {}).get("state")
 
     # ─── Selfie v2 — cover upload routed to the dedicated module ─────
@@ -7755,6 +7767,10 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.text and update.message.text.startswith("/"):
         return
     user_id = update.effective_user.id
+    # Менеджер библиотеки B-roll: приём загружаемого видео/документа в библиотеку.
+    if library_manager.is_upload_state(user_id):
+        if await library_manager.handle_upload_message(update, context):
+            return
     # Restore cached card brand into _brand_ctx so downstream generation
     # (script, cover, voice, avatar, assembly) resolves the right profile
     # even after a bot restart, when global _active_brand has been lost.
@@ -10996,6 +11012,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # so the prefixes (selfie_text:* / selfie_broll:* / selfie_music:* /
     # selfie_cover:*) hit before any generic action below.
     if query.data:
+        # Менеджер библиотеки B-roll (/library) — загрузка/удаление.
+        if query.data.startswith("lib_admin:"):
+            if await library_manager.handle_callback(update, context):
+                return
         if query.data.startswith("selfie_text:"):
             await selfie_handlers.handle_text_review_callback(update, context)
             return
@@ -20962,6 +20982,7 @@ def main():
     app.add_handler(CommandHandler("script", script_ready_command))
     app.add_handler(CommandHandler("cards", cards_command))
     app.add_handler(CommandHandler("ideas", ideas_command))
+    app.add_handler(CommandHandler("library", library_manager.library_command))
     app.add_handler(CommandHandler("cards_all", cards_all_command))
     app.add_handler(CommandHandler("stats", stats_command))
     # /update и /report скрыты для Maksim — замеры подписчиков по личному
@@ -21024,6 +21045,9 @@ def main():
         title_picker=_maksim_selfie_title_picker,
         cover_text_step=_maksim_selfie_cover_text_step,
     )
+
+    # Менеджер B-roll библиотеки (/library): загрузка/удаление клипов и фото.
+    library_manager.init(pending=pending, save_pending=_save_pending, logger=logger)
 
     # fal.ai on-demand generators — /image (Nano Banana Pro) and /video
     # (Kling 3.0 Pro). Registered BEFORE general CallbackQueryHandler so

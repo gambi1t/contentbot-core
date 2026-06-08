@@ -904,39 +904,10 @@ def _selected_lib_ids(data: dict) -> set:
     return out
 
 
-def _make_image_preview(src: str, dst: str, max_side: int = 1280, quality: int = 82) -> str | None:
-    """Уменьшенная JPEG-копия фото для превью (исходники с телефона 3-8 МБ →
-    media_group упирался бы в лимит)."""
-    try:
-        from PIL import Image
-        im = Image.open(src)
-        im.thumbnail((max_side, max_side))
-        if im.mode in ("RGBA", "LA", "P"):
-            im = im.convert("RGB")
-        im.save(dst, "JPEG", quality=quality)
-        return dst if Path(dst).exists() and Path(dst).stat().st_size > 0 else None
-    except Exception:
-        return None
-
-
-def _make_clip_preview(src: str, dst: str, seconds: int = 4) -> str | None:
-    """Лёгкое видео-превью клипа: первые N сек, ширина 360, без звука. Исходные
-    клипы 30-90 МБ (>лимита бота 50 МБ) — целиком не отправить, делаем маленькое."""
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-ss", "0", "-t", str(seconds), "-i", src,
-             "-vf", "scale=360:-2", "-an", "-c:v", "libx264", "-crf", "30",
-             "-preset", "veryfast", "-movflags", "+faststart", dst],
-            capture_output=True, timeout=60,
-        )
-        return dst if Path(dst).exists() and Path(dst).stat().st_size > 0 else None
-    except Exception:
-        return None
-
-
 async def _send_broll_previews(context, chat_id, samples, kind: str) -> None:
     """Прислать ЛЁГКИЕ media-превью батча: фото — уменьшенными картинками, клипы
-    — маленькими обрезанными видео (исходники тяжёлые → генерим превью)."""
+    — маленькими обрезанными видео (исходники тяжёлые → генерим превью).
+    Генераторы превью — в selfie.broll_picker (переиспользуются менеджером библ.)."""
     from telegram import InputMediaPhoto, InputMediaVideo
     import shutil as _sh
     prev_dir = Path(tempfile.mkdtemp(prefix="broll_prev_"))
@@ -944,9 +915,9 @@ async def _send_broll_previews(context, chat_id, samples, kind: str) -> None:
         async def _mk(i: int, s: dict):
             if kind == "image":
                 return await asyncio.to_thread(
-                    _make_image_preview, s["path"], str(prev_dir / f"p_{i}.jpg"))
+                    selfie_broll.make_image_preview, s["path"], str(prev_dir / f"p_{i}.jpg"))
             return await asyncio.to_thread(
-                _make_clip_preview, s["path"], str(prev_dir / f"p_{i}.mp4"))
+                selfie_broll.make_clip_preview, s["path"], str(prev_dir / f"p_{i}.mp4"))
 
         results = await asyncio.gather(
             *[_mk(i, s) for i, s in enumerate(samples)], return_exceptions=True)
