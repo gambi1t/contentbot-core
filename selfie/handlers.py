@@ -904,35 +904,80 @@ def _selected_lib_ids(data: dict) -> set:
     return out
 
 
-async def _send_broll_previews(context, chat_id, samples, kind: str) -> None:
-    """Прислать media-превью батча: фото — картинками, клипы — маленькими видео."""
-    from telegram import InputMediaPhoto, InputMediaVideo
-    if len(samples) == 1:
-        s = samples[0]
-        try:
-            with open(s["path"], "rb") as f:
-                if kind == "image":
-                    await context.bot.send_photo(chat_id=chat_id, photo=f)
-                else:
-                    await context.bot.send_video(chat_id=chat_id, video=f)
-        except Exception as e:
-            _LOGGER.warning(f"[selfie/broll] preview send failed: {e}")
-        return
-    media, handles = [], []
+def _make_image_preview(src: str, dst: str, max_side: int = 1280, quality: int = 82) -> str | None:
+    """Уменьшенная JPEG-копия фото для превью (исходники с телефона 3-8 МБ →
+    media_group упирался бы в лимит)."""
     try:
-        for s in samples:
-            f = open(s["path"], "rb")
-            handles.append(f)
-            media.append(InputMediaPhoto(f) if kind == "image" else InputMediaVideo(f))
-        await context.bot.send_media_group(chat_id=chat_id, media=media)
+        from PIL import Image
+        im = Image.open(src)
+        im.thumbnail((max_side, max_side))
+        if im.mode in ("RGBA", "LA", "P"):
+            im = im.convert("RGB")
+        im.save(dst, "JPEG", quality=quality)
+        return dst if Path(dst).exists() and Path(dst).stat().st_size > 0 else None
+    except Exception:
+        return None
+
+
+def _make_clip_preview(src: str, dst: str, seconds: int = 4) -> str | None:
+    """Лёгкое видео-превью клипа: первые N сек, ширина 360, без звука. Исходные
+    клипы 30-90 МБ (>лимита бота 50 МБ) — целиком не отправить, делаем маленькое."""
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "0", "-t", str(seconds), "-i", src,
+             "-vf", "scale=360:-2", "-an", "-c:v", "libx264", "-crf", "30",
+             "-preset", "veryfast", "-movflags", "+faststart", dst],
+            capture_output=True, timeout=60,
+        )
+        return dst if Path(dst).exists() and Path(dst).stat().st_size > 0 else None
+    except Exception:
+        return None
+
+
+async def _send_broll_previews(context, chat_id, samples, kind: str) -> None:
+    """Прислать ЛЁГКИЕ media-превью батча: фото — уменьшенными картинками, клипы
+    — маленькими обрезанными видео (исходники тяжёлые → генерим превью)."""
+    from telegram import InputMediaPhoto, InputMediaVideo
+    import shutil as _sh
+    prev_dir = Path(tempfile.mkdtemp(prefix="broll_prev_"))
+    try:
+        async def _mk(i: int, s: dict):
+            if kind == "image":
+                return await asyncio.to_thread(
+                    _make_image_preview, s["path"], str(prev_dir / f"p_{i}.jpg"))
+            return await asyncio.to_thread(
+                _make_clip_preview, s["path"], str(prev_dir / f"p_{i}.mp4"))
+
+        results = await asyncio.gather(
+            *[_mk(i, s) for i, s in enumerate(samples)], return_exceptions=True)
+        previews = [r for r in results if isinstance(r, str) and r and Path(r).exists()]
+        if not previews:
+            _LOGGER.warning("[selfie/broll] preview: ни одного превью не сгенерилось")
+            return
+
+        media, handles = [], []
+        try:
+            for p in previews:
+                f = open(p, "rb")
+                handles.append(f)
+                media.append(InputMediaPhoto(f) if kind == "image" else InputMediaVideo(f))
+            if len(media) >= 2:
+                await context.bot.send_media_group(chat_id=chat_id, media=media)
+            else:
+                if kind == "image":
+                    await context.bot.send_photo(chat_id=chat_id, photo=handles[0])
+                else:
+                    await context.bot.send_video(chat_id=chat_id, video=handles[0])
+        finally:
+            for f in handles:
+                try:
+                    f.close()
+                except Exception:
+                    pass
     except Exception as e:
-        _LOGGER.warning(f"[selfie/broll] preview media_group failed: {e}")
+        _LOGGER.warning(f"[selfie/broll] preview send failed: {e}")
     finally:
-        for f in handles:
-            try:
-                f.close()
-            except Exception:
-                pass
+        _sh.rmtree(prev_dir, ignore_errors=True)
 
 
 async def _show_broll_category_samples(
