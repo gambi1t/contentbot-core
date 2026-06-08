@@ -7174,7 +7174,10 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
         if proj:
             if source_path and Path(source_path).exists():
                 shutil.copy2(source_path, str(proj / "source.mp4"))
-                logger.info(f"[selfie] Saved source to {proj.name}/source.mp4")
+                # Чистое селфи = аватар для карточной «Автосборки» (иначе она
+                # пишет «нужен аватар», т.к. ждёт HeyGen avatar_*.mp4).
+                shutil.copy2(source_path, str(proj / "avatar_selfie.mp4"))
+                logger.info(f"[selfie] Saved source + avatar_selfie to {proj.name}/")
             if subtitled_path and Path(subtitled_path).exists():
                 shutil.copy2(subtitled_path, str(proj / "final_video.mp4"))
                 logger.info(f"[selfie] Saved subtitled as {proj.name}/final_video.mp4")
@@ -13991,6 +13994,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # from the global photo library (broll-library/photos/**) — the
             # assembler auto-falls-back to Ken Burns photo clips when no video
             # clips are saved to the project folder.
+            # Селфи-карточки: исходное селфи (source.mp4) — это и есть аватар.
+            # Карточный пайплайн ждёт avatar_*.mp4 (HeyGen), которого у селфи нет,
+            # и пишет «нужен аватар». Авто-регистрируем селфи как avatar_selfie.mp4,
+            # если генерённого аватара нет, но есть source.mp4 (Артём 8 июня).
+            if (_tmp_proj and _tmp_proj.exists()
+                    and not any(_tmp_proj.glob("avatar_*.mp4"))
+                    and (_tmp_proj / "source.mp4").exists()):
+                try:
+                    import shutil as _sh
+                    _sh.copy2(_tmp_proj / "source.mp4", _tmp_proj / "avatar_selfie.mp4")
+                    logger.info(f"[card] Registered selfie source as avatar in {_tmp_proj.name}")
+                except Exception as _e:
+                    logger.warning(f"[card] selfie→avatar register failed: {_e}")
             _has_avatar = bool(_tmp_proj and _tmp_proj.exists() and any(_tmp_proj.glob("avatar_*.mp4")))
             _has_video_broll = bool(_tmp_proj and _tmp_proj.exists() and any(_tmp_proj.glob("broll_*.mp4")))
             _photo_lib_count = len(_list_brand_photo_library())
