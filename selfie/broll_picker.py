@@ -300,8 +300,13 @@ def lookup_clip_path(clip_id: str) -> str | None:
 def build_category_keyboard(
     kind: Literal["image", "video"],
     categories: list[tuple[str, int]],
+    selected_count: int = 0,
 ) -> InlineKeyboardMarkup:
-    """Подменю выбора категории библиотеки (только непустые) + назад."""
+    """Подменю выбора категории библиотеки (только непустые) + назад.
+
+    Если уже что-то выбрано (``selected_count`` > 0) — снизу кнопка «Готово (N)»,
+    чтобы было видно, что выбор НЕ пропал при переходе между категориями
+    (Артём 8 июня: без неё кажется, что выбранные клипы исчезли)."""
     src_tag = "photo" if kind == "image" else "clip"
     rows: list[list[InlineKeyboardButton]] = []
     for cat, n in categories:
@@ -310,6 +315,11 @@ def build_category_keyboard(
             callback_data=f"selfie_broll:cat:{src_tag}:{cat}",
         )])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back")])
+    if selected_count > 0:
+        rows.append([InlineKeyboardButton(
+            f"✅ Готово ({selected_count} выбрано)",
+            callback_data="selfie_broll:done",
+        )])
     return InlineKeyboardMarkup(rows)
 
 

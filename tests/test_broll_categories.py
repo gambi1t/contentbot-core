@@ -85,6 +85,17 @@ def main():
         _assert(any(c == "selfie_broll:cat:photo:glamping" for c in cbs), f"кнопка категории glamping: {cbs}", errors)
         _assert(any(c == "selfie_broll:back" for c in cbs), "есть кнопка Назад", errors)
 
+        print("\n[build_category_keyboard — «Готово (N)» виден когда выбрано]")
+        # без выбора — нет кнопки Готово
+        cbs0 = [b.callback_data for row in bp.build_category_keyboard("image", cats, 0).inline_keyboard for b in row]
+        _assert("selfie_broll:done" not in cbs0, "при 0 выбранных кнопки Готово нет", errors)
+        # с выбором — есть «Готово (N)» с числом в тексте
+        kb3 = bp.build_category_keyboard("image", cats, 2)
+        flat3 = [b for row in kb3.inline_keyboard for b in row]
+        done = [b for b in flat3 if b.callback_data == "selfie_broll:done"]
+        _assert(len(done) == 1, "при 2 выбранных есть кнопка Готово", errors)
+        _assert(done and "2" in done[0].text, f"в тексте Готово число выбранных: {done[0].text if done else None}", errors)
+
         print("\n[build_library_keyboard — reroll несёт категорию]")
         kb2 = bp.build_library_keyboard(s1, kind="image", category="glamping")
         cbs2 = [b.callback_data for row in kb2.inline_keyboard for b in row]

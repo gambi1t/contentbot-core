@@ -1204,10 +1204,11 @@ async def handle_broll_callback(
         if len(cats) == 1:
             await _show_broll_category_samples(query, context, user_id, kind, cats[0][0])
             return True
+        _sel = len(_items_from_pending(data))
         await query.edit_message_text(
             "📷 Фото из библиотеки — выбери категорию:" if kind == "image"
             else "🎞 Клипы из библиотеки — выбери категорию:",
-            reply_markup=selfie_broll.build_category_keyboard(kind, cats),
+            reply_markup=selfie_broll.build_category_keyboard(kind, cats, _sel),
         )
         return True
 
@@ -1230,7 +1231,7 @@ async def handle_broll_callback(
             (f"📷 Категория фото (выбрано {total}/{selfie_broll.MAX_BROLL_ITEMS}):"
              if kind == "image"
              else f"🎞 Категория клипов (выбрано {total}/{selfie_broll.MAX_BROLL_ITEMS}):"),
-            reply_markup=selfie_broll.build_category_keyboard(kind, cats),
+            reply_markup=selfie_broll.build_category_keyboard(kind, cats, total),
         )
         return True
 
@@ -1254,6 +1255,12 @@ async def handle_broll_callback(
         }
         _SAVE_PENDING(_PENDING)
         chat_id = query.message.chat_id
+        # Фидбэк сразу: генерация 6 видео-превью (ffmpeg) занимает несколько сек —
+        # без этого кажется, что бот завис (Артём 8 июня).
+        try:
+            await query.edit_message_text("🔄 Готовлю ещё 6 превью…")
+        except Exception:
+            pass
         await _send_broll_previews(context, chat_id, samples, kind)
         selected_ids = _selected_lib_ids(data)
         total = len(_items_from_pending(data))
