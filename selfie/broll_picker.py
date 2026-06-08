@@ -312,6 +312,34 @@ def build_category_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def build_toggle_keyboard(
+    samples: list[dict],
+    kind: Literal["image", "video"],
+    category: str,
+    selected_ids: set,
+    total_count: int,
+) -> InlineKeyboardMarkup:
+    """Рич-picker: кнопки-цифры под media-превью (✅ на выбранных) + reroll +
+    к категориям (выбор сохраняется) + Готово(N). Мультивыбор с накоплением,
+    как в потоке «Фото к TG-посту» (Артём 8 июня)."""
+    src_tag = "photo" if kind == "image" else "clip"
+    toggle_row: list[InlineKeyboardButton] = []
+    for i, s in enumerate(samples, start=1):
+        sid = s["id"]
+        mark = "✅" if sid in selected_ids else str(i)
+        toggle_row.append(InlineKeyboardButton(
+            mark, callback_data=f"selfie_broll:tog:{src_tag}:{category}:{sid}",
+        ))
+    rows = [toggle_row[:3], toggle_row[3:]] if len(toggle_row) > 3 else [toggle_row]
+    rows.append([InlineKeyboardButton(
+        "🔄 Ещё 6", callback_data=f"selfie_broll:reroll:{src_tag}:{category}")])
+    rows.append([InlineKeyboardButton(
+        "⬅️ К категориям", callback_data=f"selfie_broll:catback:{src_tag}")])
+    rows.append([InlineKeyboardButton(
+        f"✅ Готово ({total_count} выбрано)", callback_data="selfie_broll:done")])
+    return InlineKeyboardMarkup(rows)
+
+
 def build_library_keyboard(
     samples: list[dict],
     kind: Literal["image", "video"],

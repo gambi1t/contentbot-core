@@ -887,27 +887,86 @@ async def _show_broll_picker_screen(query_or_msg, user_id: int) -> None:
         await query_or_msg.reply_text(text, reply_markup=kb)
 
 
+def _selected_lib_ids(data: dict) -> set:
+    """ID библиотечных файлов, уже выбранных в B-roll (по label 'library/<id>')."""
+    out = set()
+    for d in data.get("selfie_broll_items", []) or []:
+        lbl = d.get("label") or ""
+        if lbl.startswith("library/"):
+            out.add(lbl[len("library/"):])
+    return out
+
+
+async def _send_broll_previews(context, chat_id, samples, kind: str) -> None:
+    """Прислать media-превью батча: фото — картинками, клипы — маленькими видео."""
+    from telegram import InputMediaPhoto, InputMediaVideo
+    if len(samples) == 1:
+        s = samples[0]
+        try:
+            with open(s["path"], "rb") as f:
+                if kind == "image":
+                    await context.bot.send_photo(chat_id=chat_id, photo=f)
+                else:
+                    await context.bot.send_video(chat_id=chat_id, video=f)
+        except Exception as e:
+            _LOGGER.warning(f"[selfie/broll] preview send failed: {e}")
+        return
+    media, handles = [], []
+    try:
+        for s in samples:
+            f = open(s["path"], "rb")
+            handles.append(f)
+            media.append(InputMediaPhoto(f) if kind == "image" else InputMediaVideo(f))
+        await context.bot.send_media_group(chat_id=chat_id, media=media)
+    except Exception as e:
+        _LOGGER.warning(f"[selfie/broll] preview media_group failed: {e}")
+    finally:
+        for f in handles:
+            try:
+                f.close()
+            except Exception:
+                pass
+
+
 async def _show_broll_category_samples(
-    query, user_id: int, kind: str, category: str,
+    query, context, user_id: int, kind: str, category: str,
 ) -> None:
-    """Показать 6 сэмплов из выбранной категории библиотеки (сбросив показанные)."""
+    """Прислать media-превью 6 файлов категории + клавиатуру мультивыбора (toggle)."""
     data = _PENDING.get(user_id) or {}
     src_tag = "photo" if kind == "image" else "clip"
     shown_key = f"{src_tag}:{category}"
     samples = await asyncio.to_thread(
         selfie_broll.list_library_sample, kind, category, 6, [],
     )
-    data.setdefault("selfie_broll_shown_ids", {})
-    data["selfie_broll_shown_ids"][shown_key] = [s["id"] for s in samples]
-    _SAVE_PENDING(_PENDING)
     label = selfie_broll._cat_label(category)
     icon = "📷" if kind == "image" else "🎞"
-    await query.edit_message_text(
-        f"{icon} {label} — нажми на нужное:" if samples
-        else f"⚠️ В категории «{label}» пусто.",
-        reply_markup=selfie_broll.build_library_keyboard(
-            samples, kind=kind, category=category,
+    if not samples:
+        await query.edit_message_text(f"⚠️ В категории «{label}» пусто.")
+        return
+    data.setdefault("selfie_broll_shown_ids", {})
+    data["selfie_broll_shown_ids"][shown_key] = [s["id"] for s in samples]
+    data["selfie_broll_batch"] = {
+        "kind": kind, "category": category,
+        "items": [{"id": s["id"], "path": s["path"]} for s in samples],
+    }
+    _SAVE_PENDING(_PENDING)
+    try:
+        await query.edit_message_text(f"{icon} {label} — показываю превью…")
+    except Exception:
+        pass
+    chat_id = query.message.chat_id
+    await _send_broll_previews(context, chat_id, samples, kind)
+    selected_ids = _selected_lib_ids(data)
+    total = len(_items_from_pending(data))
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"{icon} {label}: тапни номер — выбрать/снять. Можно несколько; "
+            f"«⬅️ К категориям» — добрать из другой. "
+            f"Выбрано: {total}/{selfie_broll.MAX_BROLL_ITEMS}."
         ),
+        reply_markup=selfie_broll.build_toggle_keyboard(
+            samples, kind, category, selected_ids, total),
     )
 
 
@@ -1116,12 +1175,11 @@ async def handle_broll_callback(
         cats = await asyncio.to_thread(selfie_broll.list_library_categories, kind)
         if not cats:
             await query.edit_message_text(
-                "⚠️ Библиотека пуста — добавь файлы или загрузи своё.",
-                reply_markup=selfie_broll.build_library_keyboard([], kind=kind),
+                "⚠️ Библиотека пуста — добавь файлы или загрузи своё."
             )
             return True
         if len(cats) == 1:
-            await _show_broll_category_samples(query, user_id, kind, cats[0][0])
+            await _show_broll_category_samples(query, context, user_id, kind, cats[0][0])
             return True
         await query.edit_message_text(
             "📷 Фото из библиотеки — выбери категорию:" if kind == "image"
@@ -1134,7 +1192,7 @@ async def handle_broll_callback(
         src_tag = parts[2] if len(parts) > 2 else "photo"
         cat = parts[3] if len(parts) > 3 else ""
         kind = "image" if src_tag == "photo" else "video"
-        await _show_broll_category_samples(query, user_id, kind, cat)
+        await _show_broll_category_samples(query, context, user_id, kind, cat)
         return True
 
     if action == "catback":
@@ -1144,15 +1202,18 @@ async def handle_broll_callback(
         if not cats:
             await _show_broll_picker_screen(query, user_id)
             return True
+        total = len(_items_from_pending(data))
         await query.edit_message_text(
-            "📷 Категория фото:" if kind == "image" else "🎞 Категория клипов:",
+            (f"📷 Категория фото (выбрано {total}/{selfie_broll.MAX_BROLL_ITEMS}):"
+             if kind == "image"
+             else f"🎞 Категория клипов (выбрано {total}/{selfie_broll.MAX_BROLL_ITEMS}):"),
             reply_markup=selfie_broll.build_category_keyboard(kind, cats),
         )
         return True
 
     if action == "reroll":
         src_tag = parts[2] if len(parts) > 2 else "photo"
-        cat = parts[3] if len(parts) > 3 else None
+        cat = parts[3] if len(parts) > 3 else ""
         kind = "image" if src_tag == "photo" else "video"
         shown_key = f"{src_tag}:{cat or '_all'}"
         data.setdefault("selfie_broll_shown_ids", {})
@@ -1160,48 +1221,66 @@ async def handle_broll_callback(
         samples = await asyncio.to_thread(
             selfie_broll.list_library_sample, kind, cat, 6, shown,
         )
-        data["selfie_broll_shown_ids"][shown_key] = shown + [s["id"] for s in samples]
-        _SAVE_PENDING(_PENDING)
         if not samples:
-            await query.edit_message_text(
-                "⚠️ Больше нечего показать в этой категории. Вернись назад.",
-                reply_markup=selfie_broll.build_library_keyboard([], kind=kind, category=cat),
-            )
-        else:
-            await query.edit_message_text(
-                "📷 Ещё варианты:" if kind == "image" else "🎞 Ещё варианты:",
-                reply_markup=selfie_broll.build_library_keyboard(samples, kind=kind, category=cat),
-            )
+            await query.answer("Больше нечего показать в этой категории.", show_alert=True)
+            return True
+        data["selfie_broll_shown_ids"][shown_key] = shown + [s["id"] for s in samples]
+        data["selfie_broll_batch"] = {
+            "kind": kind, "category": cat,
+            "items": [{"id": s["id"], "path": s["path"]} for s in samples],
+        }
+        _SAVE_PENDING(_PENDING)
+        chat_id = query.message.chat_id
+        await _send_broll_previews(context, chat_id, samples, kind)
+        selected_ids = _selected_lib_ids(data)
+        total = len(_items_from_pending(data))
+        icon = "📷" if kind == "image" else "🎞"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"{icon} Ещё варианты — тапни номер. Выбрано: {total}/{selfie_broll.MAX_BROLL_ITEMS}.",
+            reply_markup=selfie_broll.build_toggle_keyboard(
+                samples, kind, cat, selected_ids, total),
+        )
         return True
 
-    if action == "pick":
-        # selfie_broll:pick:<src>:<id>
-        src_tag = parts[2] if len(parts) > 2 else ""
-        item_id = parts[3] if len(parts) > 3 else ""
+    if action == "tog":
+        # selfie_broll:tog:<src>:<cat>:<id> (full split — cat/id без ':')
+        p = query.data.split(":")
+        src_tag = p[2] if len(p) > 2 else "photo"
+        cat = p[3] if len(p) > 3 else ""
+        item_id = p[4] if len(p) > 4 else ""
         kind = "image" if src_tag == "photo" else "video"
-        # И фото, и клипы — из категоризированной broll-library (фикс 10 июня:
-        # фото больше НЕ из обложечной COVER_LIBRARY_DIR).
-        src_path = selfie_broll.lookup_library_path(kind, item_id)
-        if not src_path or not Path(src_path).exists():
-            await query.edit_message_text(
-                f"⚠️ Файл {item_id} не найден. Выбери другой.",
-            )
-            await _show_broll_picker_screen(query, user_id)
-            return True
-
-        new_item = selfie_broll.BrollItem(
-            kind=kind, source=Path(src_path), label=f"library/{item_id}",
-        )
-        items = _items_from_pending(data)
-        err = selfie_broll.validate_added(items, new_item)
-        if err:
-            await query.edit_message_text(f"⚠️ {err}")
-            await _show_broll_picker_screen(query, user_id)
-            return True
-
-        _store_item(data, new_item)
+        raw = data.setdefault("selfie_broll_items", [])
+        sel_label = f"library/{item_id}"
+        existing = next((d for d in raw if d.get("label") == sel_label), None)
+        if existing:
+            raw.remove(existing)
+            removed = True
+        else:
+            removed = False
+            if len(raw) >= selfie_broll.MAX_BROLL_ITEMS:
+                await query.answer(
+                    f"Лимит {selfie_broll.MAX_BROLL_ITEMS} — сними что-то.", show_alert=True)
+                return True
+            src_path = await asyncio.to_thread(
+                selfie_broll.lookup_library_path, kind, item_id)
+            if not src_path or not Path(src_path).exists():
+                await query.answer("⚠️ Файл не найден"); return True
+            raw.append({"kind": kind, "source": src_path, "label": sel_label})
         _SAVE_PENDING(_PENDING)
-        await _show_broll_picker_screen(query, user_id)
+        # Перерисовать клавиатуру (✅/счётчик) на этом же сообщении.
+        batch = data.get("selfie_broll_batch") or {}
+        b_samples = [{"id": b["id"]} for b in batch.get("items", [])]
+        selected_ids = _selected_lib_ids(data)
+        total = len(raw)
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=selfie_broll.build_toggle_keyboard(
+                    b_samples, batch.get("kind", kind), batch.get("category", cat),
+                    selected_ids, total))
+        except Exception:
+            pass
+        await query.answer("снято" if removed else "✅ добавлено")
         return True
 
     if action == "remove_last":
