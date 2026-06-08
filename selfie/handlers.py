@@ -172,6 +172,29 @@ def _editing_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+_VIDEO_EXTS = (".mov", ".mp4", ".m4v", ".mkv", ".webm", ".avi", ".mpeg", ".mpg")
+
+
+def is_video_message(message) -> bool:
+    """Видео ли сообщение: нативное video, ИЛИ документ с mime video/*, ИЛИ
+    документ с видео-РАСШИРЕНИЕМ.
+
+    Telegram Web часто шлёт .MOV как документ с ненадёжным mime (не video/*)
+    → ловим по расширению имени файла, иначе бот молча дропает видео на /selfie
+    (Артём, 8 июня 2026, IMG_1566.MOV из Telegram Web).
+    """
+    if getattr(message, "video", None):
+        return True
+    doc = getattr(message, "document", None)
+    if not doc:
+        return False
+    mime = getattr(doc, "mime_type", None) or ""
+    if mime.startswith("video/"):
+        return True
+    fname = (getattr(doc, "file_name", "") or "").lower()
+    return fname.endswith(_VIDEO_EXTS)
+
+
 async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Принять видео от юзера в state 'selfie_waiting_video':
     скачать → audio → transcribe (с brand biasing) → показать review с кнопками.
@@ -180,11 +203,8 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     user_id = update.effective_user.id
     video_file = update.message.video or update.message.document
-    if not video_file or not (
-        update.message.video
-        or (getattr(video_file, "mime_type", None) and video_file.mime_type.startswith("video/"))
-    ):
-        await update.message.reply_text("Отправь видеофайл (MP4). Жду видео, снятое на телефон.")
+    if not is_video_message(update.message):
+        await update.message.reply_text("Отправь видеофайл (MP4/MOV). Жду видео, снятое на телефон.")
         return
 
     msg = await update.message.reply_text("📥 Загружаю видео...")

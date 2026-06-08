@@ -21085,8 +21085,22 @@ def main():
     # часто шлёт .MOV как document с mime "video/quicktime" и фильтр на
     # MimeType("video/mp4") его не пропускает → бот молчит на /selfie + видео.
     # (Артём, 9 июня 2026, в продакшене на IMG_1566.MOV)
+    # + по РАСШИРЕНИЮ: Telegram Web шлёт .MOV/.mp4 как документ с ненадёжным
+    # mime (не video/*) → Category("video/") промахивается, бот молчит на видео
+    # после /selfie (Артём, 8 июня, IMG_1566.MOV из Telegram Web).
+    _video_doc_ext = (
+        filters.Document.FileExtension("mov")
+        | filters.Document.FileExtension("mp4")
+        | filters.Document.FileExtension("m4v")
+        | filters.Document.FileExtension("mkv")
+        | filters.Document.FileExtension("webm")
+        | filters.Document.FileExtension("avi")
+        | filters.Document.FileExtension("mpeg")
+        | filters.Document.FileExtension("mpg")
+    )
     app.add_handler(MessageHandler(
-        filters.VIDEO | filters.Document.VIDEO | filters.Document.Category("video/"),
+        filters.VIDEO | filters.Document.VIDEO
+        | filters.Document.Category("video/") | _video_doc_ext,
         process_idea,
     ))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, process_voice))
