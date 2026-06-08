@@ -209,10 +209,17 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     msg = await update.message.reply_text("📥 Загружаю видео...")
     try:
-        tg_file = await context.bot.get_file(video_file.file_id)
+        # Большие таймауты: видео с телефона 13-50 МБ не успевало скачаться за
+        # дефолтные ~5с PTB → telegram.error.TimedOut (Артём 8 июня).
+        tg_file = await context.bot.get_file(
+            video_file.file_id, read_timeout=60, connect_timeout=30,
+        )
         selfie_tmp = Path(tempfile.mkdtemp(prefix="selfie_"))
         source_path = selfie_tmp / "source.mp4"
-        await tg_file.download_to_drive(str(source_path))
+        await tg_file.download_to_drive(
+            str(source_path),
+            read_timeout=180, write_timeout=180, connect_timeout=30,
+        )
         file_size = source_path.stat().st_size / 1024 / 1024
         _LOGGER.info(f"[selfie] Source video downloaded: {file_size:.1f} MB")
 

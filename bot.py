@@ -20929,7 +20929,20 @@ async def weekly_stats_to_notion(context):
 
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    # read/connect/pool timeouts подняты с дефолтных ~5с: скачивание видео
+    # (download_to_drive) на 13-50 МБ не успевало → telegram.error.TimedOut
+    # «Ошибка обработки видео: Timed out» (Артём 8 июня). Влияет на ВСЕ
+    # API-вызовы и загрузки (polling использует отдельный request).
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_init)
+        .read_timeout(60)
+        .connect_timeout(30)
+        .write_timeout(60)
+        .pool_timeout(60)
+        .build()
+    )
 
     # ── Billing gate (MUST be first) ──────────────────────────────────────
     # TypeHandler in group=-1 runs before every other handler. If the user
