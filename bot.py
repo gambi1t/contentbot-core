@@ -21157,19 +21157,19 @@ def main():
     )
     logger.info("Weekly stats cron scheduled: Sunday 21:00 MSK")
 
-    # Launch monitor: poll every hour, send digest daily at 10:00 MSK (07:00 UTC)
-    app.job_queue.run_repeating(
-        launch_poll_cron,
-        interval=timedelta(hours=1),
-        first=timedelta(minutes=2),
-        name="launch_monitor_poll",
-    )
-    app.job_queue.run_daily(
-        launch_digest_cron,
-        time=dt_time(hour=7, minute=0, second=0),  # 07:00 UTC = 10:00 MSK
-        name="launch_monitor_digest",
-    )
-    logger.info("Launch monitor cron scheduled: hourly poll + daily digest at 10:00 MSK")
+    # Launch monitor ОТКЛЮЧЁН на боте Максима (8 июня): это фича Артёма
+    # (мониторинг AI-запусков), Максиму не нужна. Hourly-poll синхронно скрёб
+    # YouTube-каналы в процессе бота → периодически «вешал» кнопки. Хендлеры
+    # (digest approve/skip) оставлены, но cron не планируется.
+    # app.job_queue.run_repeating(
+    #     launch_poll_cron, interval=timedelta(hours=1),
+    #     first=timedelta(minutes=2), name="launch_monitor_poll",
+    # )
+    # app.job_queue.run_daily(
+    #     launch_digest_cron,
+    #     time=dt_time(hour=7, minute=0, second=0), name="launch_monitor_digest",
+    # )
+    logger.info("Launch monitor cron DISABLED on Maksim bot (not needed)")
 
     logger.info("Content bot started")
     app.run_polling()
