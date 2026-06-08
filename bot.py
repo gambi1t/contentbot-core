@@ -7178,6 +7178,17 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
                 # пишет «нужен аватар», т.к. ждёт HeyGen avatar_*.mp4).
                 shutil.copy2(source_path, str(proj / "avatar_selfie.mp4"))
                 logger.info(f"[selfie] Saved source + avatar_selfie to {proj.name}/")
+            # Отредактированный транскрипт (word-тайминги) → words.json, чтобы
+            # карточная «Автосборка» жгла субтитры по нему, а не ре-транскрибировала.
+            _sw = data.get("selfie_words")
+            if _sw:
+                try:
+                    import json as _jw
+                    (proj / "words.json").write_text(
+                        _jw.dumps(_sw, ensure_ascii=False), encoding="utf-8")
+                    logger.info(f"[selfie] Saved {len(_sw)} words to {proj.name}/words.json")
+                except Exception as _e:
+                    logger.warning(f"[selfie] words.json save failed: {_e}")
             if subtitled_path and Path(subtitled_path).exists():
                 shutil.copy2(subtitled_path, str(proj / "final_video.mp4"))
                 logger.info(f"[selfie] Saved subtitled as {proj.name}/final_video.mp4")
@@ -13173,7 +13184,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "B-roll (реальное видео + графика + фото).\n"
             "🎯 **Смарт-микс** — видео целиком на весь экран + фото в сплит.\n\n"
             "💡 _Про-монтаж — стабильный шаблон. ИИ-монтаж — умнее, но дороже_\n"
-            "_(+1 вызов Opus) и менее предсказуем._\n\n"
+            "_(+1 вызов Claude) и менее предсказуем._\n\n"
             "📝 «+ субтитры» — word-by-word анимированные титры (CapCut-стиль)"
         )
 
@@ -13350,6 +13361,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 broll_files = _broll_clips_for_plan
                 broll_descriptions = []
                 for bf in broll_files:
+                    # Реальное описание из .json-сайдкара (его пишет tag_clips),
+                    # если есть — чтобы ИИ-монтаж видел СОДЕРЖАНИЕ клипа, а не
+                    # «B-roll #N» (как в селфи-пути). Иначе fallback на имя.
+                    _real_desc = None
+                    try:
+                        _sj = Path(str(bf) + ".json")
+                        if _sj.exists():
+                            import json as _json
+                            _real_desc = (_json.load(open(_sj, encoding="utf-8")).get("description") or "").strip() or None
+                    except Exception:
+                        _real_desc = None
                     try:
                         _bp = subprocess.run(
                             ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
@@ -13357,9 +13379,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             capture_output=True, text=True, timeout=10,
                         )
                         clip_dur = float(_bp.stdout.strip())
-                        broll_descriptions.append(f"{bf.stem.replace('broll_', 'B-roll #')} ({clip_dur:.1f}s)")
+                        _label = _real_desc or bf.stem.replace("broll_", "B-roll #")
+                        broll_descriptions.append(f"{_label} ({clip_dur:.1f}s)")
                     except Exception:
-                        broll_descriptions.append(bf.stem.replace("broll_", "B-roll #"))
+                        broll_descriptions.append(_real_desc or bf.stem.replace("broll_", "B-roll #"))
 
                 # Get audio duration from avatar
                 avatar_files = sorted(proj_dir.glob("avatar_*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
@@ -13374,9 +13397,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     audio_duration = 30.0
 
                 if _ai_montage:
-                    # ИИ-монтаж: Opus читает сценарий + список B-roll и сам
+                    # ИИ-монтаж: Claude читает сценарий + список B-roll и сам
                     # решает раскладку посегментно (avatar_full / split /
-                    # broll_full разной длины). Дороже (+1 вызов Opus), но
+                    # broll_full разной длины). Дороже (+1 вызов Claude), но
                     # умнее для разнотипного B-roll.
                     montage_plan = await asyncio.to_thread(
                         generate_montage_plan,
@@ -13495,9 +13518,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # «Бренд» property set.
             _current_brand = _get_active_brand_name()
             _brand_smart_cfg = BRANDS.get(_current_brand, {}).get("smart_mix")
+            # Готовый отредактированный транскрипт селфи (если карточка из
+            # селфи) — субтитры по нему, без ре-транскрибации (как в селфи-пути).
+            # HeyGen-карточки words.json не имеют → assembler ре-транскрибирует.
+            _sub_words = None
+            try:
+                _wj = proj_dir / "words.json"
+                if _wj.exists():
+                    import json as _jsonw
+                    _sub_words = _jsonw.load(open(_wj, encoding="utf-8")) or None
+            except Exception:
+                _sub_words = None
             final_path = await asyncio.to_thread(
                 assemble_auto_montage, proj_dir,
                 layout=layout, subtitles=with_subs,
+                subtitle_words=_sub_words,
                 montage_plan=montage_plan,
                 brand_name=_current_brand,
                 smart_mix_cfg=_brand_smart_cfg,
