@@ -1117,6 +1117,24 @@ def _maksim_pick_lib_category(data: dict) -> str | None:
     return cat
 
 
+def _card_lib_toggle_keyboard(shown_idx, selected, category):
+    """Toggle-клавиатура карточной библиотеки клипов (рич-формат, как в селфи):
+    цифры под лёгкими превью, ✅ на выбранных, мультивыбор с накоплением по
+    категориям. selected/shown_idx — глобальные индексы в data['broll_clips']."""
+    selected = set(selected or [])
+    row = []
+    for n, gi in enumerate(shown_idx, start=1):
+        mark = "✅" if gi in selected else str(n)
+        row.append(InlineKeyboardButton(mark, callback_data=f"cbroll_tog:{gi}"))
+    rows = [row[:3], row[3:]] if len(row) > 3 else [row]
+    rows.append([InlineKeyboardButton("🔄 Ещё", callback_data=f"broll_lib_cat:{category}")])
+    rows.append([InlineKeyboardButton("📚 Другая категория", callback_data="broll_local_lib")])
+    rows.append([InlineKeyboardButton(
+        f"💾 Сохранить выбранные ({len(selected)})", callback_data="broll_approve")])
+    rows.append([InlineKeyboardButton("◀️ К меню B-roll", callback_data="broll")])
+    return InlineKeyboardMarkup(rows)
+
+
 def _maksim_greeting_text(user_id: int) -> str:
     """Greeting shown above the inline keyboard for Maksim's bot.
 
@@ -15174,6 +15192,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    if query.data.startswith("cbroll_tog:"):
+        # Рич-toggle карточной библиотеки клипов: тоггл выбора + ре-рендер
+        # единой клавиатуры (мультивыбор с накоплением по категориям).
+        gi = int(query.data.split(":")[1])
+        selected = data.get("broll_selected", []) or []
+        if gi in selected:
+            selected.remove(gi)
+            await query.answer("Убран")
+        else:
+            selected.append(gi)
+            await query.answer("Выбран ✅")
+        data["broll_selected"] = selected
+        _save_pending(pending)
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=_card_lib_toggle_keyboard(
+                    data.get("cbroll_shown_idx", []), set(selected),
+                    data.get("cbroll_category", "")),
+            )
+        except Exception:
+            pass
+        return
+
     if query.data.startswith("broll_select:"):
         idx = int(query.data.split(":")[1])
         selected = data.get("broll_selected", [])
@@ -16969,52 +17010,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📚 Категория «{category}»: показываю {len(show_clips)} клипов из {len(all_clips)}."
         )
 
-        for c in new_clip_dicts:
-            try:
-                idx = next(i for i, x in enumerate(data["broll_clips"]) if x.get("id") == c["id"])
-                is_selected = idx in data.get("broll_selected", [])
-                label = f"✅ Выбран #{idx+1} ✓" if is_selected else f"✅ Выбрать #{idx+1}"
-                select_btn = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(label, callback_data=f"broll_select:{idx}")]
-                ])
-                clip_path = Path(c["path"])
-                with open(clip_path, "rb") as f:
-                    await context.bot.send_video(
-                        chat_id=query.message.chat_id,
-                        video=f,
-                        caption=f"#{idx+1} | {category}: {c['filename']}",
-                        supports_streaming=True,
-                        reply_markup=select_btn,
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to send local clip {c['filename']}: {e}")
-
-        # Final action panel — со счётчиком выбранных всего (по всему пулу,
-        # а не только текущей выборке — Артём может смешивать категории).
-        buttons = [
-            [InlineKeyboardButton("💾 Сохранить выбранные в Notion", callback_data="broll_approve")],
-            [InlineKeyboardButton("📚 Другая категория", callback_data="broll_local_lib")],
-            [InlineKeyboardButton("🔀 Обновить выборку", callback_data=f"broll_lib_cat:{category}")],
-            [InlineKeyboardButton("◀️ К меню B-roll", callback_data="broll")],
+        # НОВЫЙ рич-формат (как в селфи): ЛЁГКИЕ превью (media_group) + единая
+        # toggle-клавиатура, вместо тяжёлых полноразмерных send_video каждого
+        # клипа (старый формат + причина лагов).
+        chat_id = query.message.chat_id
+        shown_idx = [
+            next(i for i, x in enumerate(data["broll_clips"]) if x.get("id") == c["id"])
+            for c in new_clip_dicts
         ]
-        n_selected_total = len(data.get("broll_selected", []) or [])
-        footer_text = (
-            "Нажми «Выбрать» под нужными, потом «Сохранить».\n\n"
-            f"✅ Выбрано всего: *{n_selected_total}* клипов"
-            if n_selected_total else
-            "Нажми «Выбрать» под нужными, потом «Сохранить»."
-        )
-        footer_msg = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=footer_text,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-        # Сохраняем id footer-сообщения для live-обновления счётчика при select
-        data["broll_lib_footer_msg_id"] = footer_msg.message_id
-        data["broll_lib_footer_chat_id"] = query.message.chat_id
-        data["broll_lib_footer_category"] = category
+        data["cbroll_shown_idx"] = shown_idx
+        data["cbroll_category"] = category
         _save_pending(pending)
+
+        from selfie.broll_picker import make_clip_preview
+        from telegram import InputMediaVideo
+        import tempfile as _tf, shutil as _sh
+        _prev_dir = Path(_tf.mkdtemp(prefix="cbroll_prev_"))
+        try:
+            async def _mk(_i, _c):
+                return await asyncio.to_thread(
+                    make_clip_preview, _c["path"], str(_prev_dir / f"p_{_i}.mp4"))
+            _res = await asyncio.gather(
+                *[_mk(_i, _c) for _i, _c in enumerate(new_clip_dicts)],
+                return_exceptions=True)
+            _previews = [p for p in _res if isinstance(p, str) and p and Path(p).exists()]
+            if _previews:
+                _media, _handles = [], []
+                try:
+                    for _p in _previews:
+                        _f = open(_p, "rb"); _handles.append(_f)
+                        _media.append(InputMediaVideo(_f))
+                    if len(_media) >= 2:
+                        await context.bot.send_media_group(chat_id=chat_id, media=_media)
+                    else:
+                        await context.bot.send_video(chat_id=chat_id, video=_handles[0])
+                finally:
+                    for _f in _handles:
+                        try:
+                            _f.close()
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning(f"[cbroll] preview failed: {e}")
+        finally:
+            _sh.rmtree(_prev_dir, ignore_errors=True)
+
+        _selected = set(data.get("broll_selected", []) or [])
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(f"📚 «{category}»: тапни номер — выбрать/снять. Можно несколько; "
+                  "«📚 Другая категория» — добрать из другой. Потом «💾 Сохранить»."),
+            reply_markup=_card_lib_toggle_keyboard(shown_idx, _selected, category),
+        )
         return
 
     if query.data == "broll_shooting_list":
