@@ -30,11 +30,22 @@ import json
 import logging
 import os
 import subprocess
+import time
 
 logger = logging.getLogger(__name__)
 
 
 _CLI_TIMEOUT_SEC = 180
+# Авто-ретрай ТОЛЬКО на транзиентные сбои (Артём 9 июня: ИИ-монтаж/сценарий
+# падали с rc=143 из-за рестарт-гонки/таймаута → юзер переделывал). Все вызовы
+# read-only (генерация текста, без сайд-эффектов) → ретрай безопасен.
+#   - TimeoutExpired (CLI не успел за 180с)
+#   - rc 143/137 = SIGTERM/SIGKILL (рестарт, OOM-сосед, kill rate-limit)
+# НЕ ретраим обычные ошибки (auth/bad-args/невалидный JSON) — fail-fast, чтобы
+# не маскировать реальные баги.
+_RETRY_RETCODES = (143, 137)
+_MAX_ATTEMPTS = 2
+_RETRY_BACKOFF_SEC = 3
 _DEFAULT_MAX_BUDGET_USD = "1.0"   # safety cap — подписка покрывает, но fallback метеред пути не выйдет за $1/вызов
 _DEFAULT_DISALLOWED_TOOLS = (
     # Запрещаем все tools — нам нужен только текст-generation, не agent.
@@ -115,18 +126,38 @@ class _Messages:
         if system:
             cmd.extend(["--system-prompt", system])
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=_CLI_TIMEOUT_SEC,
-            )
-        except subprocess.TimeoutExpired as e:
-            raise RuntimeError(
-                f"Claude CLI timeout after {_CLI_TIMEOUT_SEC}s (model={model})"
-            ) from e
+        proc = None
+        for _attempt in range(_MAX_ATTEMPTS):
+            _last = _attempt == _MAX_ATTEMPTS - 1
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=_CLI_TIMEOUT_SEC,
+                )
+            except subprocess.TimeoutExpired as e:
+                if _last:
+                    raise RuntimeError(
+                        f"Claude CLI timeout after {_CLI_TIMEOUT_SEC}s (model={model})"
+                    ) from e
+                logger.warning(
+                    f"[claude] CLI timeout ({_CLI_TIMEOUT_SEC}s) — ретрай "
+                    f"{_attempt + 2}/{_MAX_ATTEMPTS} (model={model})"
+                )
+                time.sleep(_RETRY_BACKOFF_SEC)
+                continue
+            # Транзиентный kill (рестарт/OOM/rate-limit) — ретраим; обычные
+            # коды (auth/bad-args) НЕ ретраим (fail-fast ниже).
+            if proc.returncode in _RETRY_RETCODES and not _last:
+                logger.warning(
+                    f"[claude] CLI rc={proc.returncode} (транзиентный kill) — ретрай "
+                    f"{_attempt + 2}/{_MAX_ATTEMPTS} (model={model})"
+                )
+                time.sleep(_RETRY_BACKOFF_SEC)
+                continue
+            break
 
         if proc.returncode != 0:
             stderr_snip = (proc.stderr or "")[:500]
