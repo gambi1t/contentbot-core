@@ -1082,6 +1082,39 @@ def _assemble_dynamic(
 #  Layout: PRO (script-driven mixed layouts)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── Color consistency (фикс «красноты лица», 8 июня) ──
+# B-roll клипы библиотеки — часто 4K HDR с телефона (bt2020 / HLG arib-std-b67),
+# а аватар-селфи — SDR bt709. Без тонмаппинга HDR-пиксели в сегментах с B-roll
+# перекрашиваются (краснят), а чистые avatar_full — нет → «где-то красное лицо».
+# Фикс: HDR-клипы тонмапим в SDR bt709, и ВСЕ encode тегируем bt709 limited,
+# чтобы concat -c copy не дал рассинхрон матрицы между сегментами.
+_SDR_COLOR_TAGS = [
+    "-colorspace", "bt709", "-color_primaries", "bt709",
+    "-color_trc", "bt709", "-color_range", "tv",
+]
+# HDR→SDR (HLG/PQ bt2020 → bt709 limited). Требует zscale (libzimg) + tonemap —
+# проверено на ffmpeg 6.1.1 сервера.
+_HDR_TONEMAP = (
+    "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+    "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+)
+
+
+def _is_hdr(path) -> bool:
+    """HDR ли клип (bt2020 / HLG / PQ) — нужен ли тонмаппинг в SDR."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=color_transfer,color_primaries,color_space",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = r.stdout.lower()
+        return ("arib-std-b67" in out or "smpte2084" in out or "bt2020" in out)
+    except Exception:
+        return False
+
+
 def _assemble_pro(
     avatar_path: Path,
     broll_paths: list[Path],
@@ -1133,7 +1166,7 @@ def _assemble_pro(
                 f"crop={CANVAS_W}:{CANVAS_H},setsar=1,fps={FPS}"
             ),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p",
+            "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
             "-c:a", "aac", "-b:a", "192k",
             str(avatar_full),
         ],
@@ -1153,7 +1186,7 @@ def _assemble_pro(
                 f"setsar=1,fps={FPS}"
             ),
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p",
+            "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
             "-an",
             str(avatar_half),
         ],
@@ -1209,6 +1242,8 @@ def _assemble_pro(
                 f"crop={CANVAS_W}:{CANVAS_H},setsar=1,fps={FPS}"
             )
 
+        if _is_hdr(clip):
+            vf = _HDR_TONEMAP + "," + vf  # HDR→SDR ДО scale/crop
         _run(
             [
                 "ffmpeg", "-y",
@@ -1216,7 +1251,7 @@ def _assemble_pro(
                 "-t", f"{prep_dur:.1f}",
                 "-vf", vf,
                 "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-pix_fmt", "yuv420p",
+                "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                 str(out),
             ],
             f"pro: scale broll {bi} full-screen {'(blur-bg)' if is_landscape else '(crop)'} ({prep_dur:.0f}s)",
@@ -1281,6 +1316,8 @@ def _assemble_pro(
             )
             tag = f"half (anchor={anchor:.2f})"
 
+        if _is_hdr(clip):
+            vf = _HDR_TONEMAP + "," + vf  # HDR→SDR ДО scale/crop
         _run(
             [
                 "ffmpeg", "-y",
@@ -1288,7 +1325,7 @@ def _assemble_pro(
                 "-t", f"{prep_dur:.1f}",
                 "-vf", vf,
                 "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-pix_fmt", "yuv420p",
+                "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                 str(out),
             ],
             f"pro: scale broll {bi} {tag} ({prep_dur:.0f}s)",
@@ -1317,7 +1354,7 @@ def _assemble_pro(
                     "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(avatar_full),
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p",
+                    "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                     "-c:a", "aac", "-b:a", "192k",
                     str(seg_out),
                 ],
@@ -1337,7 +1374,7 @@ def _assemble_pro(
                     "-i", str(avatar_full),
                     "-map", "0:v", "-map", "1:a",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p",
+                    "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                     "-c:a", "aac", "-b:a", "192k",
                     "-shortest",
                     str(seg_out),
@@ -1360,7 +1397,7 @@ def _assemble_pro(
                     "-filter_complex", "[0:v][1:v]vstack=inputs=2[outv]",
                     "-map", "[outv]", "-map", "2:a",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p",
+                    "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                     "-c:a", "aac", "-b:a", "192k",
                     "-shortest",
                     str(seg_out),
@@ -1376,7 +1413,7 @@ def _assemble_pro(
                     "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(avatar_full),
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                    "-pix_fmt", "yuv420p",
+                    "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                     "-c:a", "aac", "-b:a", "192k",
                     str(seg_out),
                 ],
