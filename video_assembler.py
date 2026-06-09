@@ -51,7 +51,10 @@ AVATAR_OVERSCAN = 1.025
 # because avatar framing differs: Maksim's new avatars (24 May 2026) are framed
 # higher → the legacy 280 clipped the top of his head. Tune per avatar framing.
 DEFAULT_AVATAR_CROP_Y = 280
-_AVATAR_CROP_Y_BY_BRAND = {"maksim": 120}
+# maksim 120→260 (Артём 9 июня: в split голова сидела слишком низко — много
+# воздуха сверху). Больше crop_y = полоса начинается ниже = голова ВЫШЕ в кадре.
+# Это фолбэк когда детект лица не сработал (кепка/ракурс на HeyGen-аватаре).
+_AVATAR_CROP_Y_BY_BRAND = {"maksim": 260}
 
 
 def _avatar_crop_y(brand_name: str) -> int:
@@ -63,7 +66,7 @@ def _avatar_crop_y(brand_name: str) -> int:
 # and compute the crop so the head always has the same headroom in the bottom
 # half — works for any new avatar (5, 6, 7…). Falls back to the per-brand/default
 # constant if OpenCV is missing or no face is found.
-_HEAD_HEADROOM_FRAC = 0.10  # fraction of the half-panel kept as air above the head
+_HEAD_HEADROOM_FRAC = 0.05  # воздух над головой (0.10→0.05, 9 июня: голова была низко)
 
 
 def _crop_y_from_head_fraction(head_top_frac: float) -> int:
@@ -1319,12 +1322,27 @@ def _assemble_pro(
             )
             tag = "half (blur-bg landscape)"
         elif abs(anchor - 0.5) < 0.01:
-            # Portrait/square → centre-crop fast path (old default).
-            vf = (
-                f"scale={CANVAS_W}:{HALF_H}:force_original_aspect_ratio=increase,"
-                f"crop={CANVAS_W}:{HALF_H},setsar=1,fps={FPS}"
-            )
-            tag = "half"
+            # Portrait/square → FACE-AWARE вертикальный якорь (Артём 9 июня:
+            # слепой центр-крип резал голову человека в B-roll). Детектим лицо
+            # (тот же _detect_head_top_fraction) и ставим 960-полосу так, чтобы
+            # голова с небольшим воздухом осталась в кадре. Нет лица → центр-крип
+            # (резать нечего). 960-полоса всегда вмещает голову целиком.
+            _bhf = _detect_head_top_fraction(clip, tmp_dir)
+            _bh_s = int(round(CANVAS_W * _sh / _sw)) if _sw else CANVAS_H
+            if _bhf is not None and _bh_s > HALF_H:
+                _bhr = int(round(0.06 * HALF_H))  # ~58px воздуха над головой
+                _by0 = max(0, min(int(round(_bhf * _bh_s)) - _bhr, _bh_s - HALF_H))
+                vf = (
+                    f"scale={CANVAS_W}:{_bh_s},"
+                    f"crop={CANVAS_W}:{HALF_H}:0:{_by0},setsar=1,fps={FPS}"
+                )
+                tag = f"half (face-anchored y0={_by0})"
+            else:
+                vf = (
+                    f"scale={CANVAS_W}:{HALF_H}:force_original_aspect_ratio=increase,"
+                    f"crop={CANVAS_W}:{HALF_H},setsar=1,fps={FPS}"
+                )
+                tag = "half (center, no face)"
         else:
             # Scale into 1080×1920, then crop a 1080×960 band whose top
             # edge is at y = anchor * (CANVAS_H - HALF_H).
