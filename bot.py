@@ -15282,6 +15282,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if query.data == "avatar_publish":
+        # Аватар + субтитры → публикация, БЕЗ B-roll и без сборки (Артём 9 июня).
+        # Жжём титры на avatar_*.mp4 → final_video.mp4 → кросспостинг находит его.
+        proj = _project_dir(data)
+        if not proj:
+            await query.answer("Не нашёл проект — открой карточку заново", show_alert=True)
+            return
+        _avs = sorted(proj.glob("avatar_*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if not _avs:
+            await query.answer("В проекте нет аватара", show_alert=True)
+            return
+        avatar = _avs[0]
+        try:
+            await query.edit_message_text("✏️ Накладываю субтитры на аватар… ~30-60 сек.")
+        except Exception:
+            pass
+        try:
+            from subtitle_burner import add_subtitles_to_video
+            from video_assembler import FONT_DIR as _FD
+            _final = proj / "final_video.mp4"
+            await asyncio.to_thread(
+                add_subtitles_to_video,
+                str(avatar),
+                output_path=str(_final),
+                font_dir=(str(_FD) if _FD.exists() else None),
+            )
+        except Exception as e:
+            logger.error(f"[avatar_publish] subtitles failed: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Не удалось наложить субтитры: {e}")
+            return
+        _cid = (data.get("notion_page_id") or "")[:20]
+        await query.edit_message_text(
+            "✅ Субтитры наложены — видео готово (аватар + титры, без B-roll).\n\n"
+            "Жми «Опубликовать» → выбери соцсети.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📢 Опубликовать в соцсети", callback_data=f"crosspost:{_cid}")],
+                [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{_cid}")],
+            ]),
+        )
+        return
+
     if query.data.startswith("broll_select:"):
         idx = int(query.data.split(":")[1])
         selected = data.get("broll_selected", [])
@@ -18301,6 +18342,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ]
                     if not data.get("broll_approved"):
                         buttons.append([InlineKeyboardButton("🎬 Подобрать B-roll", callback_data="broll")])
+                    # Быстрый путь: аватар + субтитры → публикация, БЕЗ B-roll
+                    # (Артём 9 июня: сценарий → аватар озвучивает → титры → соцсети).
+                    buttons.append([InlineKeyboardButton(
+                        "✏️ Субтитры + публикация (без B-roll)", callback_data="avatar_publish")])
                     if NOTION_GUIDES_DB and not data.get("guide_created"):
                         buttons.append([InlineKeyboardButton("📎 Создать гайд", callback_data="create_guide")])
                     buttons.append([InlineKeyboardButton("📥 Скачать материалы", callback_data="download_project")])
