@@ -368,7 +368,12 @@ def _build_ken_burns_clips(
     every shot.
     """
     if variants is None:
-        variants = ["zoom_in", "zoom_in_left", "zoom_in_right", "zoom_in_up"]
+        # Диагонали в ротации (оживление) + центр/ось для разнообразия.
+        # Чередуются по индексу фото → детерминировано и разнообразно.
+        variants = [
+            "zoom_in_br", "zoom_in_tl", "zoom_in_tr", "zoom_in_bl",
+            "zoom_in", "zoom_in_right", "zoom_in_up", "zoom_in_left",
+        ]
     if not variants:
         variants = ["zoom_in"]
     clips: list[Path] = []
@@ -630,22 +635,38 @@ def _ken_burns_filter(duration_frames: int, variant: str) -> str:
         )
         return base + zoompan
 
-    if variant == "zoom_in_left":
-        x_expr = "0"
-        y_expr = "ih/2-(ih/zoom/2)"
-    elif variant == "zoom_in_right":
-        x_expr = "iw-(iw/zoom)"
-        y_expr = "ih/2-(ih/zoom/2)"
-    elif variant == "zoom_in_up":
-        x_expr = "iw/2-(iw/zoom/2)"
-        y_expr = "0"
-    else:  # zoom_in (center)
-        x_expr = "iw/2-(iw/zoom/2)"
-        y_expr = "ih/2-(ih/zoom/2)"
+    # ── Общие варианты: EASED зум + EASED диагональный пан ──
+    # Было: линейный зум (z=zoom+step) + статичный пан по одной оси → «просто
+    # приближение». Research (8 июня): «неживость» = линейность + отсутствие
+    # диагонали. Фикс — smoothstep ease-in-out (движение как камера, не
+    # механика) + диагональные варианты (протяжка к углу).
+    #   t = on/(N-1) ∈ [0,1];  E = smoothstep(t) = t²(3-2t).
+    #   zoom = 1 + zr·E  (плавно трогается и тормозит).
+    #   окно [fx,fy] доля смещения [0..1] едет start→end по E (диагональ).
+    nm1 = max(duration_frames - 1, 1)
+    z_range = z_end - 1.0
+    T = f"min(on/{nm1},1)"
+    E = f"({T}*{T}*(3-2*{T}))"  # smoothstep ease-in-out
+    # (fx_start, fy_start, fx_end, fy_end): доля смещения окна по X/Y.
+    _kb_motion = {
+        "zoom_in_br": (0.12, 0.12, 0.88, 0.88),  # ↘ диагональ
+        "zoom_in_bl": (0.88, 0.12, 0.12, 0.88),  # ↙
+        "zoom_in_tr": (0.12, 0.88, 0.88, 0.12),  # ↗
+        "zoom_in_tl": (0.88, 0.88, 0.12, 0.12),  # ↖
+        "zoom_in_left":  (0.5, 0.5, 0.0, 0.5),   # ← (тоже eased)
+        "zoom_in_right": (0.5, 0.5, 1.0, 0.5),   # →
+        "zoom_in_up":    (0.5, 0.5, 0.5, 0.0),   # ↑
+        "zoom_in":       (0.5, 0.5, 0.5, 0.5),   # центр (eased зум без пана)
+    }
+    fxs, fys, fxe, fye = _kb_motion.get(variant, _kb_motion["zoom_in"])
+    dx, dy = fxe - fxs, fye - fys
+    x_expr = f"({fxs:.3f}+({dx:.3f})*{E})*(iw-iw/zoom)"
+    y_expr = f"({fys:.3f}+({dy:.3f})*{E})*(ih-ih/zoom)"
+    z_expr = f"1+{z_range:.4f}*{E}"
 
     zoompan = (
         f"zoompan="
-        f"z='min(zoom+{z_step:.6f},{z_end})':"
+        f"z='{z_expr}':"
         f"d={duration_frames}:"
         f"x='{x_expr}':y='{y_expr}':"
         f"s={CANVAS_W}x{CANVAS_H}:fps={FPS}"
