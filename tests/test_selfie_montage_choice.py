@@ -33,27 +33,29 @@ def _assert(cond, msg, errors):
 def main():
     errors = []
 
-    print("\n[_MONTAGE_FORMATS — 5 форматов]")
-    _assert(set(sh._MONTAGE_FORMATS) == {"m", "s", "d", "p", "a"},
-            f"5 кодов форматов, got {set(sh._MONTAGE_FORMATS)}", errors)
-    _assert(tuple(sh._MONTAGE_ORDER) == ("m", "s", "d", "p", "a"),
-            "порядок меню m,s,d,p,a", errors)
+    print("\n[_MONTAGE_FORMATS — 6 форматов (+ Full-screen)]")
+    _assert(set(sh._MONTAGE_FORMATS) == {"m", "s", "d", "p", "a", "f"},
+            f"6 кодов форматов, got {set(sh._MONTAGE_FORMATS)}", errors)
+    _assert(tuple(sh._MONTAGE_ORDER) == ("m", "s", "d", "p", "a", "f"),
+            "порядок меню m,s,d,p,a,f", errors)
 
-    print("\n[_SELFIE_LAYOUT_MAP — как card-путь]")
-    expected = {"s": "split", "d": "dynamic", "p": "pro", "a": "pro", "m": "smart"}
+    print("\n[_SELFIE_LAYOUT_MAP — как card-путь (+ fullscreen)]")
+    expected = {"s": "split", "d": "dynamic", "p": "pro", "a": "pro",
+                "m": "smart", "f": "fullscreen"}
     _assert(sh._SELFIE_LAYOUT_MAP == expected,
             f"маппинг код→layout, got {sh._SELFIE_LAYOUT_MAP}", errors)
+    _assert(sh._SELFIE_LAYOUT_MAP["f"] == "fullscreen", "f → fullscreen", errors)
 
     print("\n[_montage_format_keyboard — callback_data]")
     kb = sh._montage_format_keyboard()
     flat = [b for row in kb.inline_keyboard for b in row]
     cbs = [b.callback_data for b in flat]
-    for c in ("m", "s", "d", "p", "a"):
+    for c in ("m", "s", "d", "p", "a", "f"):
         _assert(f"selfie_broll:asm:{c}" in cbs,
                 f"есть кнопка selfie_broll:asm:{c}", errors)
     _assert(any(b.callback_data == "selfie_broll:back" for b in flat),
             "есть кнопка «Назад к B-roll»", errors)
-    _assert(len(flat) == 6, f"5 форматов + назад = 6 кнопок, got {len(flat)}", errors)
+    _assert(len(flat) == 7, f"6 форматов + назад = 7 кнопок, got {len(flat)}", errors)
 
     print("\n[ИИ-монтаж — через Claude, не Opus]")
     ai_name, ai_desc = sh._MONTAGE_FORMATS["a"]

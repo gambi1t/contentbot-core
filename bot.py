@@ -13216,6 +13216,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🎯 Смарт-микс", callback_data=f"card_asm_go:m:0:{cid}"),
                 InlineKeyboardButton("🎯 + субтитры", callback_data=f"card_asm_go:m:1:{cid}"),
             ],
+            [
+                InlineKeyboardButton("📺 Full-screen", callback_data=f"card_asm_go:f:0:{cid}"),
+                InlineKeyboardButton("📺 + субтитры", callback_data=f"card_asm_go:f:1:{cid}"),
+            ],
             [InlineKeyboardButton("◀️ Назад", callback_data=f"notion_card:{cid}")],
         ])
         full_menu_text = (
@@ -13226,7 +13230,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🧠 **ИИ-монтаж** — Claude читает сценарий и B-roll, сам решает "
             "где полный экран, где 50/50, где сменить план. Для разнотипного "
             "B-roll (реальное видео + графика + фото).\n"
-            "🎯 **Смарт-микс** — видео целиком на весь экран + фото в сплит.\n\n"
+            "🎯 **Смарт-микс** — видео целиком на весь экран + фото в сплит.\n"
+            "📺 **Full-screen** — хук-аватар → ВЕСЬ B-roll на полный экран → "
+            "аватар-CTA. Без сплитов (когда B-roll важнее лица).\n\n"
             "💡 _Про-монтаж — стабильный шаблон. ИИ-монтаж — умнее, но дороже_\n"
             "_(+1 вызов Claude) и менее предсказуем._\n\n"
             "📝 «+ субтитры» — word-by-word анимированные титры (CapCut-стиль)"

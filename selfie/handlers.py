@@ -1512,12 +1512,14 @@ _MONTAGE_FORMATS = {
     "d": ("🎥 Динамический", "аватар ↔ B-roll на весь экран"),
     "p": ("🎬 Про-монтаж", "хук-аватар → 50/50 → CTA (фикс. формат)"),
     "a": ("🧠 ИИ-монтаж", "Claude читает сценарий и B-roll, сам решает раскладку"),
+    "f": ("📺 Full-screen", "хук-аватар → ВЕСЬ B-roll на полный экран → аватар-CTA (без сплитов)"),
 }
 # Порядок кнопок в меню.
-_MONTAGE_ORDER = ("m", "s", "d", "p", "a")
+_MONTAGE_ORDER = ("m", "s", "d", "p", "a", "f")
 # Код кнопки → layout для assemble_auto_montage. 'a' (ИИ) тоже идёт через 'pro',
 # но с планом от Claude (generate_montage_plan), а не детерминированным bookend.
-_SELFIE_LAYOUT_MAP = {"s": "split", "d": "dynamic", "p": "pro", "a": "pro", "m": "smart"}
+_SELFIE_LAYOUT_MAP = {"s": "split", "d": "dynamic", "p": "pro", "a": "pro",
+                      "m": "smart", "f": "fullscreen"}
 
 
 def _montage_format_keyboard() -> InlineKeyboardMarkup:
