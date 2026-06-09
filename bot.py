@@ -1130,7 +1130,7 @@ def _card_lib_toggle_keyboard(shown_idx, selected, category):
     rows.append([InlineKeyboardButton("🔄 Ещё", callback_data=f"broll_lib_cat:{category}")])
     rows.append([InlineKeyboardButton("📚 Другая категория", callback_data="broll_local_lib")])
     rows.append([InlineKeyboardButton(
-        f"💾 Сохранить выбранные ({len(selected)})", callback_data="broll_approve")])
+        f"💾 Сохранить выбранные ({len(selected)})", callback_data="cbroll_save")])
     rows.append([InlineKeyboardButton("◀️ К меню B-roll", callback_data="broll")])
     return InlineKeyboardMarkup(rows)
 
@@ -13402,6 +13402,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         broll_descriptions.append(_real_desc or bf.stem.replace("broll_", "B-roll #"))
 
+                # Фото проекта (Ken Burns) — pro-план ДОЛЖЕН их учитывать, иначе
+                # при фото-only B-roll план выходил «только аватар» (Артём 9 июня).
+                # Порядок [видео, затем фото] = как ассемблер строит broll_paths.
+                from video_assembler import _find_project_photos as _fpp
+                _proj_photos = _fpp(proj_dir)
+                for _ph in _proj_photos:
+                    _pd = None
+                    try:
+                        _pj = Path(str(_ph) + ".json")
+                        if _pj.exists():
+                            import json as _json2
+                            _pd = (_json2.load(open(_pj, encoding="utf-8")).get("description") or "").strip() or None
+                    except Exception:
+                        _pd = None
+                    broll_descriptions.append(f"{_pd or _ph.stem} (фото, ~3с)")
+
                 # Get audio duration from avatar
                 avatar_files = sorted(proj_dir.glob("avatar_*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
                 if avatar_files:
@@ -13427,8 +13443,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Детерминированный план — одобренный формат роликов
                     # Максима: хук-аватар на весь экран → split-вставки 50/50
                     # подряд → аватар-CTA. Без LLM-угадайки раскладок.
+                    # Видео + фото — иначе при фото-only план = только аватар.
                     montage_plan = build_bookend_montage_plan(
-                        audio_duration, len(broll_files),
+                        audio_duration, len(broll_files) + len(_proj_photos),
                     )
                 plan_summary = " → ".join(
                     f"{s['layout'].replace('_full','').replace('avatar','AV').replace('broll','BR')}"
@@ -15213,6 +15230,56 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
+        return
+
+    if query.data == "cbroll_save":
+        # Сохранить выбранные клипы карточной библиотеки В ПРОЕКТ карточки
+        # (broll_*.mp4 / photos/) — чтобы сборка их увидела. НЕ broll_approve
+        # (тот занят draft-системой и для библиотеки молча терял выбор —
+        # Артём 9 июня: 6 видео не сохранялись). Переиспользует selfie
+        # prepare_broll_in_project.
+        selected = data.get("broll_selected", []) or []
+        clips = data.get("broll_clips", []) or []
+        if not selected:
+            await query.answer("Ничего не выбрано", show_alert=True)
+            return
+        proj = _project_dir(data)
+        if not proj:
+            await query.edit_message_text(
+                "⚠️ Не нашёл проект карточки. Открой карточку заново и повтори.")
+            return
+        from selfie.broll_picker import BrollItem, prepare_broll_in_project
+        import shutil as _sh
+        # Прежний B-roll проекта чистим → проект = ровно текущий выбор (иначе
+        # копились бы старые/фолбэк-фото).
+        for _f in proj.glob("broll_*.mp4"):
+            try:
+                _f.unlink()
+            except Exception:
+                pass
+        _sh.rmtree(proj / "photos", ignore_errors=True)
+        items = []
+        for gi in selected:
+            if 0 <= gi < len(clips):
+                _p = Path(clips[gi]["path"])
+                if not _p.exists():
+                    continue
+                _kind = "image" if _p.suffix.lower() in PHOTO_LIB_EXTS else "video"
+                items.append(BrollItem(kind=_kind, source=_p, label=clips[gi].get("filename")))
+        if not items:
+            await query.edit_message_text("⚠️ Выбранные файлы не найдены на диске.")
+            return
+        await asyncio.to_thread(prepare_broll_in_project, items, proj)
+        _nv = sum(1 for it in items if it.kind == "video")
+        _np = sum(1 for it in items if it.kind == "image")
+        logger.info(f"[cbroll_save] saved {_nv}видео+{_np}фото в {proj.name}")
+        await query.edit_message_text(
+            f"✅ Сохранено в проект: {_nv} видео + {_np} фото.\n\n"
+            "Теперь в карточке жми «🎬 Автосборка» — они войдут в ролик.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ К меню B-roll", callback_data="broll")],
+            ]),
+        )
         return
 
     if query.data.startswith("broll_select:"):
