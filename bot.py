@@ -1135,6 +1135,32 @@ def _card_lib_toggle_keyboard(shown_idx, selected, category):
     return InlineKeyboardMarkup(rows)
 
 
+def _broll_review_text_kb(data):
+    """Текст «Моё выбранное» + клавиатура с удалением — для карточного пути.
+    Показывает ВСЕ выбранные B-roll (фото+клипы из broll_selected) с «🗑 N».
+    Артём 9 июня: до сохранения не было где посмотреть/убрать набор."""
+    selected = data.get("broll_selected", []) or []
+    clips = data.get("broll_clips", []) or []
+    items = [(gi, clips[gi]) for gi in selected if 0 <= gi < len(clips)]
+    if not items:
+        return ("📋 Пока ничего не выбрано.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("➕ Выбрать B-roll", callback_data="broll")]]))
+    lines = [f"📋 Моё выбранное ({len(items)}):\n"]
+    rm_row = []
+    for n, (gi, c) in enumerate(items, 1):
+        _p = c.get("path", "")
+        _photo = Path(_p).suffix.lower() in PHOTO_LIB_EXTS
+        _kind = "📷 фото" if _photo else "🎞 видео"
+        _cat = c.get("category") or (c.get("source") if c.get("source") not in ("local", None) else None) or Path(_p).stem
+        lines.append(f"{n}. {_kind} — {_cat}")
+        rm_row.append(InlineKeyboardButton(f"🗑 {n}", callback_data=f"broll_rm:{gi}"))
+    lines.append("\nЖми «🗑 N» чтобы убрать. Потом «💾 Сохранить».")
+    rows = [rm_row[i:i + 4] for i in range(0, len(rm_row), 4)]
+    rows.append([InlineKeyboardButton("➕ Добавить ещё", callback_data="broll")])
+    rows.append([InlineKeyboardButton("💾 Сохранить выбранные", callback_data="cbroll_save")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
 def _maksim_greeting_text(user_id: int) -> str:
     """Greeting shown above the inline keyboard for Maksim's bot.
 
@@ -15118,6 +15144,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     buttons.append([InlineKeyboardButton("🔍 Искать на стоках", callback_data="broll_stock")])
                 if elevenlabs_client and not data.get("voice_parts"):
                     buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
+                _n_sel_now = len(data.get("broll_selected", []) or [])
+                if _n_sel_now:
+                    buttons.append([InlineKeyboardButton(
+                        f"📋 Моё выбранное ({_n_sel_now})", callback_data="broll_review")])
                 buttons.append([InlineKeyboardButton("✅ Готово", callback_data="finish")])
 
                 await _send_or_edit(
@@ -15228,6 +15258,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     data.get("cbroll_shown_idx", []), set(selected),
                     data.get("cbroll_category", "")),
             )
+        except Exception:
+            pass
+        return
+
+    if query.data == "broll_review":
+        # «Моё выбранное» — единый обзор всего набора (фото+клипы) с удалением.
+        _txt, _kb = _broll_review_text_kb(data)
+        try:
+            await query.edit_message_text(_txt, reply_markup=_kb)
+        except Exception:
+            await context.bot.send_message(query.message.chat_id, _txt, reply_markup=_kb)
+        return
+
+    if query.data.startswith("broll_rm:"):
+        _gi = int(query.data.split(":")[1])
+        _sel = data.get("broll_selected", []) or []
+        if _gi in _sel:
+            _sel.remove(_gi)
+            data["broll_selected"] = _sel
+            _save_pending(pending)
+            await query.answer("Убрано")
+        else:
+            await query.answer("Уже убрано")
+        _txt, _kb = _broll_review_text_kb(data)
+        try:
+            await query.edit_message_text(_txt, reply_markup=_kb)
         except Exception:
             pass
         return

@@ -140,6 +140,8 @@ def build_picker_keyboard(items: list[BrollItem]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("🎨 Сгенерировать графику (AI)", callback_data="selfie_broll:gen")])
 
     if items:
+        rows.append([InlineKeyboardButton(
+            f"📋 Моё выбранное ({len(items)})", callback_data="selfie_broll:review")])
         rows.append([InlineKeyboardButton("🗑 Убрать последний", callback_data="selfie_broll:remove_last")])
         rows.append([
             InlineKeyboardButton(

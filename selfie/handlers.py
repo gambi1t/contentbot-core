@@ -877,6 +877,34 @@ async def _pick_and_mix(
         )
 
 
+async def _show_broll_review(query, user_id: int) -> None:
+    """«Моё выбранное» — обзор всего набора (фото+клипы) + удаление «🗑 N».
+    Артём 9 июня: до «Готово» не было где посмотреть/убрать набор."""
+    data = _PENDING.get(user_id) or {}
+    items = data.get("selfie_broll_items", []) or []
+    if not items:
+        await query.edit_message_text(
+            "📋 Пока ничего не выбрано.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Назад к выбору", callback_data="selfie_broll:back")]]))
+        return
+    lines = [f"📋 Моё выбранное ({len(items)}):\n"]
+    rm_row = []
+    for n, it in enumerate(items, 1):
+        kind = "📷 фото" if it.get("kind") == "image" else "🎞 видео"
+        label = it.get("label") or ""
+        if not label or (isinstance(label, str) and label.startswith("library/")):
+            label = Path(it.get("source", "")).stem
+        lines.append(f"{n}. {kind} — {label}")
+        rm_row.append(InlineKeyboardButton(f"🗑 {n}", callback_data=f"selfie_broll:rm:{n - 1}"))
+    lines.append("\nЖми «🗑 N» чтобы убрать. Потом «Готово».")
+    rows = [rm_row[i:i + 4] for i in range(0, len(rm_row), 4)]
+    rows.append([InlineKeyboardButton("➕ Добавить ещё", callback_data="selfie_broll:back")])
+    rows.append([InlineKeyboardButton(
+        f"✅ Готово ({len(items)} выбрано)", callback_data="selfie_broll:done")])
+    await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
+
+
 async def _show_broll_picker_screen(query_or_msg, user_id: int) -> None:
     """Re-render the main B-roll picker (sources + selected list)."""
     data = _PENDING[user_id]
@@ -1319,6 +1347,21 @@ async def handle_broll_callback(
             items_raw.pop()
             _SAVE_PENDING(_PENDING)
         await _show_broll_picker_screen(query, user_id)
+        return True
+
+    if action == "review":
+        # «Моё выбранное» — обзор всего набора (фото+клипы) с удалением «🗑 N».
+        await _show_broll_review(query, user_id)
+        return True
+
+    if action == "rm":
+        idx = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else -1
+        items_raw = data.get("selfie_broll_items", []) or []
+        if 0 <= idx < len(items_raw):
+            items_raw.pop(idx)
+            _SAVE_PENDING(_PENDING)
+            await query.answer("Убрано")
+        await _show_broll_review(query, user_id)
         return True
 
     if action == "back":
