@@ -114,6 +114,7 @@ class _Messages:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = self._client._oauth_token
         # CLI требует HOME для записи session-state.
         env.setdefault("HOME", "/tmp")
+        env.update(getattr(self._client, "_extra_env", {}) or {})
 
         cmd: list[str] = [
             "claude", "-p", user_text,
@@ -126,6 +127,7 @@ class _Messages:
         if system:
             cmd.extend(["--system-prompt", system])
 
+        _timeout = getattr(self._client, "_timeout_sec", _CLI_TIMEOUT_SEC)
         proc = None
         for _attempt in range(_MAX_ATTEMPTS):
             _last = _attempt == _MAX_ATTEMPTS - 1
@@ -135,15 +137,15 @@ class _Messages:
                     env=env,
                     capture_output=True,
                     text=True,
-                    timeout=_CLI_TIMEOUT_SEC,
+                    timeout=_timeout,
                 )
             except subprocess.TimeoutExpired as e:
                 if _last:
                     raise RuntimeError(
-                        f"Claude CLI timeout after {_CLI_TIMEOUT_SEC}s (model={model})"
+                        f"Claude CLI timeout after {_timeout}s (model={model})"
                     ) from e
                 logger.warning(
-                    f"[claude] CLI timeout ({_CLI_TIMEOUT_SEC}s) — ретрай "
+                    f"[claude] CLI timeout ({_timeout}s) — ретрай "
                     f"{_attempt + 2}/{_MAX_ATTEMPTS} (model={model})"
                 )
                 time.sleep(_RETRY_BACKOFF_SEC)
@@ -239,12 +241,20 @@ class SubscriptionClient:
     вызовы не идут по pay-per-token.
     """
 
-    def __init__(self, oauth_token: str):
+    def __init__(self, oauth_token: str, timeout_sec: int = _CLI_TIMEOUT_SEC,
+                 extra_env: dict | None = None):
         if not oauth_token or not isinstance(oauth_token, str):
             raise ValueError(
                 "SubscriptionClient requires non-empty CLAUDE_CODE_OAUTH_TOKEN"
             )
         self._oauth_token = oauth_token
+        # 180с дефолт под короткие бот-вызовы; тяжёлые single-shot генерации
+        # (HF-сцена ~13KB HTML) передают свой (10 июня: 2×180с не хватило).
+        self._timeout_sec = int(timeout_sec)
+        # Доп. env для CLI-процесса. Кейс 10 июня: MAX_THINKING_TOKENS=0 —
+        # дефолтный extended thinking sonnet-4-6 на сервере съедал >480с на
+        # сцену (без него 74с). Дефолт None — бот-вызовы не трогаем.
+        self._extra_env = dict(extra_env) if extra_env else {}
         self.messages = _Messages(self)
 
 

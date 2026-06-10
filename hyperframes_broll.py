@@ -486,6 +486,252 @@ def _build_scene_prompt_for_attempt(storyboard: dict, scene_id: str,
     return base + sandbox_note
 
 
+# ── Single-shot build (10 июня) ──────────────────────────────────────
+# Агентный headless-build (`claude -p` + Read/Write tools) зависал на сервере
+# 18/18: Write вне workspace → permission-тупик в -p (некому подтвердить).
+# Прод-паттерн для одно-файловых выходов (Remotion AI docs, screenshot-to-code,
+# v0): ОДНА completion без инструментов, файл пишет вызывающий код. Вход тот же,
+# что у доказанных десктоп-субагентов (reference_pack + index.html), только
+# инлайном в промпт. Транспорт — SubscriptionClient (проверенный путь бота,
+# с авто-ретраем на транзиентные сбои).
+
+HF_SINGLESHOT_MODEL = os.getenv("HF_SINGLESHOT_MODEL", "claude-sonnet-4-6")
+SINGLESHOT_MAX_TOKENS = 16000  # сцена ~13KB ≈ 4-5k токенов, запас ×3
+
+
+def _load_inline_refs() -> tuple[str, str]:
+    """(reference_pack, index_sample) из HF_PROJECT — инлайн-контекст промпта."""
+    ref_p = HF_PROJECT / REFERENCE_PACK_FILE
+    idx_p = HF_PROJECT / "index.html"
+    if not ref_p.exists():
+        raise HyperFramesBrollError(f"Нет {ref_p} — single-shot промпт неполон")
+    if not idx_p.exists():
+        raise HyperFramesBrollError(f"Нет {idx_p} — нет образца @font-face")
+    return (ref_p.read_text(encoding="utf-8", errors="replace"),
+            idx_p.read_text(encoding="utf-8", errors="replace"))
+
+
+def _extract_html(text: str) -> str:
+    """Ответ модели → чистый HTML-документ.
+
+    Снимает ```-фенсы и прозу до/после. Требует и <html, и </html> —
+    иначе ValueError (обрезанный ответ → пусть сработает retry)."""
+    t = (text or "").strip()
+    if "```" in t:
+        # содержимое первого фенс-блока (```html\n...\n```)
+        parts = t.split("```")
+        if len(parts) >= 3:
+            inner = parts[1]
+            if inner.startswith(("html\n", "html\r\n")):
+                inner = inner.split("\n", 1)[1]
+            t = inner.strip()
+    low = t.lower()
+    start = low.find("<!doctype")
+    if start < 0:
+        start = low.find("<html")
+    end = low.rfind("</html>")
+    if start < 0 or end < 0 or end <= start:
+        raise ValueError(
+            f"ответ не содержит полного HTML-документа "
+            f"(start={start}, end={end}, len={len(t)})"
+        )
+    return t[start:end + len("</html>")]
+
+
+def _build_scene_singleshot_prompt(storyboard: dict, scene_id: str,
+                                   prev_html: str | None = None,
+                                   issues: str | None = None) -> str:
+    """Самодостаточный промпт одной сцены: ВСЁ инлайном, никаких инструментов.
+
+    issues → режим regenerate: прошлый HTML + дефекты, вернуть исправленный
+    ПОЛНЫЙ документ (не патч)."""
+    from style_contract import load_style_contract, inline_for_prompt
+    style_block = inline_for_prompt(load_style_contract())
+    ref_pack, idx_sample = _load_inline_refs()
+    sc = _scene_contract(storyboard, scene_id)
+
+    fix_block = ""
+    if issues:
+        fix_block = f"""
+🔧 ЭТО ПОВТОРНАЯ ГЕНЕРАЦИЯ. Прошлая версия сцены имела ДЕФЕКТЫ:
+{issues}
+
+ПРОШЛАЯ ВЕРСИЯ (исправь её проблемы, сохрани сильные стороны):
+{prev_html or "(не сохранилась)"}
+
+Верни ИСПРАВЛЕННЫЙ ПОЛНЫЙ документ целиком.
+"""
+
+    return f"""Ты — моушн-дизайнер студии HyperFrames. Создай РОВНО ОДНУ \
+композицию `{scene_id}` (вертикаль 1080×1920, 5 секунд, 30fps) по контракту \
+из утверждённой раскадровки.
+
+КОНТРАКТ ЭТОЙ СЦЕНЫ ({scene_id}):
+{json.dumps(sc, ensure_ascii=False, indent=1)}
+
+ГЛАВНОЕ ПРАВИЛО АРХЕТИПА:
+Реализуй ИМЕННО business_archetype / hf_technique / visual_style /
+motion_family из контракта выше. primary_text — главный текст на экране.
+
+{style_block}
+
+══════ ПРАВИЛА HYPERFRAMES (выжимка скилла — это ВСЁ, что нужно) ══════
+{ref_pack}
+
+══════ ОБРАЗЕЦ КОМПОЗИЦИИ (структура + @font-face, скопируй шрифты дословно) ══════
+{idx_sample}
+══════ КОНЕЦ ОБРАЗЦА ══════
+{fix_block}
+📤 ФОРМАТ ОТВЕТА (строго):
+- Выведи ТОЛЬКО полный HTML-документ: первый символ ответа — `<!doctype html>`,
+  последний — `</html>`.
+- БЕЗ markdown-фенсов, БЕЗ пояснений до или после, БЕЗ комментариев «вот сцена».
+- Документ самодостаточен: инлайн CSS/JS, gsap.timeline({{paused:true}}),
+  регистрация window.__timelines["{scene_id}"], data-composition-id="{scene_id}",
+  data-width="1080" data-height="1920". Никаких Math.random/Date.now/repeat:-1,
+  никаких внешних URL кроме разрешённых CDN."""
+
+
+def _singleshot_llm_client():
+    """LLM-клиент: подписка (SubscriptionClient, как у бота) или API-fallback.
+
+    Таймаут свой (НЕ ботовский 180с): полный HTML сцены ~13KB генерится
+    дольше (smoke 10 июня: 2×180с не хватило)."""
+    tok = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    timeout_s = int(os.getenv("HF_SINGLESHOT_TIMEOUT_S", "480"))
+    if tok:
+        from claude_subscription import SubscriptionClient
+        # MAX_THINKING_TOKENS=0: смок 10 июня — с дефолтным thinking сцена
+        # НЕ влезала в 2×480с, без него та же сцена = 74с (~110 ток/с).
+        return SubscriptionClient(
+            tok, timeout_sec=timeout_s,
+            extra_env={"MAX_THINKING_TOKENS": "0"},
+        )
+    import anthropic
+    return anthropic.Anthropic(api_key=_anthropic_key())
+
+
+def _singleshot_generate_scene(storyboard: dict, scene_id: str,
+                               prev_html: str | None = None,
+                               issues: str | None = None) -> str:
+    """Один вызов LLM → готовый HTML сцены (или ValueError/RuntimeError)."""
+    prompt = _build_scene_singleshot_prompt(
+        storyboard, scene_id, prev_html=prev_html, issues=issues)
+    client = _singleshot_llm_client()
+    resp = client.messages.create(
+        model=HF_SINGLESHOT_MODEL,
+        max_tokens=SINGLESHOT_MAX_TOKENS,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return _extract_html(resp.content[0].text)
+
+
+async def _run_build_phase_singleshot(storyboard: dict, job) -> float:
+    """Параллельный single-shot build: semaphore-bounded, regenerate на дефектах.
+
+    На каждую сцену до MAX_SCENE_BUILD_ATTEMPTS попыток; невалидный ответ
+    (обрыв/каркас/недетерминизм) идёт в СЛЕДУЮЩУЮ попытку как «прошлая версия
+    + дефекты» — модель чинит, а не гадает заново. Валидный → promote в
+    HF_PROJECT (атомарно через JobContext)."""
+    import asyncio
+
+    concurrency = _check_ratelimit_before_batch(default_concurrency=int(
+        os.getenv("HF_BUILD_CONCURRENCY", "2")))
+    sem = asyncio.Semaphore(concurrency)
+    all_scene_ids = [f"scene_{i:02d}" for i in range(1, N_INSERTS + 1)]
+
+    async def build_one(sid: str) -> bool:
+        prev_html: str | None = None
+        prev_issues: str | None = None
+        for attempt_n in range(1, MAX_SCENE_BUILD_ATTEMPTS + 1):
+            t0 = time.time()
+            async with sem:
+                try:
+                    html = await asyncio.to_thread(
+                        _singleshot_generate_scene, storyboard, sid,
+                        prev_html, prev_issues)
+                except (ValueError, RuntimeError) as e:
+                    logger.warning(
+                        f"[hf_broll] {sid} attempt {attempt_n}: LLM-вызов: {e}")
+                    prev_issues = f"прошлый ответ не разобрался: {e}"
+                    prev_html = None
+                    continue
+            adir = job.attempt_dir(sid, attempt_n)
+            target = adir / f"{sid}.html"
+            target.write_text(html, encoding="utf-8")
+            ok, iss = _scene_valid_minimal(target, sid)
+            dur = time.time() - t0
+            if ok:
+                job.promote(sid, target, HF_PROJECT)
+                job.finalize_scene(sid, "ok", attempt_n=attempt_n,
+                                   duration_s=dur)
+                logger.info(
+                    f"[hf_broll] {sid} ok @ attempt {attempt_n} "
+                    f"(single-shot, {dur:.0f}s, {len(html)} chars)")
+                return True
+            logger.warning(
+                f"[hf_broll] {sid} attempt {attempt_n}: невалиден ({iss})")
+            prev_html, prev_issues = html, "; ".join(iss)
+        job.finalize_scene(sid, "failed",
+                           reason=f"{MAX_SCENE_BUILD_ATTEMPTS} попыток исчерпаны")
+        return False
+
+    results = await asyncio.gather(*(build_one(s) for s in all_scene_ids))
+    failed = [sid for sid, ok in zip(all_scene_ids, results) if not ok]
+    if failed:
+        raise HyperFramesBrollError(
+            f"{len(failed)} сцен не сгенерированы за {MAX_SCENE_BUILD_ATTEMPTS} "
+            f"попыток (single-shot): {', '.join(failed)}"
+        )
+    return 0.0  # подписка flat-fee; метеред-стоимость не агрегируем здесь
+
+
+def _problems_by_scene(layout_by_scene: dict, render_errors: list[str]) -> dict[str, str]:
+    """{scene_file: текст дефектов} для per-scene fix-round.
+
+    layout_by_scene — {scene_file: [issues]} из _inspect_all_scenes;
+    render_errors — строки формата 'scene_NN.html: ...' из _render_all*."""
+    out: dict[str, list[str]] = {}
+    for sf, issues in (layout_by_scene or {}).items():
+        out.setdefault(sf, []).append(_format_layout_issues({sf: issues}))
+    for err in (render_errors or []):
+        sf = err.split(":", 1)[0].strip()
+        if sf in SCENE_FILES:
+            out.setdefault(sf, []).append(f"ОШИБКА РЕНДЕРА: {err}")
+        else:
+            logger.warning(f"[hf_broll] render-ошибка без сцены-префикса: {err[:120]}")
+    return {sf: "\n\n".join(parts) for sf, parts in out.items()}
+
+
+def _fix_scenes_singleshot(storyboard: dict, problems: dict[str, str]) -> None:
+    """Per-scene regenerate ТОЛЬКО проблемных сцен (fix-round single-shot).
+
+    Новый HTML пишется в HF_PROJECT только если прошёл _scene_valid_minimal —
+    иначе оставляем старый (рендерибельный хуже, чем невалидный)."""
+    for sf, issue_text in problems.items():
+        sid = sf.replace(".html", "")
+        path = HF_PROJECT / sf
+        prev = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
+        try:
+            html = _singleshot_generate_scene(storyboard, sid,
+                                              prev_html=prev, issues=issue_text)
+        except (ValueError, RuntimeError) as e:
+            logger.warning(f"[hf_broll] fix {sid}: LLM-вызов не удался: {e}")
+            continue
+        import tempfile as _tf
+        with _tf.NamedTemporaryFile("w", encoding="utf-8", suffix=".html",
+                                    delete=False) as f:
+            f.write(html)
+            tmp = Path(f.name)
+        ok, iss = _scene_valid_minimal(tmp, sid)
+        if ok:
+            path.write_text(html, encoding="utf-8")
+            logger.info(f"[hf_broll] fix {sid}: перегенерирован ({len(html)} chars)")
+        else:
+            logger.warning(f"[hf_broll] fix {sid}: новый HTML невалиден ({iss}) — оставил старый")
+        tmp.unlink(missing_ok=True)
+
+
 async def _run_build_phase_async(storyboard: dict, job) -> float:
     """Async параллельный build через SceneScheduler (Phase 1 Step 6).
 
@@ -1301,22 +1547,32 @@ def generate_hyperframes_broll(
         total_cost += sb_cost
 
         # ── ФАЗА 2: per-scene build ────────────────────────────────────
-        # По умолчанию (Phase 1 Step 6) — async-параллельная сборка через
-        # SceneScheduler + workspace isolation через JobContext.
-        # HF_LEGACY_BUILD=1 → fallback на старый последовательный flow.
+        # По умолчанию (10 июня) — SINGLE-SHOT: одна completion на сцену без
+        # инструментов (SubscriptionClient), файл пишет Python. Агентный
+        # headless-build зависал 18/18 (Write вне workspace → permission-тупик
+        # в `claude -p`). См. _run_build_phase_singleshot.
+        #   HF_AGENT_BUILD=1  → агентный SceneScheduler (Phase 1 Step 6, отладка)
+        #   HF_LEGACY_BUILD=1 → старый последовательный agent-flow
         legacy_build = os.getenv("HF_LEGACY_BUILD", "").strip() == "1"
+        agent_build = os.getenv("HF_AGENT_BUILD", "").strip() == "1"
         if legacy_build:
             logger.info("[hf_broll] Фаза 2: legacy последовательный build (HF_LEGACY_BUILD=1)")
             total_cost += _run_build_phase(storyboard)
         else:
-            logger.info("[hf_broll] Фаза 2: async-параллельный build (Phase 1 Step 6)")
             import asyncio as _asyncio
             from job_context import JobContext as _JobContext
             runs_root = Path(os.getenv("HF_RUNS_ROOT", str(HF_PROJECT.parent / "runs")))
             job = _JobContext.create(script_text, runs_root)
             logger.info(f"[hf_broll] job workspace: {job.root}")
             job.write_storyboard(storyboard)
-            total_cost += _asyncio.run(_run_build_phase_async(storyboard, job))
+            if agent_build:
+                logger.info("[hf_broll] Фаза 2: агентный async-build (HF_AGENT_BUILD=1)")
+                total_cost += _asyncio.run(_run_build_phase_async(storyboard, job))
+            else:
+                logger.info("[hf_broll] Фаза 2: single-shot параллельный build")
+                _clear_scene_files()
+                total_cost += _asyncio.run(
+                    _run_build_phase_singleshot(storyboard, job))
 
         # Motion smoke-test gate (Phase 1 Step 6, по ревью GPT) — ловит
         # scene_04-style баги (timeline есть, но визуально статично) ДО
@@ -1375,10 +1631,17 @@ def generate_hyperframes_broll(
                 f"[hf_broll] fix-round {fix_round}: "
                 f"{len(errors)} render-ошибок, {n_layout} layout-проблем"
             )
-            total_cost += _run_claude(
-                _build_prompt(script_text, fix_error="\n\n".join(problems))
-            )
-            _revert_stray()
+            if legacy_build:
+                # старый монолитный агент-фиксер (весь проект одним вызовом)
+                total_cost += _run_claude(
+                    _build_prompt(script_text, fix_error="\n\n".join(problems))
+                )
+                _revert_stray()
+            else:
+                # single-shot: перегенерация ТОЛЬКО проблемных сцен
+                _fix_scenes_singleshot(
+                    storyboard, _problems_by_scene(layout_by_scene, errors)
+                )
     finally:
         _GEN_LOCK.release()
 
