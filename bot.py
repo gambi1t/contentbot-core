@@ -70,9 +70,24 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 logger.addHandler(error_handler)
 
+# ── Root logger: видимость МОДУЛЬНЫХ логов (10 июня) ──────────────────
+# До этого handlers были только у "content_bot" → логи hyperframes_broll /
+# video_assembler / scene_scheduler / subtitle_burner шли в root БЕЗ
+# handlers = невидимы в journald и bot.log ВСЕГДА. Расследование «HF не
+# сделался»: 22-минутная генерация выглядела мёртвой тишиной.
+# Root получает ТЕ ЖЕ handlers; content_bot.propagate=False — без дублей.
+_root = logging.getLogger()
+_root.setLevel(logging.INFO)
+_root.addHandler(console_handler)
+_root.addHandler(file_handler)
+_root.addHandler(error_handler)
+logger.propagate = False
+
 # Suppress noisy third-party loggers
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # --- Clients ---
 notion = NotionClient(auth=os.getenv("NOTION_TOKEN"))
@@ -13063,11 +13078,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        _hf_header = f"🎨 Графика (HyperFrames) для «{card['title']}»"
         await query.edit_message_text(
-            f"🎨 Графика (HyperFrames) для «{card['title']}»\n\n"
-            f"Claude на сервере пишет 6 HTML-вставок и рендерит их через "
-            f"HyperFrames. Это ~8–12 минут — пришлю, когда будет готово."
+            f"{_hf_header}\n\n"
+            f"Claude пишет 6 сцен и рендерит их. Обычно 8-15 минут, с доводкой "
+            f"вёрстки — до ~25. Буду присылать прогресс по шагам."
         )
+
+        # Прогресс-мост (10 июня): generate работает в потоке, апдейты юзеру
+        # шлём через run_coroutine_threadsafe. Fire-and-forget — сбой эдита
+        # (например «message is not modified») не валит генерацию.
+        _hf_loop = asyncio.get_running_loop()
+        _hf_chat = query.message.chat_id
+        _hf_msg = query.message.message_id
+
+        def _hf_progress(text: str) -> None:
+            fut = asyncio.run_coroutine_threadsafe(
+                context.bot.edit_message_text(
+                    chat_id=_hf_chat, message_id=_hf_msg,
+                    text=f"{_hf_header}\n\n{text}",
+                ),
+                _hf_loop,
+            )
+            fut.add_done_callback(lambda f: f.exception())  # глушим BadRequest
 
         try:
             from hyperframes_broll import (
@@ -13082,7 +13115,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for _old in _hf_dir.glob("hf_*.mp4"):
                     _old.unlink()
             clips, cost_usd = await asyncio.to_thread(
-                generate_hyperframes_broll, script_text, proj_dir
+                generate_hyperframes_broll, script_text, proj_dir,
+                _hf_progress,
             )
         except HyperFramesInterrupted as e:
             # Отдельная ветка: Claude Code прерван снаружи (systemd-restart,

@@ -90,6 +90,26 @@ def test_frame_1080x1920_5s(errors):
     _assert(f.get("duration_s") == 5, "duration_s=5", errors)
 
 
+def test_motion_text_blur_forbidden(errors):
+    # 10 июня, фидбек Артёма на «Себестоимость» (7/10): «Маржа есть.»
+    # входила через filter:blur — «замутнённое» на вертикали. Текст обязан
+    # быть резким с первого кадра; blur — только декору (glow/ghost).
+    print("\n-- motion: запрет blur-входов на тексте --")
+    contract = load_style_contract()
+    m = contract.get("motion") or {}
+    _assert(m.get("text_blur_forbidden") is True,
+            "motion.text_blur_forbidden=true в контракте", errors)
+    _assert(set(m.get("text_entrance_allowed") or []) == {"opacity", "translate", "scale"},
+            f"вход текста = opacity/translate/scale (got {m.get('text_entrance_allowed')})",
+            errors)
+    block = inline_for_prompt(contract)
+    low = block.lower()
+    _assert("blur" in low and "запрещ" in low.replace("ё", "е"),
+            "inline-блок проговаривает запрет blur на тексте", errors)
+    _assert("glow" in low or "декор" in low,
+            "inline-блок разрешает blur декору (glow/ghost)", errors)
+
+
 # ── 2. inline_for_prompt ─────────────────────────────────────────────────
 def test_inline_block_contains_brand(errors):
     print("\n-- inline_for_prompt: бренд-секция с цветами в тексте --")
@@ -195,6 +215,7 @@ def main():
     test_palette_brand_colors(errors)
     test_safe_area(errors)
     test_frame_1080x1920_5s(errors)
+    test_motion_text_blur_forbidden(errors)
     test_inline_block_contains_brand(errors)
     test_inline_block_contains_forbidden_labels(errors)
     test_check_forbidden_catches_scene_label(errors)

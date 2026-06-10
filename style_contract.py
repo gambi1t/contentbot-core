@@ -83,6 +83,10 @@ Absolute разрешён только для декора/SVG/glow/ghost-text.
 ДЕТЕРМИНИЗМ: НЕ Math.random, НЕ Date.now, НЕ repeat:-1, НЕ exit-анимаций (кроме scene_06).
 Регистрируй `window.__timelines["<scene_id>"] = gsap.timeline({{paused:true}})`.
 
+ВХОД ТЕКСТА: только opacity / translate / scale. 🔴 filter:blur НА ТЕКСТЕ
+ЗАПРЕЩЁН — текст обязан быть РЕЗКИМ с первого кадра появления (зритель видит
+«мыло» вместо слова). blur разрешён ТОЛЬКО декору: glow-пятна, ghost-text фона.
+
 ВНЕШНИЕ URL: разрешены ТОЛЬКО — cdn.jsdelivr.net (GSAP), fonts.googleapis.com,
 fonts.gstatic.com, unpkg.com, w3.org (SVG xmlns). Любой другой URL — рендер оффлайн.
 

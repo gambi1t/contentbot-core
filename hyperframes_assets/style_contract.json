@@ -11,7 +11,11 @@
   "typography": {
     "primary_family": "Inter Tight",
     "body_family": "Inter",
-    "weights": [500, 600, 800],
+    "weights": [
+      500,
+      600,
+      800
+    ],
     "hero_min_px": 84,
     "hero_max_px": 92,
     "body_min_px": 24,
@@ -22,7 +26,16 @@
     "caption_max_px": 26
   },
   "spacing": {
-    "safe_area": {"x": [40, 1040], "y": [480, 1440]},
+    "safe_area": {
+      "x": [
+        40,
+        1040
+      ],
+      "y": [
+        480,
+        1440
+      ]
+    },
     "gap_min_px": 48,
     "padding_px": 40
   },
@@ -32,14 +45,37 @@
     "duration_s": 5
   },
   "forbidden_labels": [
-    "SCENE 01", "SCENE 02", "SCENE 03", "SCENE 04", "SCENE 05", "SCENE 06",
-    "SCENE / 01", "SCENE / 02", "SCENE / 03", "SCENE / 04", "SCENE / 05", "SCENE / 06",
-    "FINAL CTA", "FINAL_CTA",
-    "DEBUG", "TODO:", "FIXME:", "XXX:"
+    "SCENE 01",
+    "SCENE 02",
+    "SCENE 03",
+    "SCENE 04",
+    "SCENE 05",
+    "SCENE 06",
+    "SCENE / 01",
+    "SCENE / 02",
+    "SCENE / 03",
+    "SCENE / 04",
+    "SCENE / 05",
+    "SCENE / 06",
+    "FINAL CTA",
+    "FINAL_CTA",
+    "DEBUG",
+    "TODO:",
+    "FIXME:",
+    "XXX:"
   ],
   "forbidden_patterns_regex": [
     "\\bSCENE\\s*[/]?\\s*0\\d\\b",
     "\\bFINAL\\s+CTA\\b",
     "\\bscene\\s+\\d+\\s+of\\s+\\d+\\b"
-  ]
+  ],
+  "motion": {
+    "_why": "10 июня: «Маржа есть.» входила через filter:blur — «замутнённый» текст на вертикали (фидбек Артёма 7/10). Текст резкий с первого кадра; blur только декору.",
+    "text_entrance_allowed": [
+      "opacity",
+      "translate",
+      "scale"
+    ],
+    "text_blur_forbidden": true
+  }
 }

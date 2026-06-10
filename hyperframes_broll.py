@@ -1519,10 +1519,28 @@ def _format_layout_issues(by_scene: dict) -> str:
 
 
 # ── Главный оркестратор ──────────────────────────────────────────────
+def _notify(progress_cb, text: str) -> None:
+    """Fire-and-forget прогресс-уведомление (10 июня).
+
+    22-минутная генерация без единого апдейта выглядела для Артёма как
+    «не сделался». Сбой callback'а НИКОГДА не валит пайплайн."""
+    if not progress_cb:
+        return
+    try:
+        progress_cb(text)
+    except Exception as e:
+        logger.warning(f"[hf_broll] progress_cb упал (игнорирую): {e}")
+
+
 def generate_hyperframes_broll(
     script_text: str, out_dir: str | Path,
+    progress_cb=None,
 ) -> tuple[list[Path], float]:
     """Сценарий → 6 готовых hf_01..06.mp4 в out_dir/hyperframes/.
+
+    progress_cb: опциональный callable(str) — фазовые апдейты для юзера
+    (вызывается из рабочего потока; в боте мостится через
+    run_coroutine_threadsafe).
 
     Возвращает (список_клипов, total_cost_usd). Тот же контракт, что
     generate_auto_broll (Remotion) — бот выбирает движок.
@@ -1548,8 +1566,11 @@ def generate_hyperframes_broll(
         # Это решает монотонность по построению (см. project_hyperframes_
         # pipeline_architecture.md).
         logger.info("[hf_broll] Фаза 1: storyboard (раскадровка 6 сцен)…")
+        _notify(progress_cb, "📋 Шаг 1/3: придумываю раскадровку (6 разных сцен)…")
         storyboard, sb_cost = _run_storyboard_phase(script_text)
         total_cost += sb_cost
+        _notify(progress_cb,
+                "🎨 Шаг 2/3: раскадровка готова — пишу 6 HTML-сцен (~3-5 мин)…")
 
         # ── ФАЗА 2: per-scene build ────────────────────────────────────
         # По умолчанию (10 июня) — SINGLE-SHOT: одна completion на сцену без
@@ -1598,6 +1619,8 @@ def generate_hyperframes_broll(
         _render_fn = _render_all if use_npx_render else _render_all_native
         if use_npx_render:
             logger.info("[hf_broll] render: npx hyperframes (HF_USE_NPX_RENDER=1)")
+        _notify(progress_cb,
+                "🎬 Шаг 3/3: сцены написаны — рендерю видео (~4-5 мин)…")
         while True:
             # 1) Layout-инспекция (дешевле рендера — ловим overlap/offscreen
             #    ДО траты времени на рендер). 2) Рендер.
@@ -1636,6 +1659,10 @@ def generate_hyperframes_broll(
                 f"[hf_broll] fix-round {fix_round}: "
                 f"{len(errors)} render-ошибок, {n_layout} layout-проблем"
             )
+            _notify(progress_cb,
+                    f"🔧 Доводка вёрстки {fix_round}/{MAX_FIX_ROUNDS}: детектор "
+                    f"нашёл {n_layout} замечаний — перегенерирую проблемные "
+                    f"сцены и рендерю заново (~5-7 мин)…")
             if legacy_build:
                 # старый монолитный агент-фиксер (весь проект одним вызовом)
                 total_cost += _run_claude(
