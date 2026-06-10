@@ -29,7 +29,14 @@ DEFAULT_PRIMARY_COLOR = "&H00FFFFFF"  # White (ASS uses &HAABBGGRR)
 DEFAULT_OUTLINE_COLOR = "&H00000000"  # Black
 DEFAULT_OUTLINE_WIDTH = 5
 DEFAULT_SHADOW = 0                   # No shadow, clean look
-DEFAULT_MARGIN_V = 480               # ≈25% from bottom on 1920px canvas
+# 10 июня (фидбэк со встречи с Максимом): при 480 (≈75% высоты) слово ложится
+# НА ЛИЦО в близком селфи (кадры 3с/12с IG «5 двигателей»). 300 ≈ 84% высоты —
+# ниже подбородка даже в близком кадре, но выше нижнего UI Instagram/Reels.
+DEFAULT_MARGIN_V = 300
+# Split-лейаут: нижняя половина = крупный кроп головы (подбородок ~86% высоты),
+# 300 попадает на губы (проверено кадром «24»). 150 — под подбородком
+# (визуальный подбор по кадрам margin 150 vs 200, 10 июня).
+SPLIT_MARGIN_V = 150
 
 WHISPER_MODEL = "small"              # Good Russian accuracy vs speed
 POP_DURATION_MS = 80                 # Pop-in animation duration
@@ -311,11 +318,14 @@ def _ass_ts(seconds: float) -> str:
 
 
 def _margin_for_word(word_start: float, montage_plan: list[dict] | None,
-                     margin_split: int = 900, margin_default: int = 480) -> int:
+                     margin_split: int = SPLIT_MARGIN_V,
+                     margin_default: int = DEFAULT_MARGIN_V) -> int:
     """Pick MarginV based on which montage segment the word falls into.
 
-    - split layout → margin_split (at junction between broll and avatar)
-    - avatar_full / broll_full → margin_default (lower, on avatar or bottom)
+    10 июня («субтитры пониже везде»): стык 900 для split отменён — после
+    подъёма аватара (crop 260) стык = лоб, а 300 в split = губы (half-кроп
+    головы крупнее). split → SPLIT_MARGIN_V (под подбородком),
+    остальные лейауты → DEFAULT_MARGIN_V.
     """
     if not montage_plan:
         return 0  # 0 = use style default

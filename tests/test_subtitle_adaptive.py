@@ -1,8 +1,15 @@
-"""Тест адаптивных субтитров в монтаже (8 июня).
+"""Тест позиции субтитров (10 июня).
 
-Субтитры должны быть видны ВСЕГДА и перемещаться по лейауту сегмента:
-split → стык (MarginV=900, середина), fullscreen/avatar → низ (480).
-Проверяем _margin_for_word + что generate_ass пишет разные MarginV по словам.
+Фидбэк со встречи с Максимом (IG «За год у меня легло 5 двигателей»):
+при MarginV=480 (~75% высоты) слово ложится НА ЛИЦО в близком селфи
+(проверено по кадрам 3с/12с). Требование Артёма: «субтитры пониже везде».
+
+Новое правило (визуально подобрано по кадрам реального рендера 10 июня):
+- обычные лейауты (селфи/fullscreen/avatar_full/broll_full) → MarginV=300
+  (~84% высоты, ниже подбородка в близком кадре);
+- split → MarginV=150: нижняя половина = крупный half-кроп головы
+  (подбородок ~86% высоты), 300 попадает на губы (кадр «24»), 900-стык
+  после подъёма аватара = лоб.
 
 Запуск: python tests/test_subtitle_adaptive.py
 """
@@ -22,6 +29,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import subtitle_burner as sb  # noqa: E402
 
+LOW = 300        # обычные лейауты
+SPLIT_LOW = 150  # split — ещё ниже (под подбородком half-кропа)
+
 
 def _assert(cond, msg, errors):
     if not cond:
@@ -39,25 +49,33 @@ def main():
         {"start": 12.0, "end": 15.0, "layout": "avatar_full"},
     ]
 
-    print("\n[_margin_for_word — позиция по лейауту]")
-    _assert(sb._margin_for_word(1.0, plan) == 480, "avatar_full → низ (480)", errors)
-    _assert(sb._margin_for_word(5.0, plan) == 900, "split → стык (900)", errors)
-    _assert(sb._margin_for_word(9.0, plan) == 480, "broll_full → низ (480)", errors)
-    _assert(sb._margin_for_word(13.0, plan) == 480, "avatar_full (CTA) → низ (480)", errors)
+    print("\n[константы — низкая позиция, не на лице]")
+    _assert(sb.DEFAULT_MARGIN_V == LOW,
+            f"DEFAULT_MARGIN_V == {LOW}, got {sb.DEFAULT_MARGIN_V}", errors)
+    _assert(sb.SPLIT_MARGIN_V == SPLIT_LOW,
+            f"SPLIT_MARGIN_V == {SPLIT_LOW}, got {sb.SPLIT_MARGIN_V}", errors)
+
+    print("\n[_margin_for_word — низ во всех лейаутах, split ниже всех]")
+    _assert(sb._margin_for_word(1.0, plan) == LOW, f"avatar_full → низ ({LOW})", errors)
+    _assert(sb._margin_for_word(5.0, plan) == SPLIT_LOW,
+            f"split → под подбородком ({SPLIT_LOW}), не стык 900, не {LOW} (губы)", errors)
+    _assert(sb._margin_for_word(9.0, plan) == LOW, f"broll_full → низ ({LOW})", errors)
+    _assert(sb._margin_for_word(13.0, plan) == LOW, f"avatar_full (CTA) → низ ({LOW})", errors)
     _assert(sb._margin_for_word(5.0, None) == 0, "без плана → стиль по умолчанию (0)", errors)
 
-    print("\n[generate_ass — разные MarginV по словам]")
+    print("\n[generate_ass — нигде нет старых 900/480]")
     words = [
-        {"word": "привет", "start": 1.0, "end": 1.4},   # avatar → 480
-        {"word": "смотри", "start": 5.0, "end": 5.4},    # split → 900
-        {"word": "это", "start": 9.0, "end": 9.3},       # broll → 480
+        {"word": "привет", "start": 1.0, "end": 1.4},
+        {"word": "смотри", "start": 5.0, "end": 5.4},   # split-слово
+        {"word": "это", "start": 9.0, "end": 9.3},
     ]
     out = Path(tempfile.mkdtemp()) / "t.ass"
     sb.generate_ass(words, out, montage_plan=plan)
     text = out.read_text(encoding="utf-8")
-    # В ASS строках Dialogue MarginV — 8-е поле. Проверяем, что 900 и 480 оба есть.
-    _assert(",900,," in text or ",900," in text, "в ASS есть MarginV=900 (split-слово)", errors)
-    _assert(",480,," in text or ",480," in text, "в ASS есть MarginV=480 (fullscreen-слово)", errors)
+    _assert(",900," not in text, "в ASS НЕТ MarginV=900 (стык отменён)", errors)
+    _assert(",480," not in text, "в ASS НЕТ MarginV=480 (старый низ отменён)", errors)
+    _assert(f",{LOW}," in text, f"в ASS есть MarginV={LOW} (avatar/broll слова)", errors)
+    _assert(f",{SPLIT_LOW}," in text, f"в ASS есть MarginV={SPLIT_LOW} (split-слово)", errors)
 
     print("\n[add_subtitles_to_video — принимает готовые words]")
     import inspect
