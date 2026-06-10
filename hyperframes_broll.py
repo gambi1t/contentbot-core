@@ -495,7 +495,12 @@ def _build_scene_prompt_for_attempt(storyboard: dict, scene_id: str,
 # инлайном в промпт. Транспорт — SubscriptionClient (проверенный путь бота,
 # с авто-ретраем на транзиентные сбои).
 
-HF_SINGLESHOT_MODEL = os.getenv("HF_SINGLESHOT_MODEL", "claude-sonnet-4-6")
+# Opus 4.8 — решение Артёма 10 июня, подтверждено A/B на scene_01:
+# Opus 46с / 9.6KB / 1 layout-замечание vs Sonnet 74с / 15.5KB / 3.
+# Кадр Opus богаче (оси, легенда, аннотации) при чистоте. Скорость НЕ хуже.
+# Цена на подписке = flat, но Opus ест отдельное недельное окно seven_day_opus
+# (шарится со скриптами бота) — при упоре в лимит переключить env на sonnet.
+HF_SINGLESHOT_MODEL = os.getenv("HF_SINGLESHOT_MODEL", "claude-opus-4-8")
 SINGLESHOT_MAX_TOKENS = 16000  # сцена ~13KB ≈ 4-5k токенов, запас ×3
 
 

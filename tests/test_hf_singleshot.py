@@ -134,6 +134,10 @@ def main():
     _assert("OLD-MARKER" in pf and "НАЛЕЗАЮТ" in pf,
             "fix-режим: прошлый HTML + дефекты в промпте", errors)
 
+    print("\n[модель — Opus 4.8 (решение Артёма 10 июня, A/B: 46с vs 74с, кадр богаче)]")
+    _assert(hb.HF_SINGLESHOT_MODEL == "claude-opus-4-8",
+            f"дефолт claude-opus-4-8, got {hb.HF_SINGLESHOT_MODEL}", errors)
+
     print("\n[_singleshot_llm_client — таймаут под тяжёлую генерацию, не 180с]")
     os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = "dummy-token"
     try:
