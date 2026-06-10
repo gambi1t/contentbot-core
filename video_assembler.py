@@ -1139,6 +1139,32 @@ def _is_hdr(path) -> bool:
         return False
 
 
+def _quantize_plan_to_frames(montage_plan: list[dict], fps: int = FPS) -> list[dict]:
+    """Снап границ сегментов плана к сетке кадров (1/fps).
+
+    Lip-sync защита (10 июня): сегменты кодируются ОТДЕЛЬНО и склеиваются
+    concat'ом. Если границы не кратны кадру, -ss сдвигает контент (до 1 кадра)
+    и -t округляет длительность каждого сегмента НЕЗАВИСИМО — ошибки
+    складываются по сегментам, и видео уезжает от непрерывного аудио
+    (баг «2 бизнеса»: 845 кадров vs 847 у аватара → губы раньше звука).
+
+    После снапа: start/end каждого сегмента = целое число кадров → контент
+    сегмента и его позиция в конкате совпадают точно. Общие границы соседних
+    сегментов снапятся одинаково (один и тот же round) — без дыр и нахлёстов.
+    Сегменты, схлопнувшиеся в ноль, выбрасываются.
+    """
+    out: list[dict] = []
+    for seg in montage_plan:
+        s = round(seg["start"] * fps) / fps
+        e = round(seg["end"] * fps) / fps
+        if e - s < 0.5 / fps:  # пустой после снапа
+            continue
+        q = dict(seg)
+        q["start"], q["end"] = s, e
+        out.append(q)
+    return out
+
+
 def _assemble_pro(
     avatar_path: Path,
     broll_paths: list[Path],
@@ -1174,6 +1200,10 @@ def _assemble_pro(
     split_anchor_offsets = split_anchor_offsets or {}
     if not montage_plan:
         raise AssemblyError("Пустой монтажный план.")
+    # Lip-sync: границы плана → сетка кадров (см. _quantize_plan_to_frames)
+    montage_plan = _quantize_plan_to_frames(montage_plan)
+    if not montage_plan:
+        raise AssemblyError("План схлопнулся после снапа к кадрам.")
 
     n_broll = len(broll_paths)
     AVATAR_CROP_Y = avatar_crop_y  # per-brand (see _avatar_crop_y); was fixed 280
@@ -1385,6 +1415,10 @@ def _assemble_pro(
         bi = seg.get("broll_index")
         seg_out = tmp_dir / f"pro_seg_{si:02d}.mp4"
 
+        # Lip-sync (10 июня): сегменты — ТОЛЬКО ВИДЕО (-an). Раньше каждый
+        # сегмент кодировал собственный AAC и -shortest резал видео по
+        # аудио-границе (21.3мс) → потеря кадров → губы уезжали. Аудио
+        # теперь муксится ОДНИМ непрерывным куском после конката (шаг 6).
         if layout == "avatar_full":
             # Cut avatar segment
             _run(
@@ -1392,53 +1426,50 @@ def _assemble_pro(
                     "ffmpeg", "-y",
                     "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(avatar_full),
+                    "-an",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
-                    "-c:a", "aac", "-b:a", "192k",
                     str(seg_out),
                 ],
                 f"pro: seg {si} avatar_full ({dur:.1f}s)",
             )
 
         elif layout == "broll_full" and bi is not None and bi in broll_full_clips:
-            # Full-screen B-roll with avatar audio underneath
-            # B-roll starts from 0 (not time-synced), avatar at correct position for audio
+            # Full-screen B-roll (video only; clip starts from its 0)
+            # tpad клонирует последний кадр если клип короче слота —
+            # сегмент всегда ровно dur (раньше короткий клип сжимал таймлайн).
             broll_clip = broll_full_clips[bi]
             _run(
                 [
                     "ffmpeg", "-y",
-                    "-t", f"{dur:.3f}",
                     "-i", str(broll_clip),
-                    "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-                    "-i", str(avatar_full),
-                    "-map", "0:v", "-map", "1:a",
+                    "-vf", "tpad=stop_mode=clone:stop=-1",
+                    "-t", f"{dur:.3f}",
+                    "-an",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-shortest",
                     str(seg_out),
                 ],
                 f"pro: seg {si} broll_full #{bi} ({dur:.1f}s)",
             )
 
         elif layout == "split" and bi is not None and bi in broll_half_clips:
-            # 50/50 split: B-roll top (from 0) + avatar bottom (at position for audio)
+            # 50/50 split: B-roll top (from 0) + avatar bottom (video only)
             broll_clip = broll_half_clips[bi]
             _run(
                 [
                     "ffmpeg", "-y",
-                    "-t", f"{dur:.3f}",
                     "-i", str(broll_clip),
                     "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(avatar_half),
-                    "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-                    "-i", str(avatar_full),
-                    "-filter_complex", "[0:v][1:v]vstack=inputs=2[outv]",
-                    "-map", "[outv]", "-map", "2:a",
+                    "-filter_complex",
+                    "[0:v]tpad=stop_mode=clone:stop=-1[b];"
+                    "[b][1:v]vstack=inputs=2[outv]",
+                    "-map", "[outv]",
+                    "-t", f"{dur:.3f}",
+                    "-an",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-shortest",
                     str(seg_out),
                 ],
                 f"pro: seg {si} split #{bi} ({dur:.1f}s)",
@@ -1451,9 +1482,9 @@ def _assemble_pro(
                     "ffmpeg", "-y",
                     "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(avatar_full),
+                    "-an",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
-                    "-c:a", "aac", "-b:a", "192k",
                     str(seg_out),
                 ],
                 f"pro: seg {si} fallback avatar ({dur:.1f}s)",
@@ -1465,24 +1496,39 @@ def _assemble_pro(
     if not segment_files:
         raise AssemblyError("Ни один сегмент не был собран.")
 
-    # ── 5. Concat all segments ──
+    # ── 5. Concat all segments (только видео) ──
     concat_list = tmp_dir / "pro_concat.txt"
     concat_list.write_text(
         "\n".join(f"file '{seg.name}'" for seg in segment_files),
         encoding="utf-8",
     )
 
-    # Use concat demuxer (fast, no re-encode)
+    concat_video = tmp_dir / "pro_concat_video.mp4"
     _run(
         [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
             "-i", str(concat_list),
             "-c", "copy",
+            str(concat_video),
+        ],
+        f"pro: concat {len(segment_files)} segments (video only)",
+    )
+
+    # ── 6. Mux: конкат-видео + ОДНО непрерывное аудио аватара ──
+    # Аудио ни разу не резалось на куски → lip-sync привязан к исходному
+    # таймлайну. Видео-сегменты после снапа к кадрам встают точно по нему.
+    _run(
+        [
+            "ffmpeg", "-y",
+            "-i", str(concat_video),
+            "-i", str(avatar_full),
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "copy", "-c:a", "copy",
             "-movflags", "+faststart",
             str(output_path),
         ],
-        f"pro: concat {len(segment_files)} segments",
+        "pro: mux continuous avatar audio",
     )
 
     logger.info(
@@ -1883,24 +1929,22 @@ def assemble_auto_montage(
         # ── Optional subtitles ──
         if subtitles:
             try:
-                from subtitle_burner import add_subtitles_to_video
+                from subtitle_burner import (
+                    add_subtitles_to_video, DEFAULT_MARGIN_V, SPLIT_MARGIN_V,
+                )
 
                 font_dir_path = FONT_DIR if FONT_DIR.exists() else None
                 subs_out = project_dir / "final_auto_subs.mp4"
 
-                # Subtitle position depends on layout:
-                # - split: MarginV=900 (at junction broll/avatar)
-                # - pro: adaptive per segment (split→900, avatar/broll→480)
-                # - dynamic/other: MarginV=480 (lower)
+                # 10 июня: субтитры НИЗКО («пониже везде» — на стыке/480 текст
+                # ложился на лицо). split ещё ниже (half-кроп головы крупнее).
+                # Значения живут в subtitle_burner (DEFAULT/SPLIT_MARGIN_V).
                 if layout == "split":
-                    sub_margin_v = 900
+                    sub_margin_v = SPLIT_MARGIN_V
                     sub_plan = None
-                elif layout == "pro" and montage_plan:
-                    sub_margin_v = 480  # default for non-split segments
-                    sub_plan = montage_plan
                 else:
-                    sub_margin_v = 480
-                    sub_plan = None
+                    sub_margin_v = DEFAULT_MARGIN_V
+                    sub_plan = montage_plan if (layout == "pro" and montage_plan) else None
 
                 logger.info(f"[assembler] Adding subtitles (margin_v={sub_margin_v}, adaptive={sub_plan is not None}) …")
                 result = add_subtitles_to_video(
