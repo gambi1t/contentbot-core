@@ -85,6 +85,33 @@ def pick_random_track(category: str, exclude_id: str | None = None) -> dict | No
     return random.choice(tracks)
 
 
+def pick_n_tracks(
+    category: str, n: int = 3, exclude_ids: list[str] | None = None,
+) -> list[dict]:
+    """Вернуть до N случайных треков из категории, без повторов и без exclude.
+
+    Используется для предпрослушивания: бот шлёт юзеру несколько аудио-файлов,
+    юзер слушает в нативном Telegram audio-плеере и выбирает одной кнопкой.
+
+    Args:
+        category: имя категории.
+        n: сколько треков вернуть (≤ числа доступных, без дубликатов).
+        exclude_ids: список id уже показанных треков (для reroll), исключаем.
+
+    Returns:
+        list[track-dict] длиной от 0 до min(n, len(available)).
+    """
+    tracks = _list_tracks(category)
+    if not tracks:
+        return []
+    exclude = set(exclude_ids or [])
+    pool = [t for t in tracks if t.get("id") not in exclude]
+    if not pool:
+        # Все исключены — fallback: дать любые n
+        pool = tracks
+    return random.sample(pool, min(n, len(pool)))
+
+
 def mix_into_video(video_path: str, music_path: str, output_path: str) -> bool:
     """Тонкая обёртка для тестируемости (mockable).
 

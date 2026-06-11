@@ -111,6 +111,51 @@ def test_pick_random_track_fallback_when_all_excluded():
     print("  OK fallback when all excluded")
 
 
+# ── pick_n_tracks (превью: 3 трека на прослушивание) ────────────────────────
+
+def test_pick_n_tracks_returns_n_distinct():
+    """Возвращает n РАЗНЫХ треков из категории."""
+    with patch("selfie.music._list_tracks", side_effect=lambda c: FAKE_TRACKS.get(c, [])):
+        tracks = music.pick_n_tracks("chill", n=3)
+    assert len(tracks) == 3, f"Expected 3, got {len(tracks)}"
+    ids = [t["id"] for t in tracks]
+    assert len(set(ids)) == 3, f"Дубликаты в превью: {ids}"
+    print("  OK pick_n_tracks 3 distinct")
+
+
+def test_pick_n_tracks_caps_at_available():
+    """n больше доступного → возвращает сколько есть (energetic = 1 трек)."""
+    with patch("selfie.music._list_tracks", side_effect=lambda c: FAKE_TRACKS.get(c, [])):
+        tracks = music.pick_n_tracks("energetic", n=3)
+    assert len(tracks) == 1, f"Expected 1 (всего 1 трек), got {len(tracks)}"
+    print("  OK pick_n_tracks caps at available")
+
+
+def test_pick_n_tracks_empty_category():
+    """Пустая категория → пустой список (не падение)."""
+    with patch("selfie.music._list_tracks", return_value=[]):
+        assert music.pick_n_tracks("nope", n=3) == []
+    print("  OK pick_n_tracks empty → []")
+
+
+def test_pick_n_tracks_excludes_shown():
+    """exclude_ids (уже показанные для reroll) исключаются из выдачи."""
+    with patch("selfie.music._list_tracks", side_effect=lambda c: FAKE_TRACKS.get(c, [])):
+        tracks = music.pick_n_tracks("chill", n=2, exclude_ids=["chill_102"])
+    ids = [t["id"] for t in tracks]
+    assert "chill_102" not in ids, f"Показанный трек не исключён: {ids}"
+    assert len(tracks) == 2, f"Expected 2 из оставшихся, got {len(tracks)}"
+    print("  OK pick_n_tracks excludes shown")
+
+
+def test_pick_n_tracks_fallback_when_all_excluded():
+    """Все треки в exclude → fallback (дать любые n, чем пусто после reroll)."""
+    with patch("selfie.music._list_tracks", side_effect=lambda c: FAKE_TRACKS.get(c, [])):
+        tracks = music.pick_n_tracks("chill", n=2, exclude_ids=["chill_102", "chill_1076", "chill_1087"])
+    assert len(tracks) == 2, f"fallback должен дать 2, got {len(tracks)}"
+    print("  OK pick_n_tracks fallback when all excluded")
+
+
 # ── category_keyboard ───────────────────────────────────────────────────────
 
 def test_category_keyboard_has_all_categories_plus_skip():

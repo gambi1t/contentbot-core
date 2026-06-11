@@ -465,15 +465,24 @@ async def handle_music_callback(
         return True
 
     if action == "cat":
-        # Юзер выбрал категорию → подбираем случайный трек и миксуем
-        await _pick_and_mix(query, context, user_id, category=arg, exclude_id=None)
+        # Юзер выбрал категорию → шлём 3 трека на прослушивание (НЕ микс).
+        # Юзер слушает в нативном Telegram audio-плеере и выбирает кнопкой.
+        await _send_track_previews(query, context, user_id, category=arg, exclude_ids=None)
         return True
 
     if action == "reroll":
-        # Другой случайный трек той же категории (exclude текущий)
-        picked = data.get("selfie_picked_music") or {}
-        exclude = picked.get("track_id")
-        await _pick_and_mix(query, context, user_id, category=arg, exclude_id=exclude)
+        # «Ещё 3 трека» — exclude всех показанных в этой сессии.
+        shown = data.get("selfie_music_shown_ids") or []
+        await _send_track_previews(query, context, user_id, category=arg, exclude_ids=shown)
+        return True
+
+    if action == "pick":
+        # Юзер выбрал конкретный трек после прослушивания. arg = "<category>:<track_id>"
+        if not arg or ":" not in arg:
+            await query.edit_message_text("⚠️ Неверный формат выбора трека.")
+            return True
+        cat, track_id = arg.split(":", 1)
+        await _mix_picked_track(query, context, user_id, category=cat, track_id=track_id)
         return True
 
     if action == "back":
@@ -509,10 +518,163 @@ async def handle_music_callback(
     return False
 
 
+async def _send_track_previews(
+    query, context, user_id: int, category: str | None, exclude_ids: list[str] | None,
+) -> None:
+    """Отправить 3 трека из категории как audio-файлы для прослушивания.
+
+    Каждый трек — отдельное audio-сообщение с inline-кнопкой «✅ Выбрать этот».
+    Юзер слушает прямо в Telegram (нативный audio-плеер) и решает.
+    После выбора — переход в _mix_picked_track.
+    """
+    if not category:
+        await query.edit_message_text(
+            "⚠️ Не указана категория. Возврат к выбору.",
+            reply_markup=selfie_music.category_keyboard(),
+        )
+        return
+
+    tracks = selfie_music.pick_n_tracks(category, n=3, exclude_ids=exclude_ids or [])
+    if not tracks:
+        await query.edit_message_text(
+            f"⚠️ В категории «{_category_label(category)}» больше нет новых треков.",
+            reply_markup=selfie_music.category_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    data = _PENDING[user_id]
+    # Запоминаем показанные ID для reroll
+    shown = data.get("selfie_music_shown_ids") or []
+    new_shown = list({*shown, *(t["id"] for t in tracks)})
+    data["selfie_music_shown_ids"] = new_shown
+    # Счётчик batch'ей — для уникальности текста при reroll (иначе Telegram
+    # падает с "Message is not modified" если текст и кнопки те же).
+    batch_n = (data.get("selfie_music_batch_n") or 0) + 1
+    data["selfie_music_batch_n"] = batch_n
+    _SAVE_PENDING(_PENDING)
+
+    cat_label = _category_label(category)
+    chat_id = query.message.chat_id
+
+    # Сначала кратко обновляем исходное сообщение (откуда был callback) — иначе
+    # на нём остаются устаревшие кнопки категории, и юзер может кликнуть повторно.
+    batch_suffix = "" if batch_n == 1 else f" — партия #{batch_n}"
+    try:
+        await query.edit_message_text(
+            f"🎵 <b>{cat_label}</b> — подбираю треки{batch_suffix}...",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        _LOGGER.debug(f"[selfie] intro edit skipped: {e}")
+
+    # 1) Шлём 3 аудио-сообщения с кнопкой «✅ Выбрать этот» под каждым.
+    for i, track in enumerate(tracks, 1):
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                f"✅ Выбрать этот ({track['id']})",
+                callback_data=f"selfie_music:pick:{category}:{track['id']}",
+            )]])
+            with open(track["file"], "rb") as audio_f:
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=audio_f,
+                    title=f"{i}. {track['id']}",
+                    performer=cat_label,
+                    duration=int(track.get("duration", 0)),
+                    reply_markup=kb,
+                )
+        except Exception as e:
+            _LOGGER.error(f"[selfie] send_audio failed for {track['id']}: {e}")
+            # Не критично, продолжаем остальные
+
+    # 2) Footer-сообщение с кнопками управления — остаётся последним в ленте.
+    footer_text = (
+        f"☝️ Послушай {len(tracks)} трека выше и выбери «✅» под нужным.\n\n"
+        f"Если ни один не подошёл — «🔄 Ещё треки»"
+        + (f" (партия #{batch_n}, всего показано {len(new_shown)})" if batch_n > 1 else "")
+        + "."
+    )
+    footer_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Ещё треки", callback_data=f"selfie_music:reroll:{category}")],
+        [InlineKeyboardButton("⬅️ Сменить категорию", callback_data="selfie_music:back")],
+        [InlineKeyboardButton("❌ Без музыки", callback_data="selfie_music:skip")],
+    ])
+    await context.bot.send_message(
+        chat_id=chat_id, text=footer_text, reply_markup=footer_kb,
+    )
+
+
+async def _mix_picked_track(
+    query, context, user_id: int, category: str, track_id: str,
+) -> None:
+    """Юзер выбрал конкретный track_id — миксуем его в видео и шлём превью."""
+    track = None
+    for t in selfie_music._list_tracks(category):
+        if t.get("id") == track_id:
+            track = t
+            break
+    if not track:
+        await query.edit_message_text(
+            f"⚠️ Трек {track_id} не найден. Выбери другую категорию.",
+            reply_markup=selfie_music.category_keyboard(),
+        )
+        return
+
+    data = _PENDING[user_id]
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    subtitled_path = Path(data["selfie_subtitled"])
+    mixed_path = selfie_tmp / "subtitled_with_music.mp4"
+
+    # Статус новым сообщением (не edit-ом кнопки выбора) — чтобы лента не прыгала.
+    status = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=f"🎬 Микширую трек <code>{track['id']}</code> в видео...",
+        parse_mode="HTML",
+    )
+
+    try:
+        ok = await asyncio.to_thread(
+            selfie_music.mix_into_video,
+            str(subtitled_path),
+            track["file"],
+            str(mixed_path),
+        )
+        if not ok or not mixed_path.exists():
+            raise RuntimeError("ffmpeg mix вернул False или не создал файл")
+
+        size_mb = mixed_path.stat().st_size / 1024 / 1024
+        _LOGGER.info(f"[selfie] Music mixed (pick): {track['id']} -> {size_mb:.1f} MB")
+
+        data["selfie_picked_music"] = {
+            "category": category,
+            "track_id": track["id"],
+            "track_file": track["file"],
+        }
+        data["selfie_final"] = str(mixed_path)
+        _SAVE_PENDING(_PENDING)
+
+        cat_label = _category_label(category)
+        await status.edit_text(
+            selfie_music.build_picked_message(cat_label, track, video_size_mb=size_mb),
+            reply_markup=selfie_music.picked_keyboard(category),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        _LOGGER.error(f"[selfie] mix error: {e}", exc_info=True)
+        await status.edit_text(
+            f"⚠️ Не получилось смикшировать ({e}). Попробуй другой трек.",
+            reply_markup=selfie_music.picked_keyboard(category),
+        )
+
+
 async def _pick_and_mix(
     query, context, user_id: int, category: str | None, exclude_id: str | None
 ) -> None:
-    """Выбрать случайный трек категории, смикшировать в subtitled.mp4, показать preview."""
+    """LEGACY: оставлено для совместимости. Новый flow — _send_track_previews +
+    _mix_picked_track (3 трека на прослушивание → выбор → микс).
+
+    Выбрать случайный трек категории, смикшировать в subtitled.mp4, показать preview."""
     if not category:
         await query.edit_message_text(
             "⚠️ Не указана категория. Возврат к выбору.",
