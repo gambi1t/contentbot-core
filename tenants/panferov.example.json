@@ -1,0 +1,17 @@
+{
+  "_comment": "Пример конфига тенанта panferov (Phase 2a-1). Тот же код, что у maksim — разница ТОЛЬКО в флагах: у Артёма есть launch_monitor + youtube_broll + billing, нет каруселей/банка идей/HF/Remotion. Наполняется в Phase 2b.",
+  "tenant_id": "panferov",
+  "features": {
+    "tg_post": true,
+    "carousel": false,
+    "idea_bank": false,
+    "launch_monitor": true,
+    "youtube_broll": true,
+    "hyperframes": false,
+    "remotion": false,
+    "image_gen": true,
+    "video_gen": true,
+    "instagram_dm": true,
+    "billing": true
+  }
+}

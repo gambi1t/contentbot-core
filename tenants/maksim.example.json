@@ -1,0 +1,17 @@
+{
+  "_comment": "Пример конфига тенанта maksim (Phase 2a-1). Секреты НЕ здесь — в .env. Реальный tenant.json на сервере, в git только .example. Наполняется в Phase 2b (providers/notion/brands).",
+  "tenant_id": "maksim",
+  "features": {
+    "tg_post": true,
+    "carousel": true,
+    "idea_bank": true,
+    "launch_monitor": false,
+    "youtube_broll": false,
+    "hyperframes": true,
+    "remotion": true,
+    "image_gen": true,
+    "video_gen": true,
+    "instagram_dm": true,
+    "billing": false
+  }
+}
