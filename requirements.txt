@@ -1,0 +1,8 @@
+python-telegram-bot==21.6
+anthropic==0.42.0
+notion-client==2.2.1
+python-dotenv==1.0.1
+openai==1.58.1
+Pillow==11.1.0
+requests==2.32.3
+aiohttp==3.11.11

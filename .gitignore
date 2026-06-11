@@ -1,0 +1,49 @@
+# ── Секреты и креды (НИКОГДА в git) ─────────────────────────────────────
+.env
+*.env
+!*.env.example
+!*.env.template
+*token*.json
+TK_cookies*.json
+*.session
+*.session-journal
+*.pickle
+
+# ── Runtime state (мигрирует отдельно, см. MIGRATION_STATE_INVENTORY) ───
+*.db
+pending.json
+stats_history.json
+pub_calendar.json
+_stats_db_id.txt
+_status_options.json
+*.log
+logs/
+launch_data/
+nblm_output/
+media/
+
+# ── Бэкапы и мусор ───────────────────────────────────────────────────────
+*.server-backup
+_server_backup/
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# ── Окружения ────────────────────────────────────────────────────────────
+venv/
+tiktok-env/
+
+# ── Медиа-библиотеки (большие, живут на сервере + в бэкап-зеркале) ──────
+assets/
+broll-library/
+music/
+covers/
+projects/
+
+# ── Тест-артефакты и отладочные бинари (не код) ──────────────────────────
+test video/
+fal_tests/*.mp4
+fal_tests/*.jpg
+fal_tests/*.png
+tiktok_*.png
+test_cover_apple.jpg
