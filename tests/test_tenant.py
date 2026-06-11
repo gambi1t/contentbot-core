@@ -97,6 +97,32 @@ def test_doctor_features_must_be_bool():
             "ловит не-bool значение фичи")
 
 
+def test_feature_blocked_fail_open():
+    print("\n-- feature_blocked: fail-open без конфига --")
+    # Переходный период: нет конфига / пустой features → НЕ блокируем,
+    # иначе наивный gating отрубит работающие фичи в проде Максима.
+    _assert(tenant.feature_blocked({}, "carousel") is False, "пустой тенант → НЕ блок")
+    _assert(tenant.feature_blocked({"tenant_id": "x"}, "carousel") is False, "нет features → НЕ блок")
+    _assert(tenant.feature_blocked({"tenant_id": "x", "features": {}}, "carousel") is False,
+            "пустой features → НЕ блок")
+
+
+def test_feature_blocked_explicit():
+    print("\n-- feature_blocked: блок только при явном false --")
+    t = {"tenant_id": "x", "features": {"carousel": False, "tg_post": True}}
+    _assert(tenant.feature_blocked(t, "carousel") is True, "явно false → блок")
+    _assert(tenant.feature_blocked(t, "tg_post") is False, "явно true → НЕ блок")
+    _assert(tenant.feature_blocked(t, "idea_bank") is False,
+            "не упомянута (но конфиг есть) → НЕ блок (мягко, переходный период)")
+
+
+def test_callback_feature_map_consistency():
+    print("\n-- callback→feature map: все фичи известны --")
+    import bot
+    for prefix, feat in bot._CALLBACK_FEATURE_MAP.items():
+        _assert(feat in tenant._KNOWN_FEATURES, f"{prefix!r}→{feat!r}: фича известна")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} tenant tests\n{'='*60}")

@@ -57,6 +57,25 @@ def feature_enabled(tenant: dict, name: str) -> bool:
     return bool((tenant.get("features") or {}).get(name, False))
 
 
+def feature_blocked(tenant: dict, name: str) -> bool:
+    """Надо ли ЗАБЛОКИРОВАТЬ опц-фичу для этого тенанта.
+
+    Блокируем ТОЛЬКО если конфиг ЯВНО выключил фичу (`name: false`).
+    Нет конфига / пустой features / фича не упомянута → НЕ блокируем
+    (fail-open). Это переходный период: пока tenant.json не задеплоен на
+    сервер, gating не должен ломать уже работающие боты. Ужесточение
+    (блок неупомянутых известных фич) — отдельным решением в Phase 2b.
+
+    Отличается от `feature_enabled` намеренно: enabled — «показать ли
+    кнопку/возможность» (default OFF), blocked — «отклонить ли уже пришедший
+    вызов» (default ALLOW, чтобы не сломать прод без конфига).
+    """
+    feats = tenant.get("features")
+    if not isinstance(feats, dict) or not feats:
+        return False
+    return feats.get(name) is False
+
+
 def config_doctor(tenant: dict) -> list[str]:
     """Проверка конфига ДО запуска. Возвращает список проблем (пусто = ok).
 

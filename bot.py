@@ -748,6 +748,31 @@ if _active_brand not in BRANDS:
     )
     _active_brand = "default"
 
+# ── Tenant config (Phase 2a миграции на contentbot-core) ─────────────────────
+# Декларативный конфиг тенанта (tenant.json). Загружается один раз при старте.
+# Пока tenant.json на сервере нет → fallback (features={}), и feature-gate
+# работает fail-open (ничего не блокирует) — прод не ломается.
+import tenant as _tenant  # noqa: E402
+_ACTIVE_TENANT = _tenant.load_tenant()
+_tenant_problems = _tenant.config_doctor(_ACTIVE_TENANT)
+if _tenant_problems:
+    logger.warning(f"[tenant] config doctor: {_tenant_problems}")
+else:
+    logger.info(f"[tenant] loaded tenant_id={_ACTIVE_TENANT.get('tenant_id')}")
+
+# Карта callback-префикс → опц-фича для feature-gate в handle_callback.
+# Только ОДНОЗНАЧНЫЕ опц-пайплайны. Ядро (селфи/сценарий/сборка/...) тут НЕ
+# фигурирует — оно всегда включено. Расширяется по мере тенантизации.
+_CALLBACK_FEATURE_MAP = {
+    "carousel_": "carousel",
+    "idea_pipeline:": "idea_bank",
+    "launch_skip:": "launch_monitor",
+    "launch_approve:": "launch_monitor",
+    "launch_retry:": "launch_monitor",
+    "card_autobroll": "remotion",
+    "card_hfbroll": "hyperframes",
+}
+
 # Per-call brand context. Set at the start of any handler that resolves a
 # Notion card — overrides the global _active_brand for the duration of the
 # request (including asyncio.to_thread calls, which copy contextvars).
@@ -11131,6 +11156,14 @@ def _compose_publication_descriptions(script_text: str) -> tuple[list[str], str]
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses."""
     query = update.callback_query
+    # Feature gate (Phase 2a-2, Critical 4 ревью): опц-фича, ЯВНО выключенная
+    # у тенанта, не запускается НИ одной кнопкой — включая stale-кнопки из
+    # старых сообщений. fail-open без конфига (tenant.feature_blocked).
+    if query.data:
+        for _pref, _feat in _CALLBACK_FEATURE_MAP.items():
+            if query.data.startswith(_pref) and _tenant.feature_blocked(_ACTIVE_TENANT, _feat):
+                await query.answer("Эта функция не подключена в текущем тарифе.", show_alert=True)
+                return
     await query.answer()
     logger.info(f"[user:{query.from_user.id}] Кнопка: {query.data}")
 
