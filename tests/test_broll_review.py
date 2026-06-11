@@ -48,8 +48,14 @@ def main():
     _assert("🎞 видео — karting" in txt, "видео karting в списке", errors)
     _assert("📷 фото — glamping" in txt, "фото glamping в списке", errors)
     cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
-    _assert("broll_rm:0" in cbs and "broll_rm:1" in cbs and "broll_rm:2" in cbs,
-            f"кнопки удаления по глоб. индексам: {cbs}", errors)
+    # 11 июня 2026: namespace brv_rm (review-слой). Раньше был broll_rm:<gi> —
+    # он КОЛЛИДИРОВАЛ с легаси broll_rm:<card_prefix>:<file> (управление
+    # файлами проекта): int-парсер review-обработчика стоял раньше и ронял
+    # легаси-кнопки ValueError'ом. Имена разнесены.
+    _assert("brv_rm:0" in cbs and "brv_rm:1" in cbs and "brv_rm:2" in cbs,
+            f"кнопки удаления по глоб. индексам (brv_rm): {cbs}", errors)
+    _assert(not any(c.startswith("broll_rm:") for c in cbs),
+            "review-слой больше НЕ использует broll_rm (коллизия с легаси)", errors)
     _assert("cbroll_save" in cbs, "есть «Сохранить выбранные» (рабочий cbroll_save)", errors)
     _assert("broll" in cbs, "есть «Добавить ещё»", errors)
 

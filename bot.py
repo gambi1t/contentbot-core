@@ -1168,7 +1168,9 @@ def _broll_review_text_kb(data):
         _kind = "📷 фото" if _photo else "🎞 видео"
         _cat = c.get("category") or (c.get("source") if c.get("source") not in ("local", None) else None) or Path(_p).stem
         lines.append(f"{n}. {_kind} — {_cat}")
-        rm_row.append(InlineKeyboardButton(f"🗑 {n}", callback_data=f"broll_rm:{gi}"))
+        # brv_rm (review-namespace) — НЕ broll_rm: тот занят легаси-управлением
+        # файлами проекта (broll_rm:<card>:<file>), int-парсер коллидировал.
+        rm_row.append(InlineKeyboardButton(f"🗑 {n}", callback_data=f"brv_rm:{gi}"))
     lines.append("\nЖми «🗑 N» чтобы убрать. Потом «💾 Сохранить».")
     rows = [rm_row[i:i + 4] for i in range(0, len(rm_row), 4)]
     rows.append([InlineKeyboardButton("➕ Добавить ещё", callback_data="broll")])
@@ -2786,6 +2788,61 @@ def heygen_generate_video(audio_url: str, look_id: str = None, avatar_version: s
     if data.get("error"):
         raise RuntimeError(f"HeyGen error: {data['error'].get('message', data['error'])}")
     return data["data"]["video_id"]
+
+
+def heygen_v3_avatar_video(
+    avatar_id: str,
+    audio_url: str,
+    expressiveness: str = "high",
+    motion_prompt: str | None = None,
+    resolution: str = "1080p",
+    aspect_ratio: str = "9:16",
+) -> str:
+    """POST /v3/videos type:"avatar" — Avatar IV с управляемым движением тела/рук.
+
+    Порт из panferov-legacy (7 июня 2026). По документации HeyGen:
+      - Avatar III доступен ТОЛЬКО на legacy /v1/v2, на /v3 его нет.
+      - motion_prompt + expressiveness работают ТОЛЬКО на Avatar IV (и только
+        для photo avatars / произвольных изображений).
+      - /v3/videos type:"avatar" НЕ принимает use_avatar_iv_model (поле v2).
+        Avatar IV — default движок v3.
+
+    expressiveness: "high" | "medium" | "low" (low ≈ «только голова»).
+    motion_prompt: natural-language описание жестов. Без него Avatar IV
+      анимирует руки невпопад (тест Дозы 29 апр).
+    Цена ~$0.05/sec @1080p (Avatar IV Photo Avatar).
+    Схема подтверждена реальным submit на тенанте panferov (video_id вернулся).
+    """
+    import httpx
+    if not HEYGEN_API_KEY:
+        raise RuntimeError("HEYGEN_API_KEY не настроен")
+    headers = {"x-api-key": HEYGEN_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "type": "avatar",
+        "avatar_id": avatar_id,
+        "audio_url": audio_url,
+        "title": "avatar_iv_v3",
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+    }
+    if expressiveness in ("high", "medium", "low"):
+        payload["expressiveness"] = expressiveness
+    if motion_prompt:
+        payload["motion_prompt"] = motion_prompt
+    logger.info(
+        f"HeyGen v3 avatar (Avatar IV): avatar={avatar_id[:16]}..., "
+        f"expr={expressiveness}, motion={(motion_prompt or '')[:50]!r}"
+    )
+    resp = httpx.post("https://api.heygen.com/v3/videos", headers=headers, json=payload, timeout=30)
+    data = resp.json()
+    if resp.status_code >= 400:
+        err = data.get("error") or data.get("message") or data
+        raise RuntimeError(f"HeyGen v3 {resp.status_code}: {err}")
+    inner = data.get("data") or data
+    video_id = inner.get("video_id") or inner.get("id")
+    if not video_id:
+        raise RuntimeError(f"HeyGen v3 returned no video_id: {data}")
+    return video_id
 
 
 def heygen_upload_audio_asset(audio_path: str) -> str:
@@ -12505,6 +12562,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         prev = _active_brand
         _active_brand = new_brand
+        # Порт из panferov-legacy (фикс 6 июня): ручное переключение ДОЛЖНО
+        # перебить закэшированный карточный бренд, иначе
+        # _restore_brand_from_pending на следующей идее вернёт стейл card_brand
+        # и переключение тихо ничего не сделает.
+        _brand_ctx.set("")
+        if user_id in pending:
+            pending[user_id].pop("card_brand", None)
+            _save_pending(pending)
         cfg = BRANDS[new_brand]
         logger.info(f"[user:{user_id}] brand_set callback: {prev} → {new_brand}")
         # Re-render the picker with the new selection marked
@@ -15311,7 +15376,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(query.message.chat_id, _txt, reply_markup=_kb)
         return
 
-    if query.data.startswith("broll_rm:"):
+    if query.data.startswith("brv_rm:"):
+        # Review-слой «Моё выбранное». Переименован из broll_rm: 11 июня 2026 —
+        # коллизия: легаси broll_rm:<card>:<file> (ниже, ~17630) падал в этом
+        # int-парсере ValueError'ом. Stale-кнопки старого формата broll_rm:<int>
+        # теперь ловит легаси-обработчик guard'ом (len parts).
         _gi = int(query.data.split(":")[1])
         _sel = data.get("broll_selected", []) or []
         if _gi in _sel:
@@ -17624,6 +17693,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data.startswith("broll_rm:"):
         # Remove a single B-roll clip: broll_rm:<card_prefix>:<filename>
         parts = query.data.split(":", 2)
+        if len(parts) < 3:
+            # Stale-кнопка старого review-формата broll_rm:<int> (до 11 июня
+            # 2026, теперь brv_rm:) — сообщение устарело, вежливо отклоняем.
+            await query.answer("Кнопка устарела — открой «Моё выбранное» заново")
+            return
         card_id_prefix = parts[1]
         clip_name = parts[2]
 
@@ -18067,8 +18141,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             buttons = [
-                [InlineKeyboardButton("⚡ Avatar 3 — быстрый, дешёвый", callback_data="heygen_ver:v3")],
-                [InlineKeyboardButton("✨ Avatar 4 — реалистичный, жесты, мимика", callback_data="heygen_ver:v2")],
+                # Порт из panferov-legacy (7 июня): «Avatar 4» раньше слал v2
+                # (legacy version=4, НЕ Avatar IV) — двигалась только голова.
+                # v4 → /v3/videos = настоящий Avatar IV с жестами рук.
+                [InlineKeyboardButton("⚡ Avatar 3 — мягкое движение, дешевле", callback_data="heygen_ver:v3")],
+                [InlineKeyboardButton("✨ Avatar 4 — жесты рук, мимика", callback_data="heygen_ver:v4")],
                 [InlineKeyboardButton("◀️ Назад к лукам", callback_data="heygen_looks")],
             ]
             ver_text = (
@@ -18285,13 +18362,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not audio_url:
                 raise RuntimeError(f"No audio URL in response: {upload_data}")
 
-            # Generate video — два пути:
-            # (а) Custom photo URL → HeyGen v3 Image-to-Video (без регистрации
-            #     avatar_id, не упирается в лимит). Использует /v3/videos
-            #     type:"image".
-            # (б) Стандартный avatar_id → HeyGen v2 /v2/video/generate.
+            # Generate video — ТРИ пути (порт из panferov-legacy, 7 июня 2026):
+            # (а) Custom photo URL → /v3/videos type:"image" (Image-to-Video,
+            #     всегда Avatar IV, без регистрации avatar_id).
+            # (б) avatar_id + Avatar 4 → /v3/videos type:"avatar" (Avatar IV)
+            #     с motion_prompt + expressiveness = движение тела/рук.
+            #     Avatar III недоступен на v3, motion/expr только на IV.
+            # (в) avatar_id + Avatar 3 → legacy /v2/video/generate (Avatar III,
+            #     спокойный кадр, дешевле; v3 его не поддерживает).
+            _brand_motion = _get_active_brand().get("heygen_motion_prompt") or \
+                "спокойно и уверенно рассказывает, естественные лёгкие жесты руками"
             if custom_photo_url:
-                # 'v2' (legacy Avatar 4) → 'v4' для v3 endpoint, иначе как есть
                 v3_version = "v4" if avatar_version == "v2" else avatar_version
                 logger.info(
                     f"HeyGen Image-to-Video: photo={custom_photo_url[:60]}... "
@@ -18302,9 +18383,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 logger.info(f"HeyGen v3 video submitted: {video_id} (image-to-video, version={v3_version})")
                 _use_v3_polling = True
+            elif avatar_version == "v4":
+                # Avatar IV через /v3 — движение тела/рук с motion_prompt
+                video_id = await asyncio.to_thread(
+                    heygen_v3_avatar_video, look_id, audio_url, "high", _brand_motion,
+                )
+                logger.info(f"HeyGen v3 avatar (Avatar IV) submitted: {video_id} (expr=high)")
+                _use_v3_polling = True
             else:
+                # Avatar 3 (III) — legacy /v2, спокойный кадр
                 video_id = await asyncio.to_thread(heygen_generate_video, audio_url, look_id, avatar_version)
-                logger.info(f"HeyGen video submitted: {video_id} (version={avatar_version})")
+                logger.info(f"HeyGen video submitted: {video_id} (Avatar III legacy, version={avatar_version})")
                 _use_v3_polling = False
 
             # Poll for completion (v3 use status endpoint /v3/videos/{id},
