@@ -583,6 +583,7 @@ async def _send_track_previews(
                     performer=cat_label,
                     duration=int(track.get("duration", 0)),
                     reply_markup=kb,
+                    read_timeout=60, write_timeout=60,
                 )
         except Exception as e:
             _LOGGER.error(f"[selfie] send_audio failed for {track['id']}: {e}")

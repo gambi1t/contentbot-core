@@ -12751,6 +12751,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=chat_id, audio=audio_f,
                         title=f"{i}. {t['id']}", performer=cat_label,
                         duration=int(t.get("duration", 0)), reply_markup=kb,
+                        read_timeout=60, write_timeout=60,
                     )
             except Exception as e:
                 logger.error(f"[music] send_audio failed for {t['id']}: {e}")
