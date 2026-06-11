@@ -11394,7 +11394,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         except Exception as e:
             logger.warning(f"[ideas] fetch_notion_cards failed: {e}")
+            existing_cards = []
             notion_titles = []
+
+        # Фидбек-луп «ЗАШЛО» (11 июня, Фаза A): карточки отсортированы
+        # created_time DESC — свежие первыми. Каждая карточка = Максим
+        # РЕАЛЬНО взял идею в работу → позитивный сигнал вкуса для
+        # генератора (в дополнение к негативному дедупу notion_titles).
+        taken_examples = [
+            {"title": c.get("title", ""), "rubric": c.get("rubric", "")}
+            for c in existing_cards[:15] if c.get("title")
+        ]
 
         session_data = pending.get(user_id) or {}
         session_titles: list[str] = list(session_data.get("ideas_session", []) or [])
@@ -11418,6 +11428,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "maksim",
                 exclude_titles,
                 5,
+                taken_examples=taken_examples,
             )
         except Exception as e:
             logger.error(f"[ideas] generation failed: {e}", exc_info=True)

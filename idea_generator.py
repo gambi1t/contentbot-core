@@ -200,6 +200,38 @@ def _parse_ideas_json(raw: str) -> list[dict]:
     return arr
 
 
+_TAKEN_MAX_EXAMPLES = 15  # свежих взятых карточек хватает для сигнала вкуса
+
+
+def _build_taken_block(taken: list[dict] | None) -> str:
+    """Блок «ЗАШЛО» — позитивный фидбек-луп (11 июня, Фаза A).
+
+    Максим жалуется «не все идеи нравятся», а его реальные решения (какие
+    идеи он ВЗЯЛ в работу → Notion-карточки) до сих пор шли в промпт только
+    негативом («УЖЕ БЫЛО, не повторяй»). Этот блок отдаёт те же карточки как
+    сигнал ВКУСА: улавливай углы/ниши/тон — но не дублируй темы (дедуп
+    остаётся в exclude-блоке).
+    """
+    rows: list[str] = []
+    for t in (taken or [])[:_TAKEN_MAX_EXAMPLES]:
+        title = (t.get("title") or "").strip()
+        if not title:
+            continue
+        rubric = (t.get("rubric") or "").strip()
+        rows.append(f"- {title}" + (f" [{rubric}]" if rubric else ""))
+    if not rows:
+        return ""
+    return (
+        "\n\nМАКСИМУ ЗАШЛО (он сам ВЗЯЛ эти идеи в работу — это его реальный "
+        "вкус, самый свежий сигнал):\n"
+        + "\n".join(rows)
+        + "\nУлавливай закономерность: какие УГЛЫ, ниши, тон и масштаб тем он "
+        "выбирает — и давай больше идей В ЭТОМ ДУХЕ. Сами темы НЕ дублируй и "
+        "НЕ перефразируй (они уже в списке «УЖЕ БЫЛО») — нужен тот же вкус "
+        "на НОВЫХ темах."
+    )
+
+
 def _validate_idea(idea: dict) -> bool:
     """Quick sanity check: required string fields present and non-empty.
 
@@ -223,6 +255,7 @@ def generate_ideas(
     n: int = 10,
     model: str = "claude-opus-4-7",
     max_tokens: int = 4096,
+    taken_examples: list[dict] | None = None,
 ) -> list[dict]:
     """Generate `n` content ideas for `brand`.
 
@@ -231,6 +264,9 @@ def generate_ideas(
         brand: brand key (must exist in _IDEA_PROMPT_FILES)
         exclude_titles: list of existing card titles to NOT repeat —
             capped to 80 most-recent before sending to LLM
+        taken_examples: свежие ВЗЯТЫЕ Максимом карточки
+            [{"title":…, "rubric":…}] — позитивный сигнал вкуса
+            (блок «ЗАШЛО», см. _build_taken_block). Optional.
         n: target idea count (LLM may return slightly fewer after
             duplicate filtering)
         model: Anthropic model id. Default `claude-opus-4-7` — same as
@@ -279,8 +315,12 @@ def generate_ideas(
             + "\n".join(f"- {s}" for s in seeds_sample)
         )
 
+    # 11 июня — фидбек-луп Фаза A: взятые карточки как сигнал вкуса.
+    # Порядок блоков: дедуп (что НЕ делать) → вкус (в каком духе) → seeds.
+    taken_block = _build_taken_block(taken_examples)
+
     user_msg = (
-        f"Сгенерируй {n} идей контента для Максима.{exclude_block}{seeds_block}\n\n"
+        f"Сгенерируй {n} идей контента для Максима.{exclude_block}{taken_block}{seeds_block}\n\n"
         f"🚨 ФОРМАТ ОТВЕТА — критично:\n"
         f"1. Твой ответ ДОЛЖЕН начинаться ровно с символа [ (квадратная скобка)\n"
         f"2. И заканчиваться ровно символом ]\n"
