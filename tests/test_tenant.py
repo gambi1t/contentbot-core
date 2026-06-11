@@ -162,6 +162,45 @@ def test_callback_feature_map_consistency():
         _assert(feat in tenant._KNOWN_FEATURES, f"{prefix!r}→{feat!r}: фича известна")
 
 
+def _looks_like_secret(val) -> bool:
+    """Эвристика leak-guard: длинная hex/base64-строка без префикса env: —
+    подозрение на боевой provider ID / токен, которому не место в git."""
+    import re
+    if not isinstance(val, str) or val.startswith("env:"):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_\-]{16,}", val)) and not val.startswith("_")
+
+
+def test_example_configs_no_secrets_leak():
+    """Phase 2a-4 leak-guard: example-конфиги в git НЕ должны содержать
+    боевых provider ID / токенов — только env:KEY-ссылки. Тот же класс
+    риска, что пойманный 11 июня NOTION_TOKEN. Полноценные leakage-тесты
+    ДАННЫХ — в Phase 2b, когда конфиги наполнятся."""
+    print("\n-- leak-guard: нет голых секретов в example-конфигах --")
+    examples = sorted((ROOT / "tenants").glob("*.example.json"))
+    _assert(len(examples) >= 2, f"найдены example-конфиги ({len(examples)})")
+    for f in examples:
+        cfg = json.loads(f.read_text(encoding="utf-8"))
+        # config_doctor чистый
+        _assert(tenant.config_doctor(cfg) == [], f"{f.name}: config_doctor чисто")
+        # ни одно значение в brand_overrides не выглядит как голый секрет
+        for brand, fields in (cfg.get("brand_overrides") or {}).items():
+            for k, v in (fields or {}).items():
+                _assert(not _looks_like_secret(v),
+                        f"{f.name}: {brand}.{k} не голый ID (={v!r})")
+
+
+def test_example_configs_distinct():
+    """Конфиги тенантов должны РАЗЛИЧАТЬСЯ (не копипаст одного в другой) —
+    иначе тенантизация фиктивна. Минимальная проверка: разные tenant_id
+    и хоть один различающийся фичефлаг."""
+    print("\n-- конфиги тенантов различимы --")
+    mk = json.loads((ROOT / "tenants" / "maksim.example.json").read_text(encoding="utf-8"))
+    pf = json.loads((ROOT / "tenants" / "panferov.example.json").read_text(encoding="utf-8"))
+    _assert(mk["tenant_id"] != pf["tenant_id"], "tenant_id различны")
+    _assert(mk.get("features") != pf.get("features"), "наборы фич различны (не копипаст)")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} tenant tests\n{'='*60}")
