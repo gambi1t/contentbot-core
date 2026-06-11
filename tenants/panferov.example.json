@@ -1,5 +1,5 @@
 {
-  "_comment": "Пример конфига тенанта panferov (Phase 2a-1). Тот же код, что у maksim — разница ТОЛЬКО в флагах: у Артёма есть launch_monitor + youtube_broll + billing, нет каруселей/банка идей/HF/Remotion. Наполняется в Phase 2b.",
+  "_comment": "Пример конфига тенанта panferov (Phase 2a-1 features + 2a-3 brand_overrides). Тот же код, что у maksim — разница ТОЛЬКО в данных: у Артёма есть launch_monitor + youtube_broll + billing, нет каруселей/банка идей/HF/Remotion.",
   "tenant_id": "panferov",
   "features": {
     "tg_post": true,
@@ -13,5 +13,12 @@
     "video_gen": true,
     "instagram_dm": true,
     "billing": true
+  },
+  "_brand_overrides_comment": "У Артёма два бренда (личный default + обувной shoes). Override накладывается поверх соответствующего бренда из BRANDS-dict. env:KEY → из .env. Пустой/нет записи → берётся из кода (текущее поведение panferov-legacy не меняется).",
+  "brand_overrides": {
+    "default": {
+      "heygen_avatar_id": "env:HEYGEN_AVATAR_ID",
+      "eleven_voice_id": "env:ELEVENLABS_VOICE_ID"
+    }
   }
 }

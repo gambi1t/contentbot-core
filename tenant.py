@@ -76,6 +76,35 @@ def feature_blocked(tenant: dict, name: str) -> bool:
     return feats.get(name) is False
 
 
+def _resolve_env(value):
+    """'env:KEY' → os.environ.get('KEY') (None если переменной нет).
+    Любое другое значение возвращается как есть."""
+    if isinstance(value, str) and value.startswith("env:"):
+        return os.environ.get(value[4:])
+    return value
+
+
+def apply_brand_overrides(brand: dict, tenant: dict, brand_name: str) -> dict:
+    """Тонкий слой Phase 2a-3 (вариант Б): tenant.json МОЖЕТ переопределить
+    поля активного бренда (provider IDs, notion, промпт-файлы и т.п.), а
+    BRANDS-dict остаётся fallback.
+
+    Нет `brand_overrides` / нет записи для этого бренда → возвращает brand
+    БЕЗ изменений (прод без tenant.json не меняется). Значения `env:KEY`
+    резолвятся из окружения; если переменной нет (None) — поле НЕ затирается
+    (остаётся значение из бренда). Вход НЕ мутируется.
+    """
+    overrides = (tenant.get("brand_overrides") or {}).get(brand_name)
+    if not overrides:
+        return brand
+    merged = dict(brand)
+    for k, v in overrides.items():
+        rv = _resolve_env(v)
+        if rv is not None:
+            merged[k] = rv
+    return merged
+
+
 def config_doctor(tenant: dict) -> list[str]:
     """Проверка конфига ДО запуска. Возвращает список проблем (пусто = ok).
 

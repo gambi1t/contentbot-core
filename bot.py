@@ -793,9 +793,21 @@ def _get_active_brand_name() -> str:
     return name if name in BRANDS else "default"
 
 
+def _brand_with_overrides(name: str) -> dict:
+    """Профиль бренда из BRANDS с наложенным tenant-override (Phase 2a-3, Б).
+
+    BRANDS-dict — fallback (истина по умолчанию). tenant.json МОЖЕТ
+    переопределить поля бренда (provider IDs, notion, промпт-файлы) через
+    `brand_overrides[<name>]`. Нет конфига / нет записи → бренд как есть.
+    Единственная точка merge — все runtime-чтения бренда идут сюда.
+    """
+    base = BRANDS.get(name, BRANDS["default"])
+    return _tenant.apply_brand_overrides(base, _ACTIVE_TENANT, name)
+
+
 def _get_active_brand() -> dict:
     """Return current brand profile dict (avatar_id, voice_id, model_id, …)."""
-    return BRANDS.get(_get_active_brand_name(), BRANDS["default"])
+    return _brand_with_overrides(_get_active_brand_name())
 
 
 def _resolve_brand_cfg(brand_name: str | None) -> dict:
@@ -808,7 +820,7 @@ def _resolve_brand_cfg(brand_name: str | None) -> dict:
     a specific brand instead of relying on global state.
     """
     if brand_name and brand_name in BRANDS:
-        return BRANDS[brand_name]
+        return _brand_with_overrides(brand_name)
     return _get_active_brand()
 
 
@@ -7252,8 +7264,7 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
         # Notion meta — it is NOT the post body. The actual TG-post body
         # is generated below via tg_post_writer and saved as a Notion
         # body block, not as a property.
-        active_brand = _get_active_brand_name()
-        brand_cfg = BRANDS.get(active_brand, BRANDS["default"])
+        brand_cfg = _get_active_brand()
         tg_handle = brand_cfg.get("telegram_channel_handle") or ""
         tg_display = brand_cfg.get("telegram_channel_display") or ""
         if tg_handle:

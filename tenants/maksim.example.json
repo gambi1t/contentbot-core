@@ -1,5 +1,5 @@
 {
-  "_comment": "Пример конфига тенанта maksim (Phase 2a-1). Секреты НЕ здесь — в .env. Реальный tenant.json на сервере, в git только .example. Наполняется в Phase 2b (providers/notion/brands).",
+  "_comment": "Пример конфига тенанта maksim (Phase 2a-1 features + 2a-3 brand_overrides). Секреты НЕ здесь — значения env:KEY резолвятся из .env. Реальный tenant.json на сервере, в git только .example.",
   "tenant_id": "maksim",
   "features": {
     "tg_post": true,
@@ -13,5 +13,12 @@
     "video_gen": true,
     "instagram_dm": true,
     "billing": false
+  },
+  "_brand_overrides_comment": "Тонкий слой 2a-3 (Б): эти поля НАКЛАДЫВАЮТСЯ поверх BRANDS-dict для указанного бренда. Не указано → берётся из кода. env:KEY → из .env (нет переменной → fallback на код). Provider ID Максима уже живут в .env, поэтому здесь показан их явный проброс.",
+  "brand_overrides": {
+    "maksim": {
+      "heygen_avatar_id": "env:HEYGEN_AVATAR_ID",
+      "eleven_voice_id": "env:ELEVENLABS_VOICE_ID"
+    }
   }
 }

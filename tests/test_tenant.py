@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -114,6 +115,44 @@ def test_feature_blocked_explicit():
     _assert(tenant.feature_blocked(t, "tg_post") is False, "явно true → НЕ блок")
     _assert(tenant.feature_blocked(t, "idea_bank") is False,
             "не упомянута (но конфиг есть) → НЕ блок (мягко, переходный период)")
+
+
+def test_apply_brand_overrides_fallback():
+    print("\n-- apply_brand_overrides: fallback без конфига --")
+    brand = {"heygen_avatar_id": "AAA", "eleven_voice_id": "VVV"}
+    # Нет brand_overrides / нет конфига → бренд НЕ меняется (прод цел).
+    _assert(tenant.apply_brand_overrides(brand, {}, "maksim") == brand, "пустой тенант → бренд как есть")
+    _assert(tenant.apply_brand_overrides(brand, {"brand_overrides": {}}, "maksim") == brand,
+            "пустой brand_overrides → как есть")
+    _assert(tenant.apply_brand_overrides(brand, {"brand_overrides": {"other": {"x": 1}}}, "maksim") == brand,
+            "override для ДРУГОГО бренда → текущий не тронут")
+    # Не мутирует вход
+    tenant.apply_brand_overrides(brand, {"brand_overrides": {"maksim": {"heygen_avatar_id": "NEW"}}}, "maksim")
+    _assert(brand["heygen_avatar_id"] == "AAA", "вход НЕ мутируется")
+
+
+def test_apply_brand_overrides_merge():
+    print("\n-- apply_brand_overrides: переопределение полей --")
+    brand = {"heygen_avatar_id": "AAA", "eleven_voice_id": "VVV", "description": "old"}
+    t = {"brand_overrides": {"maksim": {"heygen_avatar_id": "NEW", "description": "новый"}}}
+    out = tenant.apply_brand_overrides(brand, t, "maksim")
+    _assert(out["heygen_avatar_id"] == "NEW", "поле переопределено")
+    _assert(out["description"] == "новый", "второе поле переопределено")
+    _assert(out["eleven_voice_id"] == "VVV", "неуказанное поле сохранено из бренда")
+
+
+def test_apply_brand_overrides_env():
+    print("\n-- apply_brand_overrides: env:KEY резолв --")
+    os.environ["_TEST_AVATAR"] = "FROM_ENV"
+    brand = {"heygen_avatar_id": "AAA"}
+    t = {"brand_overrides": {"maksim": {"heygen_avatar_id": "env:_TEST_AVATAR"}}}
+    out = tenant.apply_brand_overrides(brand, t, "maksim")
+    _assert(out["heygen_avatar_id"] == "FROM_ENV", "env:KEY резолвится из окружения")
+    # env-переменной НЕТ → НЕ затираем бренд (безопасно)
+    t2 = {"brand_overrides": {"maksim": {"heygen_avatar_id": "env:_MISSING_VAR_XYZ"}}}
+    out2 = tenant.apply_brand_overrides(brand, t2, "maksim")
+    _assert(out2["heygen_avatar_id"] == "AAA", "env: без значения → fallback на бренд (не None)")
+    del os.environ["_TEST_AVATAR"]
 
 
 def test_callback_feature_map_consistency():
