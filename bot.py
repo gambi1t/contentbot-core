@@ -4505,6 +4505,36 @@ def fetch_notion_page_script(page_id: str) -> str:
     return "\n".join(text_parts).strip()
 
 
+async def _ensure_script_loaded(data: dict | None) -> str:
+    """Вернуть сценарий сессии; если пусто — лениво подтянуть из Notion по
+    активной карточке (notion_edit_card / notion_page_id) и закэшировать.
+
+    Чинит «Нет сценария» при работе с ГОТОВОЙ карточкой: pending['script']
+    заполняется только при генерации сценария в текущем диалоге, но НЕ при
+    открытии карточки (notion_card:). Поэтому действия, читающие сценарий из
+    сессии (описание для публикации, список съёмки B-roll), падали, хотя
+    сценарий есть в Notion. Notion-запрос делается только когда нужно (lazy)
+    и кэшируется в сессии, чтобы не дёргать API повторно.
+    """
+    if not data:
+        return ""
+    script_text = (data.get("script") or "").strip()
+    if script_text:
+        return script_text
+    page_id = data.get("notion_edit_card") or data.get("notion_page_id")
+    if not page_id:
+        return ""
+    try:
+        script_text = await asyncio.to_thread(fetch_notion_page_script, page_id) or ""
+    except Exception as e:
+        logger.error(f"_ensure_script_loaded fetch error: {e}", exc_info=True)
+        return ""
+    if script_text:
+        data["script"] = script_text
+        _save_pending(pending)
+    return script_text
+
+
 def update_notion_page_script(page_id: str, new_script: str) -> None:
     """Replace the script paragraph blocks under the 'Сценарий' heading on a Notion page.
 
@@ -11296,7 +11326,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "broll_shooting_list":
         # Generate personal shooting list using Opus
-        script_text = data.get("script", "")
+        # Сценарий из сессии ИЛИ лениво из Notion (тот же баг, что у описания).
+        script_text = await _ensure_script_loaded(data)
         if not script_text:
             await query.edit_message_text("Нет сценария. Сначала создай сценарий.")
             return
@@ -12356,7 +12387,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "gen_description":
-        script_text = data.get("script", "")
+        # Сценарий из сессии ИЛИ лениво из Notion (готовая карточка после «К карточке»).
+        script_text = await _ensure_script_loaded(data)
         if not script_text:
             await query.edit_message_text("Нет сценария. Сначала создай сценарий.")
             return
