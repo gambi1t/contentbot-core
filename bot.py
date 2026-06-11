@@ -12682,32 +12682,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("music_cat:"):
-        # Show 3 random tracks from category
+        # Показать 3 трека категории как АУДИО на прослушивание (превью).
+        # Юзер слушает в нативном Telegram-плеере и выбирает «✅ Выбрать этот».
+        # callback выбора = music_apply:<id>:<prefix> (тот же, что и раньше).
         import music_mixer
         parts = query.data.split(":", 2)
         cat = parts[1]
         card_prefix = parts[2] if len(parts) > 2 else ""
-        tracks = music_mixer.list_tracks(cat)
+        tracks = music_mixer.pick_n_tracks(cat, n=3)
         if not tracks:
             await query.answer("Нет треков в этой категории", show_alert=True)
             return
-        import random as _rnd
-        sample = _rnd.sample(tracks, min(3, len(tracks)))
-        buttons = []
-        for i, t in enumerate(sample, 1):
-            label = f"🎵 Трек {i} ({t['duration']:.0f}с)"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"music_apply:{t['id']}:{card_prefix}")])
-        buttons.append([InlineKeyboardButton("🔀 Другие треки", callback_data=f"music_cat:{cat}:{card_prefix}")])
-        buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"music_pick:{card_prefix}")])
 
         cats = music_mixer.list_categories()
         meta = cats.get(cat, {})
-        await query.edit_message_text(
-            f"{meta.get('emoji', '🎵')} <b>{meta.get('label', cat)}</b>\n"
-            f"<i>{meta.get('desc', '')}</i>\n\n"
-            "Выбери один из трёх вариантов:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons),
+        cat_label = f"{meta.get('emoji', '🎵')} {meta.get('label', cat)}".strip()
+        chat_id = query.message.chat_id
+
+        # Интро — заменяем сообщение с кнопками категорий, чтобы не кликнули повторно.
+        try:
+            await query.edit_message_text(
+                f"{cat_label} — подбираю треки на прослушивание...", parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+        # Шлём каждый трек как audio-сообщение с кнопкой «✅ Выбрать этот».
+        for i, t in enumerate(tracks, 1):
+            try:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                    f"✅ Выбрать этот ({t['duration']:.0f}с)",
+                    callback_data=f"music_apply:{t['id']}:{card_prefix}",
+                )]])
+                with open(t["file"], "rb") as audio_f:
+                    await context.bot.send_audio(
+                        chat_id=chat_id, audio=audio_f,
+                        title=f"{i}. {t['id']}", performer=cat_label,
+                        duration=int(t.get("duration", 0)), reply_markup=kb,
+                    )
+            except Exception as e:
+                logger.error(f"[music] send_audio failed for {t['id']}: {e}")
+
+        # Footer с управлением — остаётся последним в ленте.
+        footer_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔀 Другие треки", callback_data=f"music_cat:{cat}:{card_prefix}")],
+            [InlineKeyboardButton("◀️ Назад", callback_data=f"music_pick:{card_prefix}")],
+        ])
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="☝️ Послушай треки выше и выбери «✅» под нужным.\n\n"
+                 "Если ни один не подошёл — «🔀 Другие треки».",
+            reply_markup=footer_kb,
         )
         return
 

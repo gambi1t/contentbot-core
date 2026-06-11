@@ -43,6 +43,30 @@ def pick_random_track(category: str) -> dict | None:
     return random.choice(tracks) if tracks else None
 
 
+def pick_n_tracks(category: str, n: int = 3, exclude_ids: list | None = None) -> list:
+    """Вернуть до N случайных треков категории, без повторов и без exclude.
+
+    Для предпрослушивания в карточках: бот шлёт юзеру несколько аудио, юзер
+    слушает в нативном Telegram-плеере и выбирает кнопкой «Выбрать этот».
+
+    Args:
+        category: имя категории.
+        n: сколько треков (≤ числа доступных, без дубликатов).
+        exclude_ids: id уже показанных (для «Другие треки»), исключаем.
+
+    Returns:
+        list[track-dict] длиной 0..min(n, len(available)).
+    """
+    tracks = list_tracks(category)
+    if not tracks:
+        return []
+    exclude = set(exclude_ids or [])
+    pool = [t for t in tracks if t.get("id") not in exclude]
+    if not pool:
+        pool = tracks  # все исключены — fallback
+    return random.sample(pool, min(n, len(pool)))
+
+
 def mix_music_into_video(
     video_path: str,
     music_path: str,
