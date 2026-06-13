@@ -34,10 +34,12 @@ from .assembler import MontageError, assemble_broll_montage
 from .llm import generate_script
 from .selector import SelectorError, select_clips
 from .draft import (
-    BrollDraft, Status, SourceMode,
+    BrollItem, BrollDraft, Status, SourceMode,
     save_draft, load_draft, new_draft_id, cleanup_expired,
 )
+from .materialize import materialize_items, validate_upload_media
 from .source_menu import source_menu_keyboard
+from bot_state import pending as _bot_pending, save_pending as _bot_save_pending
 
 logger = logging.getLogger("broll.handlers")
 
@@ -45,9 +47,12 @@ logger = logging.getLogger("broll.handlers")
 # длинных ветках). Отдельная папка, атомарная запись — см. broll.draft.
 DRAFTS_DIR = Path(__file__).resolve().parent.parent / "broll_drafts"
 
-# Фазовая выкатка источников: пока проведён только AUTO (Авто из библиотеки).
-# Вручную/Загрузить/HF добавляются следующими инкрементами.
-_ENABLED_MODES = (SourceMode.AUTO,)
+# Фазовая выкатка источников. Проведены: AUTO (Авто из библиотеки), UPLOAD
+# (Загрузить свои фото/видео). Вручную/HF — следующими инкрементами.
+_ENABLED_MODES = (SourceMode.AUTO, SourceMode.UPLOAD)
+
+# State (в общем pending) для приёма загрузок Pipeline 2.
+_UPLOAD_STATE = "broll2_uploading"
 
 # Подписи категорий для preview.
 _SCENE_LABELS = {
@@ -230,8 +235,151 @@ async def handle_broll_source(
         )
         return
 
+    if mode == SourceMode.UPLOAD:
+        up_dir = DRAFTS_DIR.parent / "broll_runs" / draft_id / "uploads"
+        up_dir.mkdir(parents=True, exist_ok=True)
+        draft.source_mode = SourceMode.UPLOAD
+        draft.status = Status.UPLOADING
+        draft.work_dir = str(up_dir)
+        draft.source_items = []
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        # State в общий pending → process_photo/process_idea(video) роутят
+        # загрузки сюда (handle_broll2_upload_message).
+        uid = q.from_user.id
+        _bot_pending[uid] = {"state": _UPLOAD_STATE, "broll2_draft_id": draft_id}
+        _bot_save_pending(_bot_pending)
+        await context.bot.send_message(
+            chat_id,
+            "📤 Пришли свои фото/видео (можно несколько). Когда закончишь — "
+            "жми «✅ Готово».",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Готово", callback_data="b2up_done")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="b2up_cancel")],
+            ]),
+        )
+        return
+
     # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.
     await context.bot.send_message(chat_id, "Этот режим скоро будет доступен.")
+
+
+async def handle_broll2_upload_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Приём фото/видео в state broll2_uploading. True если обработано.
+
+    Скачивает файл → validate_upload_media → кладёт в draft.work_dir →
+    добавляет BrollItem(origin=upload) в durable-draft. Битый/невалидный —
+    отклоняет с причиной, не добавляет."""
+    uid = update.effective_user.id
+    d = _bot_pending.get(uid) or {}
+    if d.get("state") != _UPLOAD_STATE:
+        return False
+    draft_id = d.get("broll2_draft_id")
+    draft = load_draft(draft_id, DRAFTS_DIR) if draft_id else None
+    if draft is None:
+        await update.message.reply_text("⚠️ Черновик потерян — запусти B-roll ролик заново.")
+        _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+        return True
+
+    msg = update.message
+    work = Path(draft.work_dir); work.mkdir(parents=True, exist_ok=True)
+    n = len(draft.source_items)
+    if msg.photo:
+        kind = "image"
+        tg_file = await context.bot.get_file(msg.photo[-1].file_id)
+        dest = work / f"up_{n + 1:03d}.jpg"
+    else:
+        vid = msg.video or msg.document
+        if not vid:
+            return False
+        kind = "video"
+        suffix = ".mp4"
+        dest = work / f"up_{n + 1:03d}{suffix}"
+        tg_file = await context.bot.get_file(vid.file_id)
+    await tg_file.download_to_drive(str(dest))
+
+    ok, reason = validate_upload_media(dest, kind)
+    if not ok:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        await msg.reply_text(f"⚠️ Файл не подошёл: {reason}")
+        return True
+
+    draft.source_items.append(BrollItem(
+        kind=kind, origin="upload", path=str(dest),
+        label=f"upload/{dest.name}"))
+    draft.touch(time.time())
+    save_draft(draft, DRAFTS_DIR)
+    # Кнопки на КАЖДОМ ack (Telethon 13 июня): иначе «Готово» уезжает вверх
+    # на первом сообщении и недоступно после загрузок.
+    await msg.reply_text(
+        f"✅ Добавлено ({len(draft.source_items)}). Ещё файл или жми «Готово».",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Готово", callback_data="b2up_done")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="b2up_cancel")],
+        ]),
+    )
+    return True
+
+
+async def finish_broll_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              claude=None) -> None:
+    """«✅ Готово» загрузки: materialize items → превью → существующая сборка."""
+    q = update.callback_query
+    uid = q.from_user.id
+    chat_id = q.message.chat_id
+    d = _bot_pending.get(uid) or {}
+    draft = load_draft(d.get("broll2_draft_id"), DRAFTS_DIR) if d.get("broll2_draft_id") else None
+    if draft is None or not draft.source_items:
+        await context.bot.send_message(chat_id, "⚠️ Ничего не загружено — пришли фото/видео.")
+        return
+    status = await context.bot.send_message(chat_id, "🎬 Обрабатываю загруженное…")
+    # Фото → Ken Burns mp4, видео → passthrough (materialize, тестировано).
+    clip_paths = await asyncio.to_thread(
+        materialize_items, draft.source_items, draft.work_dir)
+    if not clip_paths:
+        await status.edit_text("⚠️ Ни один файл не удалось подготовить. Попробуй другие.")
+        return
+    draft.status = Status.PREVIEW_READY
+    draft.touch(time.time())
+    save_draft(draft, DRAFTS_DIR)
+    _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+    # Переиспользуем существующую сборку через dict-контракт.
+    context.user_data["broll_draft"] = {
+        "script": draft.script_text,
+        "clips": [str(p) for p in clip_paths],
+        "theme": draft.theme,
+        "notion_url": draft.notion_url,
+        "chat_id": draft.chat_id,
+    }
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=_build_preview(draft.script_text, [str(p) for p in clip_paths]),
+        parse_mode="HTML",
+        reply_markup=_approval_keyboard(draft.notion_url),
+        disable_web_page_preview=True,
+    )
+
+
+async def cancel_broll_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«❌ Отмена» загрузки: чистим state + черновик."""
+    q = update.callback_query
+    uid = q.from_user.id
+    d = _bot_pending.get(uid) or {}
+    did = d.get("broll2_draft_id")
+    if did:
+        try:
+            (DRAFTS_DIR / f"{did}.json").unlink()
+        except OSError:
+            pass
+    _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+    await context.bot.send_message(q.message.chat_id, "✖️ Загрузка отменена.")
 
 
 async def assemble_broll_from_draft(
@@ -383,6 +531,9 @@ async def cancel_broll(
 __all__ = [
     "generate_broll_preview",
     "handle_broll_source",
+    "handle_broll2_upload_message",
+    "finish_broll_upload",
+    "cancel_broll_upload",
     "assemble_broll_from_draft",
     "regenerate_broll_preview",
     "cancel_broll",

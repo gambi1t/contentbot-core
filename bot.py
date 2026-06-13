@@ -7681,6 +7681,12 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await selfie_handlers.handle_broll_upload_photo_message(update, context):
             return
 
+    # ─── Pipeline 2 (без аватара) — приём загруженных фото ─────
+    if state == "broll2_uploading":
+        from broll.handlers import handle_broll2_upload_message
+        if await handle_broll2_upload_message(update, context):
+            return
+
     # ─── Maksim TG-post photo attachment via reply ───────────────────
     # When the user clicks «📤 Прислать сейчас» in the TG-photo menu,
     # `tgphoto_awaiting_reply` is set on their pending. Subsequent photo
@@ -8565,6 +8571,12 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Pipeline 2 — B-roll video upload (selfie + B-roll mix).
     if user_id in pending and pending[user_id].get("state") == "selfie_broll_uploading_video":
         if await selfie_handlers.handle_broll_upload_video_message(update, context):
+            return
+
+    # Pipeline 2 (без аватара) — приём загруженных видео.
+    if user_id in pending and pending[user_id].get("state") == "broll2_uploading":
+        from broll.handlers import handle_broll2_upload_message
+        if await handle_broll2_upload_message(update, context):
             return
 
     # Selfie pipeline v2 — video intake routed to the selfie module.
@@ -12633,6 +12645,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:  # avatar (дефолт)
             await _generate_script(pseudo, context, idea_text)
+        return
+
+    if query.data == "b2up_done":
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import finish_broll_upload
+        await finish_broll_upload(update, context, claude)
+        return
+
+    if query.data == "b2up_cancel":
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import cancel_broll_upload
+        await cancel_broll_upload(update, context)
         return
 
     if query.data.startswith("b2src:"):
