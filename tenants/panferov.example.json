@@ -20,5 +20,9 @@
       "heygen_avatar_id": "env:HEYGEN_AVATAR_ID",
       "eleven_voice_id": "env:ELEVENLABS_VOICE_ID"
     }
+  },
+  "_brands_comment": "allowed — какие бренды видны в /brand-пикере. После слияния в core BRANDS-dict содержит и чужой maksim; здесь ограничиваем Артёма его брендами (Phase 2c-2, I3).",
+  "brands": {
+    "allowed": ["default", "shoes"]
   }
 }

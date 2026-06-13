@@ -20,5 +20,9 @@
       "heygen_avatar_id": "env:HEYGEN_AVATAR_ID",
       "eleven_voice_id": "env:ELEVENLABS_VOICE_ID"
     }
+  },
+  "_brands_comment": "allowed — Максим видит только свой бренд; default+shoes (бренды Артёма) в /brand-пикере не показываются (Phase 2c-2, I3).",
+  "brands": {
+    "allowed": ["maksim"]
   }
 }
