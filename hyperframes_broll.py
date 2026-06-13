@@ -1650,74 +1650,48 @@ def generate_hyperframes_broll(
         _notify(progress_cb,
                 "🎬 Шаг 3/3: сцены написаны — рендерю видео (~4-5 мин)…")
         while True:
-            # 1) Layout-инспекция (дешевле рендера — ловим overlap/offscreen
-            #    ДО траты времени на рендер). 2) Рендер.
+            # Layout-детектор — СОВЕЩАТЕЛЬНЫЙ (13 июня, решение Артёма):
+            # геометрический детектор шумит на разнородном LLM-HTML (ложные
+            # overlap на split-заголовках/ghost), а авто-перегенерация по нему
+            # регенерила НОРМАЛЬНЫЕ сцены + полный ре-рендер (~8 мин/раунд).
+            # Поэтому layout-замечания ТОЛЬКО логируем, ролик отдаём. Авто-fix-
+            # round — ИСКЛЮЧИТЕЛЬНО на render-ошибках (без mp4 нет видео).
+            # Реальные дефекты вёрстки — ручная кнопка «перегенерировать сцену» (P1).
             layout_by_scene = _inspect_all_scenes()
             clips, errors = _render_fn(out_dir)
 
-            # Severity (13 июня): crowding (теснота) — SOFT. Часто косметика/
-            # ложняк (метки списка, плотная типографика) и НЕ стоит дорогого
-            # fix-раунда (ре-рендер). Hard = offscreen/overlap (реальные дефекты
-            # композиции). Только hard (+ render-ошибки) гонят fix-round.
-            hard_by_scene = {
-                sf: [i for i in iss if i.get("type") != "crowding"]
-                for sf, iss in (layout_by_scene or {}).items()
-            }
-            hard_by_scene = {sf: v for sf, v in hard_by_scene.items() if v}
-            n_soft = (sum(len(v) for v in (layout_by_scene or {}).values())
-                      - sum(len(v) for v in hard_by_scene.values()))
-
-            # Render-ошибки ФАТАЛЬНЫ (без них нет видео). Layout — QUALITY.
-            problems: list[str] = []
-            if hard_by_scene:
-                problems.append(_format_layout_issues(hard_by_scene))
-            if errors:
-                problems.append("ОШИБКИ РЕНДЕРА:\n" + "\n".join(errors))
-
-            if not problems:
-                if n_soft:
-                    logger.info(f"[hf_broll] {n_soft} мягких (crowding) замечаний "
-                                f"— отдаю без доводки")
-                break  # hard-проблем нет — выходим
-
-            if fix_round >= MAX_FIX_ROUNDS:
-                # Раунды исчерпаны.
-                if errors:
-                    raise HyperFramesBrollError(
-                        f"B-roll (HyperFrames) не собрался после {MAX_FIX_ROUNDS} "
-                        f"повторов. Ошибки: {'; '.join(e[:120] for e in errors)}"
-                    )
-                # Рендер успешен, но layout-проблемы остались — НЕ блокируем,
-                # отдаём с предупреждением (лучше неидеальное видео, чем ничего).
-                logger.warning(
-                    f"[hf_broll] layout-проблемы не вычищены за {MAX_FIX_ROUNDS} "
-                    f"раундов, отдаю как есть: "
+            if layout_by_scene:
+                n_layout = sum(len(v) for v in layout_by_scene.values())
+                logger.info(
+                    f"[hf_broll] детектор: {n_layout} layout-замечаний "
+                    f"(совещательно, без авто-доводки): "
                     f"{ {k: len(v) for k, v in layout_by_scene.items()} }"
                 )
-                break
+
+            if not errors:
+                break  # рендер чист — отдаём (layout-советы залогированы)
+
+            if fix_round >= MAX_FIX_ROUNDS:
+                raise HyperFramesBrollError(
+                    f"B-roll (HyperFrames) не собрался после {MAX_FIX_ROUNDS} "
+                    f"повторов рендера. Ошибки: {'; '.join(e[:120] for e in errors)}"
+                )
 
             fix_round += 1
-            n_hard = sum(len(v) for v in hard_by_scene.values())
-            logger.info(
-                f"[hf_broll] fix-round {fix_round}: "
-                f"{len(errors)} render-ошибок, {n_hard} hard layout-проблем "
-                f"(+{n_soft} мягких пропущено)"
-            )
+            logger.info(f"[hf_broll] fix-round {fix_round}: {len(errors)} "
+                        f"render-ошибок — перегенерирую упавшие сцены")
             _notify(progress_cb,
-                    f"🔧 Доводка вёрстки {fix_round}/{MAX_FIX_ROUNDS}: детектор "
-                    f"нашёл {n_hard} замечаний — перегенерирую проблемные "
-                    f"сцены и рендерю заново (~5-7 мин)…")
+                    f"🔧 Перерендер {fix_round}/{MAX_FIX_ROUNDS}: {len(errors)} "
+                    f"сцен не отрендерились — повторяю…")
             if legacy_build:
-                # старый монолитный агент-фиксер (весь проект одним вызовом)
                 total_cost += _run_claude(
-                    _build_prompt(script_text, fix_error="\n\n".join(problems))
+                    _build_prompt(script_text,
+                                  fix_error="ОШИБКИ РЕНДЕРА:\n" + "\n".join(errors))
                 )
                 _revert_stray()
             else:
-                # single-shot: перегенерация только сцен с HARD-проблемами
-                _fix_scenes_singleshot(
-                    storyboard, _problems_by_scene(hard_by_scene, errors)
-                )
+                # перегенерация ТОЛЬКО сцен с render-ошибками
+                _fix_scenes_singleshot(storyboard, _problems_by_scene({}, errors))
     finally:
         _GEN_LOCK.release()
 
