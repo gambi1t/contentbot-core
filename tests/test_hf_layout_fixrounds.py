@@ -146,8 +146,9 @@ def test_render_error_fatal(errors):
 
 
 def test_layout_unfixable_ships_with_warning(errors):
-    print("\n-- layout-issue не чинится за раунды, но рендер ОК → отдаём (НЕ raise) --")
-    issues = {"scene_02.html": [{"type": "crowding", "a": "A", "b": "B", "gapPx": 8}]}
+    print("\n-- HARD layout-issue не чинится за раунды, но рендер ОК → отдаём (НЕ raise) --")
+    # overlap = HARD (реальный дефект). Не вычистился за раунды → отдаём как есть.
+    issues = {"scene_02.html": [{"type": "overlap", "a": "A", "b": "B", "overlapPx": 200}]}
     (kind, res), n_claude, fixp = _run_gen(
         inspect_seq=[issues, issues, issues],   # всегда есть проблема
         render_seq=[([Path("a.mp4")], [])] * 3,  # рендер всегда ок
@@ -155,6 +156,39 @@ def test_layout_unfixable_ships_with_warning(errors):
     _assert(kind == "ok", f"отдаёт клипы без исключения (got {kind})", errors)
     # MAX_FIX_ROUNDS fix-раундов исчерпаны (build вынесен в build_phase)
     _assert(n_claude == H.MAX_FIX_ROUNDS, f"{H.MAX_FIX_ROUNDS} fix-раундов, got {n_claude}", errors)
+
+
+def test_crowding_soft_no_fixround(errors):
+    print("\n-- crowding = SOFT: НЕ гонит fix-round (severity-gate 13 июня) --")
+    # Только crowding (теснота) — мягкая проблема. Должны отдать клипы СРАЗУ,
+    # без единого fix-раунда (раньше гнали MAX_FIX_ROUNDS впустую → +рендеры).
+    issues = {"scene_03.html": [
+        {"type": "crowding", "a": "строка1", "b": "строка2", "gapPx": 6},
+        {"type": "crowding", "a": "метка", "b": "значение", "gapPx": 12},
+    ]}
+    (kind, res), n_claude, fixp = _run_gen(
+        inspect_seq=[issues],                    # crowding на 1й инспекции
+        render_seq=[([Path("a.mp4")], [])],      # рендер ок
+    )
+    _assert(kind == "ok", f"отдаёт клипы без исключения (got {kind})", errors)
+    _assert(n_claude == 0, f"0 fix-раундов на crowding-only, got {n_claude}", errors)
+
+
+def test_mixed_hard_soft_fixes_only_hard(errors):
+    print("\n-- crowding + overlap: чинит ТОЛЬКО overlap (hard), crowding игнор --")
+    mixed = {"scene_04.html": [
+        {"type": "crowding", "a": "c1", "b": "c2", "gapPx": 5},
+        {"type": "overlap", "a": "o1", "b": "o2", "overlapPx": 300},
+    ]}
+    (kind, res), n_claude, fixp = _run_gen(
+        inspect_seq=[mixed, {}],                  # 1й: mixed; 2й: чисто
+        render_seq=[([Path("a.mp4")], []), ([Path("a.mp4")], [])],
+    )
+    _assert(kind == "ok", f"без исключения (got {kind})", errors)
+    _assert(n_claude == 1, f"1 fix-round (из-за overlap), got {n_claude}", errors)
+    # в fix-промпт попадает ПАРА overlap (o1/o2), но НЕ пара crowding (c1/c2)
+    _assert(fixp and "o1" in fixp[0] and "c1" not in fixp[0],
+            "fix-промпт несёт overlap-пару, но не crowding-пару", errors)
 
 
 def test_format_issues_text(errors):
@@ -186,6 +220,8 @@ def main():
     test_clean_first_no_fixround(errors)
     test_render_error_fatal(errors)
     test_layout_unfixable_ships_with_warning(errors)
+    test_crowding_soft_no_fixround(errors)
+    test_mixed_hard_soft_fixes_only_hard(errors)
     test_format_issues_text(errors)
     print()
     if errors:

@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @font-face {
+        font-family: "Inter Tight";
+        font-style: normal;
+        font-weight: 800;
+        font-display: block;
+        src: url(https://fonts.gstatic.com/s/intertight/v7/NGSnv5HMAFg6IuGlBNMjxJEL2VmU3NS7Z2mjDw-qXCRToKvHsw.woff2) format("woff2");
+        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+      }
+      @font-face {
+        font-family: "Inter Tight";
+        font-style: normal;
+        font-weight: 800;
+        font-display: block;
+        src: url(https://fonts.gstatic.com/s/intertight/v7/NGSnv5HMAFg6IuGlBNMjxJEL2VmU3NS7Z2mjBA-qXCRToA.woff2) format("woff2");
+        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+      }
+      @font-face {
+        font-family: "Inter";
+        font-style: normal;
+        font-weight: 500;
+        font-display: block;
+        src: url(https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMa1ZL7.woff2) format("woff2");
+        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+      }
+      @font-face {
+        font-family: "Inter";
+        font-style: normal;
+        font-weight: 500;
+        font-display: block;
+        src: url(https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMa1ZL7SUc.woff2) format("woff2");
+        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+      }
+      @font-face {
+        font-family: "Inter SemiBold";
+        font-style: normal;
+        font-weight: 600;
+        font-display: block;
+        src: url(https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMa1ZL7.woff2) format("woff2");
+        unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+      }
+      @font-face {
+        font-family: "Inter SemiBold";
+        font-style: normal;
+        font-weight: 600;
+        font-display: block;
+        src: url(https://fonts.gstatic.com/s/inter/v13/UcCO3FwrK3iLTeHuS_fvQtMwCp50KnMa1ZL7SUc.woff2) format("woff2");
+        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+        background: #0a0a0a;
+      }
+      #root {
+        position: relative;
+        width: 1080px;
+        height: 1920px;
+        background: #0a0a0a;
+        overflow: hidden;
+      }
+
+      .glow {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(120px);
+        pointer-events: none;
+        z-index: 0;
+      }
+      .glow-a {
+        width: 660px;
+        height: 660px;
+        left: 80px;
+        top: 540px;
+        background: rgba(255, 87, 34, 0.16);
+      }
+      .glow-b {
+        width: 560px;
+        height: 560px;
+        left: 460px;
+        top: 1140px;
+        background: rgba(255, 87, 34, 0.1);
+      }
+      .ghost {
+        position: absolute;
+        left: 50%;
+        top: 560px;
+        transform: translateX(-50%);
+        font-family: "Inter Tight", sans-serif;
+        font-weight: 800;
+        font-size: 260px;
+        line-height: 0.9;
+        letter-spacing: -0.05em;
+        color: #ffffff;
+        opacity: 0.04;
+        filter: blur(6px);
+        white-space: nowrap;
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      .stage {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: 1000px;
+        height: 960px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 48px;
+        padding: 40px;
+        box-sizing: border-box;
+        z-index: 2;
+      }
+
+      .kicker {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-family: "Inter SemiBold", sans-serif;
+        font-weight: 600;
+        font-size: 21px;
+        letter-spacing: 0.28em;
+        text-transform: uppercase;
+        color: #bbbbbb;
+      }
+      .kicker .dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #ff5722;
+        flex: 0 0 auto;
+      }
+
+      .cards {
+        display: flex;
+        flex-direction: column;
+        gap: 28px;
+        perspective: 1600px;
+      }
+      .card {
+        position: relative;
+        border-radius: 28px;
+        padding: 32px 40px;
+        background: #111111;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        transform-style: preserve-3d;
+        will-change: transform, opacity;
+      }
+      .card .tag {
+        font-family: "Inter SemiBold", sans-serif;
+        font-weight: 600;
+        font-size: 20px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: #bbbbbb;
+        margin-bottom: 14px;
+      }
+      .card .line {
+        font-family: "Inter", sans-serif;
+        font-weight: 500;
+        font-size: 32px;
+        line-height: 1.16;
+        color: #ffffff;
+      }
+      .card.think {
+        opacity: 0.82;
+      }
+      .card.think .line {
+        color: #bbbbbb;
+      }
+      .card.real {
+        border: 1px solid rgba(255, 87, 34, 0.45);
+        background: linear-gradient(135deg, #14100e 0%, #111111 70%);
+      }
+      .card.real .tag {
+        color: #ff5722;
+      }
+      .card.real .line {
+        color: #ffffff;
+      }
+      .card.real .line b {
+        color: #ff5722;
+        font-weight: 500;
+      }
+
+      .hero {
+        font-family: "Inter Tight", sans-serif;
+        font-weight: 800;
+        font-size: 64px;
+        line-height: 1.04;
+        letter-spacing: -0.04em;
+        color: #ffffff;
+        max-width: 920px;
+      }
+      .hero b {
+        color: #ff5722;
+        font-weight: 800;
+      }
+
+      .word {
+        display: inline-block;
+        will-change: transform, opacity;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="scene_02"
+      data-start="0"
+      data-duration="5"
+      data-width="1080"
+      data-height="1920"
+    >
+      <div class="glow glow-a"></div>
+      <div class="glow glow-b"></div>
+      <div class="ghost">тишина</div>
+
+      <div class="stage">
+        <div class="kicker"><span class="dot"></span><span>что мы думаем</span></div>
+
+        <div class="cards">
+          <div class="card think" id="cardThink">
+            <div class="tag">кажется</div>
+            <div class="line">Сугробы, плед и фото для ленты</div>
+          </div>
+          <div class="card real" id="cardReal">
+            <div class="tag">на деле</div>
+            <div class="line">Едут за тем, что мир наконец <b>замолчал</b></div>
+          </div>
+        </div>
+
+        <div class="hero" id="hero">
+          <span class="word">Не</span>
+          <span class="word">за</span>
+          <span class="word">фото</span>
+          <span class="word">с</span>
+          <span class="word">пледом.</span>
+          <span class="word">За</span>
+          <span class="word">ощущением</span>
+          <span class="word"><b>тишины.</b></span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+
+      gsap.set("#cardThink", { transformOrigin: "50% 0%" });
+      gsap.set("#cardReal", { transformOrigin: "50% 0%" });
+
+      tl.from(
+        ".kicker .dot",
+        { scale: 0, duration: 0.45, ease: "back.out(2)" },
+        0.15
+      );
+      tl.from(
+        ".kicker span:last-child",
+        { opacity: 0, x: -18, duration: 0.5, ease: "power2.out" },
+        0.22
+      );
+
+      tl.from(
+        "#cardThink",
+        { opacity: 0, rotationX: -78, y: -40, duration: 0.7, ease: "power3.out" },
+        0.4
+      );
+
+      tl.from(
+        "#cardReal",
+        { opacity: 0, rotationX: 88, y: 60, duration: 0.85, ease: "power4.out" },
+        0.95
+      );
+
+      tl.from(
+        "#cardReal .line b",
+        { color: "#ffffff", duration: 0.5, ease: "sine.inOut" },
+        1.6
+      );
+
+      tl.from(
+        ".hero .word",
+        {
+          opacity: 0,
+          y: 34,
+          duration: 0.5,
+          ease: "expo.out",
+          stagger: 0.045,
+        },
+        1.95
+      );
+
+      tl.to(
+        ".cards",
+        { rotationX: 2.5, duration: 2.2, ease: "sine.inOut" },
+        2.7
+      );
+      tl.to(
+        ".glow-a",
+        { opacity: 0.7, duration: 2.0, ease: "sine.inOut" },
+        2.7
+      );
+
+      window.__timelines["scene_02"] = tl;
+    </script>
+  </body>
+</html>

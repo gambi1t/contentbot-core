@@ -135,6 +135,31 @@ async function main() {
             return effectiveOpacity(el) < GHOST_OPACITY || colorAlpha(el) < GHOST_OPACITY;
           }
 
+          // G2 (13 июня): фрагменты ОДНОГО текстового блока — слова/строки
+          // заголовка, разбитого на span'ы для анимации появления — это НЕ
+          // независимые тексты; их межсловный/межстрочный зазор не дефект.
+          // КЛАСС-АГНОСТИЧНО: имена контейнеров (.hero/.cta/.title/div) LLM
+          // варьирует, поэтому НЕ перечисляем их, а идём по split-цепочке
+          // (.word/.w/.line/.char/.tk) вверх до первого НЕ-split предка =
+          // контейнер всего блока. Это устойчиво к новым классам сцен.
+          const SPLIT_CLASSES = ["word", "w", "line", "char", "letter",
+                                 "tk", "token", "frag", "seg"];
+          function isSplitPiece(el) {
+            return !!(el && el.classList
+              && SPLIT_CLASSES.some((c) => el.classList.contains(c)));
+          }
+          function textBlockRoot(el) {
+            const explicit = el.closest("[data-hf-text-block]");
+            if (explicit) return explicit;
+            if (isSplitPiece(el)) {
+              let cur = el;
+              while (cur.parentElement && isSplitPiece(cur)) cur = cur.parentElement;
+              return cur;  // первый не-split предок = текст-блок целиком
+            }
+            // не split-кусок — семантический контейнер по тегам/частым классам
+            return el.closest("h1,h2,h3,p,.hero,.title,.headline,.caption,.cta,.label");
+          }
+
           // H1: ближайший styled-предок (карточка/чарт-контейнер), не
           // full-bleed. Используется чтобы исключить crowding между метками
           // ВНУТРИ ОДНОЙ карточки (нормальная табличная вёрстка чарта).
@@ -161,6 +186,7 @@ async function main() {
             if (txt) texts.push({
               el, r, text: txt.slice(0, 30),
               ancestor: closestStyledAncestor(el),
+              blockRoot: textBlockRoot(el),  // общий текст-блок (G2)
               ghost: isGhost(el),  // декоративный фон (opacity ИЛИ color-alpha)
             });
             else if (hasBgOrBorder(el)) {
@@ -207,6 +233,9 @@ async function main() {
               if (A.ghost || B.ghost) continue;
               // вложенность по DOM (заголовок div + span, подпись в карточке) — норма
               if (A.el.contains(B.el) || B.el.contains(A.el)) continue;
+              // G2: оба фрагмента — части одного текст-блока (split-span'ы
+              // заголовка/строки): межсловный/межстрочный зазор не дефект.
+              if (A.blockRoot && A.blockRoot === B.blockRoot) continue;
               const a = A.r, b = B.r;
 
               const ix = Math.min(a.right, b.right) - Math.max(a.left, b.left);

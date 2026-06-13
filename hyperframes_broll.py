@@ -22,6 +22,7 @@ Standalone-тест:
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import logging
 import os
@@ -59,7 +60,9 @@ CLAUDE_TIMEOUT = 1800     # сек на одну сессию Claude Code (HTML 
                           # 900 — корень не доказан, поднимаем до 30 мин
                           # как страховка (см. daily/2026-06-01-maksim-bot.md).
 RENDER_TIMEOUT = 300      # сек на рендер одной вставки
-MAX_FIX_ROUNDS = 2        # сколько раз просим Клода починить
+MAX_FIX_ROUNDS = 1        # сколько раз просим Клода починить (13 июня: 2→1.
+                          # После починки детектора чистые сцены = 0 раундов;
+                          # 2-й раунд не дочищал, а стоил полный ре-рендер ~8 мин)
 HF_VERSION = "0.6.56"     # пин версии CLI (как в package.json проекта)
 
 
@@ -876,15 +879,36 @@ def _render_all_native(out_dir: Path) -> tuple[list[Path], list[str]]:
     clips: list[Path] = []
     errors: list[str] = []
 
+    # Dirty-рендер (13 июня): рендерим только сцены, чей HTML изменился с
+    # прошлой итерации цикла. fix-round правит 1-2 сцены из 6 — остальные
+    # берём из готового mp4 (рендер 1 сцены ~77с). Кэш по html-hash + наличие
+    # mp4: валиден внутри ОДНОГО прогона (storyboard/reference/шрифты замороже-
+    # ны), а mp4 чистятся перед каждым прогоном в handlers/bot — поэтому stale
+    # mp4 от прошлого прогона невозможен (guard out_mp4.exists() добивает).
+    cache_file = hf_dir / ".render_cache.json"
+    try:
+        old_cache = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        old_cache = {}
+    new_cache: dict[str, str] = {}
+
     for i, scene_file in enumerate(SCENE_FILES, start=1):
         scene_path = HF_PROJECT / scene_file
         if not scene_path.exists():
             errors.append(f"{scene_file}: файл не создан Клодом")
             continue
 
+        out_mp4 = hf_dir / f"hf_{i:02d}.mp4"
+        html_hash = hashlib.md5(scene_path.read_bytes()).hexdigest()
+        new_cache[scene_file] = html_hash
+        # Неизменённая сцена с готовым mp4 — пропускаем дорогой рендер.
+        if old_cache.get(scene_file) == html_hash and out_mp4.exists():
+            clips.append(out_mp4)
+            logger.info(f"[hf_broll] render skip {scene_file} (HTML без изменений)")
+            continue
+
         frames_dir = hf_dir / f"_frames_{i:02d}"
         frames_dir.mkdir(parents=True, exist_ok=True)
-        out_mp4 = hf_dir / f"hf_{i:02d}.mp4"
 
         # 1) puppeteer → 150 PNG
         try:
@@ -921,6 +945,10 @@ def _render_all_native(out_dir: Path) -> tuple[list[Path], list[str]]:
             continue
         clips.append(out_mp4)
 
+    try:
+        cache_file.write_text(json.dumps(new_cache), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[hf_broll] render-cache не записан: {e}")
     return clips, errors
 
 
@@ -1627,15 +1655,30 @@ def generate_hyperframes_broll(
             layout_by_scene = _inspect_all_scenes()
             clips, errors = _render_fn(out_dir)
 
+            # Severity (13 июня): crowding (теснота) — SOFT. Часто косметика/
+            # ложняк (метки списка, плотная типографика) и НЕ стоит дорогого
+            # fix-раунда (ре-рендер). Hard = offscreen/overlap (реальные дефекты
+            # композиции). Только hard (+ render-ошибки) гонят fix-round.
+            hard_by_scene = {
+                sf: [i for i in iss if i.get("type") != "crowding"]
+                for sf, iss in (layout_by_scene or {}).items()
+            }
+            hard_by_scene = {sf: v for sf, v in hard_by_scene.items() if v}
+            n_soft = (sum(len(v) for v in (layout_by_scene or {}).values())
+                      - sum(len(v) for v in hard_by_scene.values()))
+
             # Render-ошибки ФАТАЛЬНЫ (без них нет видео). Layout — QUALITY.
             problems: list[str] = []
-            if layout_by_scene:
-                problems.append(_format_layout_issues(layout_by_scene))
+            if hard_by_scene:
+                problems.append(_format_layout_issues(hard_by_scene))
             if errors:
                 problems.append("ОШИБКИ РЕНДЕРА:\n" + "\n".join(errors))
 
             if not problems:
-                break  # всё чисто — выходим
+                if n_soft:
+                    logger.info(f"[hf_broll] {n_soft} мягких (crowding) замечаний "
+                                f"— отдаю без доводки")
+                break  # hard-проблем нет — выходим
 
             if fix_round >= MAX_FIX_ROUNDS:
                 # Раунды исчерпаны.
@@ -1654,14 +1697,15 @@ def generate_hyperframes_broll(
                 break
 
             fix_round += 1
-            n_layout = sum(len(v) for v in layout_by_scene.values())
+            n_hard = sum(len(v) for v in hard_by_scene.values())
             logger.info(
                 f"[hf_broll] fix-round {fix_round}: "
-                f"{len(errors)} render-ошибок, {n_layout} layout-проблем"
+                f"{len(errors)} render-ошибок, {n_hard} hard layout-проблем "
+                f"(+{n_soft} мягких пропущено)"
             )
             _notify(progress_cb,
                     f"🔧 Доводка вёрстки {fix_round}/{MAX_FIX_ROUNDS}: детектор "
-                    f"нашёл {n_layout} замечаний — перегенерирую проблемные "
+                    f"нашёл {n_hard} замечаний — перегенерирую проблемные "
                     f"сцены и рендерю заново (~5-7 мин)…")
             if legacy_build:
                 # старый монолитный агент-фиксер (весь проект одним вызовом)
@@ -1670,9 +1714,9 @@ def generate_hyperframes_broll(
                 )
                 _revert_stray()
             else:
-                # single-shot: перегенерация ТОЛЬКО проблемных сцен
+                # single-shot: перегенерация только сцен с HARD-проблемами
                 _fix_scenes_singleshot(
-                    storyboard, _problems_by_scene(layout_by_scene, errors)
+                    storyboard, _problems_by_scene(hard_by_scene, errors)
                 )
     finally:
         _GEN_LOCK.release()
