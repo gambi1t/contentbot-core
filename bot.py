@@ -9363,10 +9363,10 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_state = pending.get(user_id, {}).get("state")
     if current_state:
         logger.warning(f"[user:{user_id}] State '{current_state}' not handled, treating as new idea: {idea_text[:60]}")
-    if user_id in pending:
-        pending.pop(user_id, None)
-        _save_pending(pending)
-    await _generate_script(update, context, idea_text)
+    # Свежая идея → развилка пайплайна (Артём 13 июня): AI-аватар ИЛИ
+    # B-roll монтаж без аватара (для SMM со своим сценарием). Раньше всегда
+    # шёл аватар напрямую.
+    await _show_pipeline_fork(update, context, idea_text)
 
 
 async def _ideas_batch_stale(query) -> None:
@@ -10044,12 +10044,8 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.edit_text("Не удалось расшифровать. Напиши название текстом.")
 
         else:
-            # Any other voice = new idea
-            if user_id in pending:
-                pending.pop(user_id, None)
-                _save_pending(pending)
-            await msg.edit_text(f"Расшифровка:\n{idea_text}\n\nПишу сценарий...")
-            await _generate_script(update, context, idea_text, status_msg=msg)
+            # Any other voice = new idea → развилка пайплайна (как и текст).
+            await _show_pipeline_fork(update, context, idea_text, edit_msg=msg)
     finally:
         os.unlink(tmp_path)
 
@@ -10566,6 +10562,27 @@ async def _edit_script(
     except Exception as e:
         logger.error(f"Ошибка: {e}", exc_info=True)
         await status_msg.edit_text(f"Ошибка: {e}")
+
+
+async def _show_pipeline_fork(update, context, idea_text: str, edit_msg=None) -> None:
+    """Развилка пайплайна для свежей идеи (Артём 13 июня).
+
+    «Моя идея» → пишешь идею → выбор: AI-аватар (как раньше) ИЛИ B-roll
+    монтаж без аватара (SMM со своим сценарием идёт сюда, минуя банк идей).
+    Идея кладётся в pending; ветку выбирает callback idea_fork:<choice>.
+    """
+    uid = update.effective_user.id
+    pending[uid] = {"state": "pipeline_fork", "fork_idea_text": idea_text}
+    _save_pending(pending)
+    text = "💡 Идея принята. Что делаем?"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 AI-аватар — сценарий → видео", callback_data="idea_fork:avatar")],
+        [InlineKeyboardButton("🎞 B-roll монтаж — без аватара", callback_data="idea_fork:broll")],
+    ])
+    if edit_msg is not None:
+        await edit_msg.edit_text(text, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, reply_markup=kb)
 
 
 async def _generate_script(
@@ -12584,6 +12601,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── B-roll монтаж (Pipeline #2) callbacks ───────────────────────
+    if query.data.startswith("idea_fork:"):
+        # Развилка свежей идеи (Артём 13 июня): аватар ИЛИ B-roll монтаж.
+        choice = query.data.split(":", 1)[1]
+        d = pending.get(user_id) or {}
+        idea_text = d.get("fork_idea_text", "")
+        if not idea_text:
+            await query.answer("Идея потеряна — напиши заново", show_alert=True)
+            return
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        pending.pop(user_id, None)
+        _save_pending(pending)
+
+        class _ForkUpdate:
+            def __init__(self, msg, user):
+                self.message = msg
+                self.effective_user = user
+                self.effective_chat = msg.chat
+                self.callback_query = None
+        pseudo = _ForkUpdate(query.message, query.from_user)
+
+        if choice == "broll":
+            from broll.handlers import generate_broll_preview
+            await generate_broll_preview(
+                pseudo, context, claude, theme=idea_text,
+                chat_id=query.message.chat_id,
+            )
+        else:  # avatar (дефолт)
+            await _generate_script(pseudo, context, idea_text)
+        return
+
     if query.data.startswith("b2src:"):
         # Pipeline 2: выбор источника видеоряда (durable-draft + меню).
         from broll.source_menu import parse_source_cb
