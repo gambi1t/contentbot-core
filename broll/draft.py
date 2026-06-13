@@ -87,6 +87,19 @@ class BrollItem:
         return cls(**{k: v for k, v in d.items() if k in known})
 
 
+def hf_items_from_clips(clip_paths) -> list[BrollItem]:
+    """Готовые hf_NN.mp4 от generate_hyperframes_broll → BrollItem(hf_scene/hf).
+    materialize пропускает hf_scene без перекодирования (клипы уже mp4)."""
+    out: list[BrollItem] = []
+    for p in clip_paths:
+        if not p:
+            continue
+        out.append(BrollItem(
+            kind="hf_scene", origin="hf", path=str(p), label=f"hf/{Path(p).name}",
+        ))
+    return out
+
+
 def from_picker_items(picker_items) -> list[BrollItem]:
     """selfie.broll_picker.BrollItem (duck-typed: .kind/.source/.label) →
     draft.BrollItem. Граница между переиспользуемым пикером селфи и durable-
