@@ -201,6 +201,88 @@ def test_example_configs_distinct():
     _assert(mk.get("features") != pf.get("features"), "наборы фич различны (не копипаст)")
 
 
+# ── Phase 2c-1: strict-режим + config_doctor глубже ─────────────────────────
+
+def test_load_strict_no_file_raises():
+    print("\n-- strict + нет файла → fatal --")
+    try:
+        tenant.load_tenant(Path("/nonexistent/tenant.json"), strict=True)
+        _assert(False, "должно бросить TenantConfigError")
+    except tenant.TenantConfigError:
+        _assert(True, "strict + нет файла → TenantConfigError")
+
+
+def test_load_no_strict_no_file_fallback_unchanged():
+    print("\n-- БЕЗ strict + нет файла → fallback (прод цел) --")
+    t = tenant.load_tenant(Path("/nonexistent/tenant.json"))
+    _assert(t.get("tenant_id") == "default", "transitional fallback не сломан")
+
+
+def test_load_bad_json_raises_friendly():
+    print("\n-- битый JSON → friendly TenantConfigError --")
+    f = Path(tempfile.mktemp(suffix=".json"))
+    f.write_text("{ broken json ,,", encoding="utf-8")
+    try:
+        tenant.load_tenant(f)
+        _assert(False, "должно бросить TenantConfigError")
+    except tenant.TenantConfigError as e:
+        _assert("invalid tenant config" in str(e).lower() or str(f) in str(e),
+                "friendly error с путём к файлу")
+    finally:
+        f.unlink()
+
+
+def test_doctor_expected_id_mismatch():
+    print("\n-- config_doctor: tenant_id != expected --")
+    t = {"tenant_id": "maksim", "features": {}}
+    probs = tenant.config_doctor(t, expected_id="panferov")
+    _assert(any("expected" in p and "panferov" in p for p in probs), "mismatch → problem")
+    probs_ok = tenant.config_doctor({"tenant_id": "panferov", "features": {}}, expected_id="panferov")
+    _assert(not any("expected" in p for p in probs_ok), "совпадение → нет problem")
+
+
+def test_doctor_strict_missing_env():
+    print("\n-- config_doctor strict: env:KEY без переменной → problem --")
+    t = {"tenant_id": "panferov", "features": {},
+         "brand_overrides": {"default": {"heygen_avatar_id": "env:_DOCTOR_MISSING_XYZ"}}}
+    probs = tenant.config_doctor(t, strict=True)
+    _assert(any("_DOCTOR_MISSING_XYZ" in p for p in probs), "missing env → problem (strict)")
+    # БЕЗ strict — не ругаемся (transitional)
+    probs_soft = tenant.config_doctor(t, strict=False)
+    _assert(not any("_DOCTOR_MISSING_XYZ" in p for p in probs_soft), "без strict — env не обязателен")
+
+
+def test_doctor_missing_prompt_file():
+    print("\n-- config_doctor: prompt-файл не существует → problem --")
+    t = {"tenant_id": "panferov", "features": {},
+         "brand_overrides": {"default": {"script_prompt_file": "no_such_prompt_xyz.txt"}}}
+    probs = tenant.config_doctor(t, base_dir=ROOT)
+    _assert(any("no_such_prompt_xyz.txt" in p for p in probs), "несуществующий prompt-файл → problem")
+
+
+def test_doctor_brand_override_unknown_brand():
+    print("\n-- config_doctor: override для несуществующего бренда → problem --")
+    t = {"tenant_id": "panferov", "features": {},
+         "brand_overrides": {"ghostbrand": {"eleven_voice_id": "x"}}}
+    probs = tenant.config_doctor(t, known_brands=["default", "shoes"])
+    _assert(any("ghostbrand" in p for p in probs), "неизвестный бренд → problem")
+
+
+def test_doctor_override_key_not_allowed():
+    print("\n-- config_doctor: override-ключ вне allowlist → problem --")
+    t = {"tenant_id": "panferov", "features": {},
+         "brand_overrides": {"default": {"__evil_key__": "x"}}}
+    probs = tenant.config_doctor(t)
+    _assert(any("__evil_key__" in p for p in probs), "ключ вне allowlist → problem")
+
+
+def test_doctor_transitional_backcompat():
+    print("\n-- config_doctor(tenant) без новых параметров — старое поведение --")
+    # Существующий вызов bot.py: config_doctor(tenant) — не должен ломаться
+    probs = tenant.config_doctor({"tenant_id": "maksim", "features": {"carousel": True}})
+    _assert(probs == [], "валидный конфиг без strict → чисто (как раньше)")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} tenant tests\n{'='*60}")

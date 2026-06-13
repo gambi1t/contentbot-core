@@ -19,8 +19,29 @@ TENANT_CONFIG_PATH = Path(
     os.getenv("TENANT_CONFIG", str(Path(__file__).resolve().parent / "tenant.json"))
 )
 
+
+class TenantConfigError(Exception):
+    """Конфиг тенанта отсутствует/битый/невалиден в strict-режиме.
+
+    Бросается на старте, чтобы НЕ запускать боевого тенанта (Phase 3) на
+    fallback-значениях из BRANDS/.env/старого кода — тихий fallback при
+    cutover хуже явного падения (CTO-ревью C1)."""
+
+
 # Обязательные ключи конфига тенанта.
 _REQUIRED_KEYS = ("tenant_id", "features")
+
+# Ключи бренда, которые ИМЕЕТ СМЫСЛ переопределять per-tenant через
+# brand_overrides (provider/notion/prompt/channel/identity). Doctor ругается
+# на ключи вне списка — защита от опечаток и случайного переопределения
+# структурных полей (heygen_looks, platforms, статусы) (CTO-ревью N4).
+_ALLOWED_BRAND_OVERRIDE_KEYS = frozenset({
+    "heygen_avatar_id", "heygen_avatar_v4_id", "eleven_voice_id",
+    "script_prompt_file", "cover_prompt_file", "script_prompt_override",
+    "notion_db_id", "notion_rubric_property",
+    "telegram_channel_handle", "telegram_channel_display",
+    "description",
+})
 
 # Известные опциональные пайплайны (фичефлаги). Ядро (селфи-съёмка → сценарий →
 # обложка → озвучка → аватар → сборка → субтитры → кросспост → Notion →
@@ -41,14 +62,26 @@ _KNOWN_FEATURES = frozenset({
 })
 
 
-def load_tenant(path: str | Path | None = None) -> dict:
-    """Прочитать конфиг тенанта. Если файла нет — безопасный fallback:
-    ядро работает, опции выключены, tenant_id='default'."""
+def load_tenant(path: str | Path | None = None, strict: bool = False) -> dict:
+    """Прочитать конфиг тенанта.
+
+    Нет файла:
+      - transitional (strict=False) → безопасный fallback {tenant_id:default,
+        features:{}}: ядро работает, опции выключены (прод без tenant.json цел);
+      - strict (Phase 3) → TenantConfigError (боевой тенант ОБЯЗАН иметь конфиг).
+    Битый JSON → TenantConfigError с путём (friendly, CTO-ревью I2) — вместо
+    «голого» JSONDecodeError, чтобы при cutover сразу понять причину и откатиться.
+    """
     p = Path(path) if path is not None else TENANT_CONFIG_PATH
     if not p.is_file():
+        if strict:
+            raise TenantConfigError(f"tenant config not found (strict mode): {p}")
         return {"tenant_id": "default", "features": {}}
-    with open(p, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        raise TenantConfigError(f"invalid tenant config {p}: {e}") from e
 
 
 def feature_enabled(tenant: dict, name: str) -> bool:
@@ -105,11 +138,25 @@ def apply_brand_overrides(brand: dict, tenant: dict, brand_name: str) -> dict:
     return merged
 
 
-def config_doctor(tenant: dict) -> list[str]:
+def config_doctor(
+    tenant: dict,
+    *,
+    expected_id: str | None = None,
+    known_brands: list[str] | None = None,
+    base_dir: str | Path | None = None,
+    strict: bool = False,
+) -> list[str]:
     """Проверка конфига ДО запуска. Возвращает список проблем (пусто = ok).
 
-    Минимальный набор (Phase 2a-1): required keys, известность фичефлагов,
-    тип значения фичи. Проверки provider/notion/файлов — Phase 2b.
+    Базовый набор (Phase 2a-1, всегда): required keys, известность фичефлагов,
+    тип значения фичи, override-ключи в allowlist.
+
+    Опциональные проверки (Phase 2c, по переданным параметрам — обратная
+    совместимость с `config_doctor(tenant)`):
+      - expected_id: tenant_id должен совпасть (CTO-ревью C5);
+      - known_brands: brand_overrides ссылается на существующий бренд (I4);
+      - base_dir: prompt-файлы из override существуют (I4);
+      - strict: все `env:KEY` из brand_overrides резолвятся (C2).
     """
     problems: list[str] = []
     for k in _REQUIRED_KEYS:
@@ -124,4 +171,41 @@ def config_doctor(tenant: dict) -> list[str]:
             problems.append(f"unknown feature flag: {fname}")
         if not isinstance(fval, bool):
             problems.append(f"feature {fname!r} must be bool, got {type(fval).__name__}")
+
+    if expected_id is not None and tenant.get("tenant_id") != expected_id:
+        problems.append(
+            f"tenant_id mismatch: expected {expected_id!r}, got {tenant.get('tenant_id')!r}"
+        )
+
+    base = Path(base_dir) if base_dir is not None else None
+    overrides = tenant.get("brand_overrides") or {}
+    if not isinstance(overrides, dict):
+        problems.append("brand_overrides must be an object")
+        overrides = {}
+    for brand_name, fields in overrides.items():
+        if known_brands is not None and brand_name not in known_brands:
+            problems.append(
+                f"brand_overrides references unknown brand: {brand_name!r} "
+                f"(known: {known_brands})"
+            )
+        if not isinstance(fields, dict):
+            problems.append(f"brand_overrides.{brand_name} must be an object")
+            continue
+        for key, val in fields.items():
+            if key not in _ALLOWED_BRAND_OVERRIDE_KEYS:
+                problems.append(f"brand_overrides.{brand_name}.{key}: key not in allowlist")
+            # env:KEY резолв — в strict обязателен
+            if strict and isinstance(val, str) and val.startswith("env:"):
+                env_key = val[4:]
+                if not os.getenv(env_key):
+                    problems.append(
+                        f"missing env var for brand_overrides.{brand_name}.{key}: {env_key}"
+                    )
+            # prompt-файлы существуют (если задан base_dir)
+            if base is not None and key in ("script_prompt_file", "cover_prompt_file"):
+                resolved = _resolve_env(val)
+                if isinstance(resolved, str) and resolved and not (base / resolved).is_file():
+                    problems.append(
+                        f"brand_overrides.{brand_name}.{key}: file not found: {resolved}"
+                    )
     return problems

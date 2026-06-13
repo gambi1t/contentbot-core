@@ -753,12 +753,34 @@ if _active_brand not in BRANDS:
 # Пока tenant.json на сервере нет → fallback (features={}), и feature-gate
 # работает fail-open (ничего не блокирует) — прод не ломается.
 import tenant as _tenant  # noqa: E402
-_ACTIVE_TENANT = _tenant.load_tenant()
-_tenant_problems = _tenant.config_doctor(_ACTIVE_TENANT)
+# Strict-режим (Phase 3 cutover, CTO-ревью C1+C5): TENANT_STRICT=1 +
+# TENANT_ID_EXPECTED=<id> → битый/отсутствующий/не-тот конфиг = FATAL старт
+# (тихий fallback на чужой бренд при боевой пересадке хуже явного падения).
+# По умолчанию (нет env) — transitional: fallback default, warning-only,
+# прод без tenant.json не ломается.
+_TENANT_STRICT = os.getenv("TENANT_STRICT", "0") == "1"
+_TENANT_EXPECTED = os.getenv("TENANT_ID_EXPECTED") or None
+try:
+    _ACTIVE_TENANT = _tenant.load_tenant(strict=_TENANT_STRICT)
+except _tenant.TenantConfigError as e:
+    logger.critical(f"[tenant] FATAL: {e}")
+    raise SystemExit(1) from e
+_tenant_problems = _tenant.config_doctor(
+    _ACTIVE_TENANT,
+    expected_id=_TENANT_EXPECTED,
+    known_brands=list(BRANDS),
+    base_dir=Path(__file__).resolve().parent,
+    strict=_TENANT_STRICT,
+)
 if _tenant_problems:
+    if _TENANT_STRICT:
+        logger.critical(f"[tenant] FATAL config doctor (strict): {_tenant_problems}")
+        raise SystemExit(1)
     logger.warning(f"[tenant] config doctor: {_tenant_problems}")
 else:
-    logger.info(f"[tenant] loaded tenant_id={_ACTIVE_TENANT.get('tenant_id')}")
+    logger.info(
+        f"[tenant] loaded tenant_id={_ACTIVE_TENANT.get('tenant_id')} strict={_TENANT_STRICT}"
+    )
 
 # Карта callback-префикс → опц-фича для feature-gate в handle_callback.
 # Только ОДНОЗНАЧНЫЕ опц-пайплайны. Ядро (селфи/сценарий/сборка/...) тут НЕ
@@ -3751,6 +3773,13 @@ def generate_cover(cover_text: str, output_path: str, avatar_override: str = Non
         img = avatar
     else:
         img = Image.new("RGBA", (WIDTH, HEIGHT), (40, 40, 40, 255))
+
+    # «Без текста» (Артём 13 июня): обложкой служит само выбранное фото —
+    # без градиента и плашки. Пустой cover_text = ранний выход (заодно
+    # защищает от textwrap("")/bbox-пустой-строки ниже).
+    if not (cover_text or "").strip():
+        img.convert("RGB").save(output_path, "JPEG", quality=97, subsampling=0)
+        return output_path
 
     # --- Gradient darkening on bottom half (fast method) ---
     gradient = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
@@ -10268,6 +10297,16 @@ async def _force_shorten(
 # COVER_TEXT_PROMPT loaded from cover_prompt.txt above
 
 
+def _cover_options_buttons(options, label_prefix: str = "") -> list:
+    """Кнопки выбора текста обложки + «🚫 Без текста» (Артём 13 июня:
+    выбор «без текста» во всех пайплайнах). Единый обработчик cover_pick /
+    cover_notext обслуживает все точки входа."""
+    rows = [[InlineKeyboardButton(f"{label_prefix}{opt}", callback_data=f"cover_pick:{i}")]
+            for i, opt in enumerate(options)]
+    rows.append([InlineKeyboardButton("🚫 Без текста", callback_data="cover_notext")])
+    return rows
+
+
 async def _generate_cover_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generate 5 viral cover text options."""
     user_id = update.effective_user.id
@@ -10304,7 +10343,7 @@ async def _generate_cover_options(update: Update, context: ContextTypes.DEFAULT_
             return
 
         # Create buttons for each option
-        buttons = [[InlineKeyboardButton(opt, callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+        buttons = _cover_options_buttons(options)
         buttons.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data="cover_options")])
         buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
 
@@ -10428,7 +10467,7 @@ async def _send_cover_text_options(bot, chat_id: int, data: dict, status_msg=Non
             await status_msg.edit_text("Не получилось сгенерировать. Напиши свой вариант.")
             return
 
-        buttons = [[InlineKeyboardButton(opt, callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+        buttons = _cover_options_buttons(options)
         buttons.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data="cover_options")])
         buttons.append([InlineKeyboardButton("◀️ Сменить фото", callback_data="cover_photo:reload")])
         buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
@@ -12527,6 +12566,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── B-roll монтаж (Pipeline #2) callbacks ───────────────────────
+    if query.data.startswith("b2src:"):
+        # Pipeline 2: выбор источника видеоряда (durable-draft + меню).
+        from broll.source_menu import parse_source_cb
+        mode, draft_id = parse_source_cb(query.data)
+        if not mode or not draft_id:
+            await query.answer("Кнопка устарела", show_alert=True)
+            return
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            from broll.handlers import handle_broll_source
+        except Exception as e:
+            logger.error(f"[broll] import failed in source: {e}", exc_info=True)
+            await query.message.reply_text(f"❌ Модуль B-roll не загружен: {e}")
+            return
+        await handle_broll_source(update, context, claude, draft_id, mode)
+        return
+
     if query.data == "broll_approve":
         try:
             await query.answer("🎬 Собираю ролик…")
@@ -15302,8 +15362,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # + YouTube-поиск покрывают сценарии.
                 if _brand_now != "maksim":
                     buttons.append([InlineKeyboardButton("🔍 Искать на стоках", callback_data="broll_stock")])
-                if elevenlabs_client and not data.get("voice_parts"):
-                    buttons.append([InlineKeyboardButton("🎙 Озвучить", callback_data="voiceover_choose")])
+                # «🎙 Озвучить» убрана из меню видеоряда (Артём 13 июня) — она не
+                # к месту при выборе видеоряда; озвучка есть отдельным шагом.
                 _n_sel_now = len(data.get("broll_selected", []) or [])
                 if _n_sel_now:
                     buttons.append([InlineKeyboardButton(
@@ -19511,7 +19571,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["state"] = "cover_approval"
             _save_pending(pending)
 
-            buttons = [[InlineKeyboardButton(opt, callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+            buttons = _cover_options_buttons(options)
             buttons.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data="cover_options")])
             buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
             keyboard = InlineKeyboardMarkup(buttons)
@@ -19608,7 +19668,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["state"] = "cover_approval"
             _save_pending(pending)
 
-            buttons = [[InlineKeyboardButton(f"📝 {opt}", callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+            buttons = _cover_options_buttons(options, label_prefix="📝 ")
             buttons.append([InlineKeyboardButton("🔄 Другие варианты", callback_data="cover_options")])
             buttons.append([InlineKeyboardButton("🔄 Сменить фото", callback_data="avatar_pick:random")])
             await status_msg.edit_text(
@@ -19716,7 +19776,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Не получилось сгенерировать. Напиши свой вариант.")
                 return
 
-            buttons = [[InlineKeyboardButton(opt, callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+            buttons = _cover_options_buttons(options)
             buttons.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data="cover_options")])
             buttons.append([InlineKeyboardButton("◀️ Сменить фото", callback_data="change_avatar")])
             buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
@@ -19846,6 +19906,47 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(f"Ошибка: {e}")
         return
 
+    if query.data == "cover_notext":
+        # «Без текста» (Артём 13 июня): обложкой служит выбранное фото без
+        # наложения. Симметрично cover_pick, но cover_text="". Работает во
+        # всех пайплайнах — обработчик cover_pick единый, билдеры кнопок несут
+        # «🚫 Без текста».
+        data["cover_text"] = ""
+        _save_pending(pending)
+        await query.edit_message_text("Готовлю обложку без текста…")
+        try:
+            cover_path = str(ASSETS_DIR / "last_cover.jpg")
+            chosen_avatar = data.get("chosen_avatar")
+            generate_cover("", cover_path, avatar_override=chosen_avatar)
+            try:
+                _save_to_project(data, "cover.jpg", cover_path)
+                data["cover_path"] = cover_path
+            except Exception as _e:
+                logger.warning(f"Cover save-to-project failed: {_e}")
+            buttons = [
+                [InlineKeyboardButton("✅ Сохранить в Notion", callback_data="cover_confirm")],
+                [InlineKeyboardButton("✏️ Добавить текст", callback_data="cover_redo_text")],
+                [InlineKeyboardButton("📷 Другое фото", callback_data="change_avatar")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+            ]
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            with open(cover_path, "rb") as cover_file:
+                await query.get_bot().send_photo(
+                    chat_id=query.message.chat_id,
+                    photo=cover_file,
+                    caption="🖼 Обложка без текста (само фото).\n\nСохраняю или переделать?",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            data["cover_preview_sent"] = True
+            _save_pending(pending)
+        except Exception as e:
+            logger.error(f"cover_notext error: {e}", exc_info=True)
+            await query.edit_message_text(f"Ошибка: {e}")
+        return
+
     if query.data == "cover_redo_text":
         # Go back to cover text selection with current avatar
         data.pop("cover_text", None)
@@ -19876,7 +19977,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("Не получилось сгенерировать. Напиши свой вариант.")
                 return
 
-            buttons = [[InlineKeyboardButton(opt, callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+            buttons = _cover_options_buttons(options)
             buttons.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data="cover_options")])
             buttons.append([InlineKeyboardButton("◀️ Сменить фото", callback_data="change_avatar")])
             buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
@@ -20264,7 +20365,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("Не получилось сгенерировать. Напиши свой вариант.")
                 return
 
-            buttons = [[InlineKeyboardButton(opt, callback_data=f"cover_pick:{i}")] for i, opt in enumerate(options)]
+            buttons = _cover_options_buttons(options)
             buttons.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data="cover_options")])
             buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
 
