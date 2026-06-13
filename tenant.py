@@ -138,6 +138,30 @@ def apply_brand_overrides(brand: dict, tenant: dict, brand_name: str) -> dict:
     return merged
 
 
+def allowed_brands(tenant: dict) -> list[str] | None:
+    """Бренды, видимые тенанту в /brand-пикере. None = без ограничений
+    (transitional / ключ не задан → показываем все, прод не меняется).
+
+    Нужно после слияния в core: BRANDS-dict содержит бренды ВСЕХ тенантов
+    (default+shoes+maksim), и без фильтра panferov увидел бы чужой бренд
+    maksim в пикере (CTO-ревью I3). Конфиг: {"brands": {"allowed": [...]}}.
+    """
+    brands = tenant.get("brands")
+    if not isinstance(brands, dict):
+        return None
+    allowed = brands.get("allowed")
+    if isinstance(allowed, list) and allowed:
+        return [str(b) for b in allowed]
+    return None
+
+
+def brand_allowed(tenant: dict, name: str) -> bool:
+    """Разрешён ли бренд тенанту. Нет ограничений (None) → True (все бренды —
+    прод без конфига не меняется)."""
+    allowed = allowed_brands(tenant)
+    return True if allowed is None else name in allowed
+
+
 def config_doctor(
     tenant: dict,
     *,

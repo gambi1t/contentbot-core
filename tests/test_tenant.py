@@ -283,6 +283,31 @@ def test_doctor_transitional_backcompat():
     _assert(probs == [], "валидный конфиг без strict → чисто (как раньше)")
 
 
+# ── Phase 2c-2: allowed_brands (фильтр /brand, скрыть чужой бренд) ───────────
+
+def test_allowed_brands_none_without_config():
+    print("\n-- allowed_brands: нет ключа → None (без ограничений) --")
+    _assert(tenant.allowed_brands({}) is None, "пустой тенант → None (все бренды)")
+    _assert(tenant.allowed_brands({"brands": {}}) is None, "пустой brands → None")
+    _assert(tenant.allowed_brands({"brands": {"allowed": []}}) is None, "пустой список → None")
+
+
+def test_allowed_brands_list():
+    print("\n-- allowed_brands: список из конфига --")
+    t = {"brands": {"allowed": ["default", "shoes"]}}
+    _assert(tenant.allowed_brands(t) == ["default", "shoes"], "список прочитан")
+
+
+def test_brand_allowed():
+    print("\n-- brand_allowed: фильтр по списку --")
+    t = {"brands": {"allowed": ["default", "shoes"]}}
+    _assert(tenant.brand_allowed(t, "default") is True, "default разрешён")
+    _assert(tenant.brand_allowed(t, "shoes") is True, "shoes разрешён")
+    _assert(tenant.brand_allowed(t, "maksim") is False, "maksim НЕ разрешён (leak предотвращён)")
+    # Нет ограничений → все разрешены (прод без конфига цел)
+    _assert(tenant.brand_allowed({}, "maksim") is True, "без конфига → все разрешены")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} tenant tests\n{'='*60}")

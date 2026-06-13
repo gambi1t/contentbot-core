@@ -781,6 +781,12 @@ else:
     logger.info(
         f"[tenant] loaded tenant_id={_ACTIVE_TENANT.get('tenant_id')} strict={_TENANT_STRICT}"
     )
+# Startup summary без секретов (CTO-ревью N2): ускоряет диагностику Phase 3 —
+# сразу видно, тот ли тенант/фичи/бренды поднялись.
+_feats_cfg = _ACTIVE_TENANT.get("features") or {}
+logger.info(f"[tenant] features ON: {sorted(k for k, v in _feats_cfg.items() if v is True) or '—'}")
+logger.info(f"[tenant] features OFF: {sorted(k for k, v in _feats_cfg.items() if v is False) or '—'}")
+logger.info(f"[tenant] allowed_brands: {_tenant.allowed_brands(_ACTIVE_TENANT) or 'все'}")
 
 # Карта callback-префикс → опц-фича для feature-gate в handle_callback.
 # Только ОДНОЗНАЧНЫЕ опц-пайплайны. Ядро (селфи/сценарий/сборка/...) тут НЕ
@@ -6193,9 +6199,16 @@ def _start_action_kb() -> InlineKeyboardMarkup:
 
 
 def _brand_picker_kb(selected: str) -> InlineKeyboardMarkup:
-    """Inline keyboard for switching brand. Marks the active one with a dot."""
+    """Inline keyboard for switching brand. Marks the active one with a dot.
+
+    Показываем только бренды, разрешённые тенанту (CTO-ревью I3): после
+    слияния в core BRANDS содержит чужие бренды — без фильтра panferov увидел
+    бы maksim. Нет конфига brands.allowed → показываем все (прод цел).
+    """
     rows = []
     for name, cfg in BRANDS.items():
+        if not _tenant.brand_allowed(_ACTIVE_TENANT, name):
+            continue
         mark = "● " if name == selected else ""
         label = f"{mark}{name} — {cfg.get('description', '')[:40]}"
         rows.append([InlineKeyboardButton(label, callback_data=f"brand_set:{name}")])
@@ -6871,6 +6884,11 @@ async def cards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ideas_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show idea backlog cards."""
     logger.info(f"[user:{update.effective_user.id}] /ideas")
+    # Command-guard (CTO-ревью C3): /ideas — единственный командный вход в
+    # idea_bank в обход callback-gate. Если фича выключена у тенанта — отклоняем.
+    if _tenant.feature_blocked(_ACTIVE_TENANT, "idea_bank"):
+        await update.message.reply_text("🔒 Банк идей не подключён в текущем тарифе.")
+        return
     msg = await update.message.reply_text("Загружаю идеи...")
 
     try:
@@ -12674,6 +12692,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_brand = query.data.split(":", 1)[1].strip().lower()
         if new_brand not in BRANDS:
             await query.edit_message_text(f"❌ Неизвестный бренд: {new_brand}")
+            return
+        # Бренд вне allowed тенанта — отклоняем даже через stale-кнопку (I3:
+        # чужой бренд не должен активироваться, не только скрыт в пикере).
+        if not _tenant.brand_allowed(_ACTIVE_TENANT, new_brand):
+            await query.answer("Этот бренд не доступен в текущем тарифе.", show_alert=True)
             return
         prev = _active_brand
         _active_brand = new_brand
