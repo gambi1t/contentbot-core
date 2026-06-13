@@ -8,6 +8,13 @@ Phase 2a-1 — минимальный фундамент: tenant_id + features{}
 
 Файл конфига: tenant.json рядом с ботом (override env TENANT_CONFIG).
 Секреты НИКОГДА не здесь — они в .env/secrets.env (значения вида "env:KEY").
+
+⚠️ АРХИТЕКТУРНЫЙ ИНВАРИАНТ (CTO-ревью I6): один процесс = один тенант.
+`_ACTIVE_TENANT` грузится ОДИН раз на старте из tenant.json. НЕ маршрутизировать
+несколько Telegram-токенов / тенантов через один Python-процесс и НЕ выводить
+tenant_id из update/user/chat — глобальные кэши, pending, .env, Notion-клиенты,
+OAuth-токены и пути привязаны к процессу. Несколько клиентов = несколько
+процессов (systemd-юнитов), каждый со своим tenant.json. См. docs/03_TENANT_MODEL.md.
 """
 from __future__ import annotations
 
@@ -233,3 +240,59 @@ def config_doctor(
                         f"brand_overrides.{brand_name}.{key}: file not found: {resolved}"
                     )
     return problems
+
+
+def _cli() -> int:
+    """CLI-доктор для runbook (CTO-ревью N1): проверка tenant.json ДО
+    `systemctl start` в Phase 3-cutover. НЕ импортирует bot.py (иначе занял бы
+    webhook-порт работающего бота) — список брендов передаётся флагом --brands.
+
+        python -m tenant doctor --config /root/contentbot-core/tenant.json \\
+            --strict --expected panferov --brands default,shoes
+
+    Exit 0 = конфиг валиден, 1 = проблемы/фатал.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="tenant", description="Tenant config doctor")
+    sub = parser.add_subparsers(dest="cmd")
+    doc = sub.add_parser("doctor", help="validate tenant config before start")
+    doc.add_argument("--config", default=None, help="path to tenant.json (default: env/рядом с кодом)")
+    doc.add_argument("--strict", action="store_true", help="env-refs обязательны, нет файла = фатал")
+    doc.add_argument("--expected", default=None, help="ожидаемый tenant_id")
+    doc.add_argument("--brands", default=None, help="известные бренды через запятую (опц., для brand-ref проверки)")
+    args = parser.parse_args()
+
+    if args.cmd != "doctor":
+        parser.print_help()
+        return 2
+
+    try:
+        cfg = load_tenant(args.config, strict=args.strict)
+    except TenantConfigError as e:
+        print(f"FATAL: {e}")
+        return 1
+
+    known = [b.strip() for b in args.brands.split(",")] if args.brands else None
+    # Промпт-файлы лежат рядом с кодом (= рядом с tenant.py), не с конфигом.
+    base = Path(__file__).resolve().parent
+    problems = config_doctor(
+        cfg, expected_id=args.expected, known_brands=known, base_dir=base, strict=args.strict,
+    )
+
+    print(f"tenant_id={cfg.get('tenant_id')!r} strict={args.strict} "
+          f"allowed_brands={allowed_brands(cfg) or 'все'}")
+    if known is None:
+        print("note: --brands не задан → проверка brand-refs пропущена")
+    if problems:
+        print(f"PROBLEMS ({len(problems)}):")
+        for pr in problems:
+            print(f"  - {pr}")
+        return 1
+    print("OK: config valid")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli())
