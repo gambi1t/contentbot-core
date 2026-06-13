@@ -12647,6 +12647,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _generate_script(pseudo, context, idea_text)
         return
 
+    if query.data.startswith("b2man:"):
+        from broll.handlers import handle_broll2_manual_cb
+        await handle_broll2_manual_cb(update, context)
+        return
+
     if query.data == "b2up_done":
         try:
             await query.answer()

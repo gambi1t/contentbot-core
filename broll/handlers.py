@@ -47,12 +47,13 @@ logger = logging.getLogger("broll.handlers")
 # длинных ветках). Отдельная папка, атомарная запись — см. broll.draft.
 DRAFTS_DIR = Path(__file__).resolve().parent.parent / "broll_drafts"
 
-# Фазовая выкатка источников. Проведены: AUTO (Авто из библиотеки), UPLOAD
-# (Загрузить свои фото/видео). Вручную/HF — следующими инкрементами.
-_ENABLED_MODES = (SourceMode.AUTO, SourceMode.UPLOAD)
+# Фазовая выкатка источников. Проведены: AUTO, UPLOAD (Загрузить свои),
+# MANUAL (Вручную из библиотеки). HF — следующими инкрементами.
+_ENABLED_MODES = (SourceMode.AUTO, SourceMode.UPLOAD, SourceMode.MANUAL)
 
-# State (в общем pending) для приёма загрузок Pipeline 2.
+# State (в общем pending) для приёма загрузок / ручного выбора Pipeline 2.
 _UPLOAD_STATE = "broll2_uploading"
+_MANUAL_STATE = "broll2_manual"
 
 # Подписи категорий для preview.
 _SCENE_LABELS = {
@@ -260,8 +261,135 @@ async def handle_broll_source(
         )
         return
 
+    if mode == SourceMode.MANUAL:
+        from selfie.broll_picker import list_library_categories
+        from .manual import manual_categories_keyboard
+        cats = list_library_categories("video")
+        if not cats:
+            await context.bot.send_message(chat_id, "⚠️ Библиотека клипов пуста.")
+            return
+        draft.source_mode = SourceMode.MANUAL
+        draft.status = Status.SELECTING_MANUAL
+        draft.work_dir = str(DRAFTS_DIR.parent / "broll_runs" / draft_id)
+        draft.source_items = []
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        _bot_pending[q.from_user.id] = {
+            "state": _MANUAL_STATE, "broll2_draft_id": draft_id,
+            "b2man_selected": [], "b2man_shown": [], "b2man_cat": None,
+            "b2man_samples": [],
+        }
+        _bot_save_pending(_bot_pending)
+        await context.bot.send_message(
+            chat_id, "👆 Выбери категорию клипов:",
+            reply_markup=manual_categories_keyboard(cats))
+        return
+
     # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.
     await context.bot.send_message(chat_id, "Этот режим скоро будет доступен.")
+
+
+async def handle_broll2_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Диспетчер ручного пикера (callback b2man:*). Мультивыбор из библиотеки."""
+    import library_manager
+    from selfie.broll_picker import (
+        list_library_sample, list_library_categories, lookup_library_path)
+    from .manual import (
+        parse_b2man_cb, manual_toggle_keyboard, manual_categories_keyboard,
+        manual_items_from_ids)
+
+    q = update.callback_query
+    uid = q.from_user.id
+    chat_id = q.message.chat_id
+    d = _bot_pending.get(uid) or {}
+    if d.get("state") != _MANUAL_STATE:
+        await q.answer("Кнопка устарела", show_alert=True)
+        return
+    action, cat, item_id = parse_b2man_cb(q.data)
+    selected = set(d.get("b2man_selected", []))
+    await q.answer()
+
+    if action == "cats":
+        cats = list_library_categories("video")
+        await q.edit_message_text("👆 Выбери категорию клипов:",
+                                  reply_markup=manual_categories_keyboard(cats))
+        return
+
+    if action in ("cat", "reroll"):
+        the_cat = cat or d.get("b2man_cat")
+        exclude = d.get("b2man_shown", []) if action == "reroll" else []
+        samples = list_library_sample("video", the_cat, 6, exclude)
+        if not samples:
+            await context.bot.send_message(chat_id, "Больше клипов в категории нет.")
+            cats = list_library_categories("video")
+            await context.bot.send_message(
+                chat_id, "👆 Выбери категорию:",
+                reply_markup=manual_categories_keyboard(cats))
+            return
+        d["b2man_cat"] = the_cat
+        d["b2man_shown"] = (d.get("b2man_shown", []) if action == "reroll" else []) \
+            + [s["id"] for s in samples]
+        d["b2man_samples"] = samples
+        _bot_pending[uid] = d
+        _bot_save_pending(_bot_pending)
+        await library_manager._send_previews(context, chat_id, samples, "video")
+        await context.bot.send_message(
+            chat_id, "Отметь нужные клипы (✅), потом «Готово»:",
+            reply_markup=manual_toggle_keyboard(samples, the_cat, selected, len(selected)))
+        return
+
+    if action == "tog":
+        if item_id in selected:
+            selected.discard(item_id)
+        else:
+            selected.add(item_id)
+        d["b2man_selected"] = list(selected)
+        _bot_pending[uid] = d
+        _bot_save_pending(_bot_pending)
+        try:
+            await q.edit_message_reply_markup(reply_markup=manual_toggle_keyboard(
+                d.get("b2man_samples", []), d.get("b2man_cat", ""), selected, len(selected)))
+        except Exception:
+            pass
+        return
+
+    if action == "done":
+        if not selected:
+            await context.bot.send_message(chat_id, "Ничего не выбрано — отметь хотя бы один клип.")
+            return
+        items = manual_items_from_ids(list(selected), lookup_library_path)
+        draft = load_draft(d.get("broll2_draft_id"), DRAFTS_DIR)
+        if draft is None or not items:
+            await context.bot.send_message(chat_id, "⚠️ Черновик потерян — запусти заново.")
+            _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+            return
+        draft.source_items = items
+        draft.status = Status.PREVIEW_READY
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+        # Библиотечные видео = passthrough (materialize не меняет mp4, единообразно).
+        clip_paths = await asyncio.to_thread(
+            materialize_items, items, draft.work_dir or str(DRAFTS_DIR.parent))
+        context.user_data["broll_draft"] = {
+            "script": draft.script_text,
+            "clips": [str(p) for p in clip_paths],
+            "theme": draft.theme,
+            "notion_url": draft.notion_url,
+            "chat_id": draft.chat_id,
+        }
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=_build_preview(draft.script_text, [str(p) for p in clip_paths]),
+            parse_mode="HTML",
+            reply_markup=_approval_keyboard(draft.notion_url),
+            disable_web_page_preview=True,
+        )
+        return
 
 
 async def handle_broll2_upload_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -531,6 +659,7 @@ async def cancel_broll(
 __all__ = [
     "generate_broll_preview",
     "handle_broll_source",
+    "handle_broll2_manual_cb",
     "handle_broll2_upload_message",
     "finish_broll_upload",
     "cancel_broll_upload",
