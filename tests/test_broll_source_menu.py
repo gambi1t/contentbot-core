@@ -49,6 +49,15 @@ def main():
     _assert("мин" in texts.lower(), "time-labels присутствуют (минуты)", errors)
     _assert(any("отмен" in b.text.lower() for b in flat), "есть Отмена", errors)
 
+    print("\n[source_menu_keyboard — фазовая выкатка (подмножество режимов)]")
+    kb1 = source_menu_keyboard(did, enabled_modes=[SourceMode.AUTO])
+    flat1 = [b for row in kb1.inline_keyboard for b in row]
+    cbs1 = [b.callback_data for b in flat1]
+    _assert(any(f"b2src:{SourceMode.AUTO}:" in c for c in cbs1), "AUTO показан", errors)
+    _assert(not any(f"b2src:{SourceMode.HF_ONLY}:" in c for c in cbs1),
+            "выключенные режимы скрыты", errors)
+    _assert(any("cancel" in c for c in cbs1), "Отмена есть всегда", errors)
+
     print("\n[parse_source_cb — разбор callback]")
     mode, draft_id = parse_source_cb(f"b2src:{SourceMode.HF_ONLY}:{did}")
     _assert(mode == SourceMode.HF_ONLY and draft_id == did,

@@ -23,6 +23,7 @@ import html as html_mod
 import logging
 import shutil
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -32,8 +33,21 @@ from telegram.ext import ContextTypes
 from .assembler import MontageError, assemble_broll_montage
 from .llm import generate_script
 from .selector import SelectorError, select_clips
+from .draft import (
+    BrollDraft, Status, SourceMode,
+    save_draft, load_draft, new_draft_id, cleanup_expired,
+)
+from .source_menu import source_menu_keyboard
 
 logger = logging.getLogger("broll.handlers")
+
+# Durable-черновики Pipeline 2 (CTO-ревью Critical 1: переживают рестарт на
+# длинных ветках). Отдельная папка, атомарная запись — см. broll.draft.
+DRAFTS_DIR = Path(__file__).resolve().parent.parent / "broll_drafts"
+
+# Фазовая выкатка источников: пока проведён только AUTO (Авто из библиотеки).
+# Вручную/Загрузить/HF добавляются следующими инкрементами.
+_ENABLED_MODES = (SourceMode.AUTO,)
 
 # Подписи категорий для preview.
 _SCENE_LABELS = {
@@ -112,34 +126,23 @@ async def generate_broll_preview(
             pass
         return
 
-    # Выбор клипов
-    try:
-        clip_paths = await asyncio.to_thread(select_clips, script, claude)
-    except SelectorError as e:
-        logger.error(f"[broll] clip selection failed: {e}")
-        try:
-            await status.edit_text(
-                f"❌ Архив B-roll клипов недоступен на сервере.\n\n<code>{e}</code>",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-        return
-    except Exception as e:
-        logger.error(f"[broll] clip selection failed: {e}", exc_info=True)
-        try:
-            await status.edit_text(f"❌ Не получилось подобрать клипы: {e}")
-        except Exception:
-            pass
-        return
-
-    context.user_data["broll_draft"] = {
-        "script": script,
-        "clips": [str(p) for p in clip_paths],
-        "theme": theme,
-        "notion_url": notion_url,
-        "chat_id": chat_id,
-    }
+    # Durable-черновик (CTO-ревью Critical 1): создаём сразу после сценария —
+    # переживает рестарт, пока юзер выбирает источник видеоряда. Выбор клипов
+    # перенесён в обработчик режима (Авто), чтобы не тратить его, если юзер
+    # выберет ручной/загрузку/графику.
+    cleanup_expired(DRAFTS_DIR, now=time.time())
+    uid = (update.effective_user.id if update.effective_user else
+           (update.callback_query.from_user.id if update.callback_query else 0))
+    now = time.time()
+    draft = BrollDraft(
+        draft_id=new_draft_id(uid, now), user_id=uid, chat_id=chat_id,
+        status=Status.AWAITING_SOURCE, source_mode=None,
+        script_text=script, voice_estimate_sec=0.0, source_items=[],
+        work_dir="", notion_url=notion_url, theme=theme,
+        created_at=now, updated_at=now,
+    )
+    save_draft(draft, DRAFTS_DIR)
+    context.user_data["broll_draft_id"] = draft.draft_id
 
     try:
         await status.delete()
@@ -148,11 +151,87 @@ async def generate_broll_preview(
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text=_build_preview(script, [str(p) for p in clip_paths]),
+        text=(
+            f"🎞 <b>B-roll ролик</b> — закадровый голос + видеоряд, без аватара\n\n"
+            f"<b>Сценарий (озвучка голосом Максима):</b>\n"
+            f"<i>{html_mod.escape(script)}</i>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\nОткуда взять видеоряд?"
+        ),
         parse_mode="HTML",
-        reply_markup=_approval_keyboard(notion_url),
+        reply_markup=source_menu_keyboard(draft.draft_id, enabled_modes=_ENABLED_MODES),
         disable_web_page_preview=True,
     )
+
+
+async def handle_broll_source(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    claude,
+    draft_id: str,
+    mode: str,
+) -> None:
+    """Обработка выбора источника видеоряда (callback b2src:<mode>:<draft_id>).
+
+    Этот инкремент: AUTO (Авто из библиотеки) + cancel. Остальные режимы
+    подключаются следующими инкрементами (в меню они пока скрыты)."""
+    q = update.callback_query
+    chat_id = q.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None:
+        await context.bot.send_message(
+            chat_id, "⚠️ Черновик устарел или потерян — запусти B-roll ролик заново.")
+        return
+
+    if mode == "cancel":
+        try:
+            (DRAFTS_DIR / f"{draft_id}.json").unlink()
+        except OSError:
+            pass
+        await context.bot.send_message(chat_id, "✖️ B-roll ролик отменён.")
+        return
+
+    if mode == SourceMode.AUTO:
+        status = await context.bot.send_message(chat_id, "🤖 Подбираю клипы под сценарий…")
+        try:
+            clip_paths = await asyncio.to_thread(select_clips, draft.script_text, claude)
+        except SelectorError as e:
+            logger.error(f"[broll] auto clip selection failed: {e}")
+            await status.edit_text(f"❌ Архив B-roll клипов недоступен.\n\n<code>{e}</code>",
+                                   parse_mode="HTML")
+            return
+        except Exception as e:
+            logger.error(f"[broll] auto clip selection failed: {e}", exc_info=True)
+            await status.edit_text(f"❌ Не получилось подобрать клипы: {e}")
+            return
+
+        draft.source_mode = SourceMode.AUTO
+        draft.status = Status.PREVIEW_READY
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        # Переиспользуем существующую сборку (Фаза 2) через её dict-контракт —
+        # для AUTO видеоряд = только видео, materialize не нужен (passthrough).
+        context.user_data["broll_draft"] = {
+            "script": draft.script_text,
+            "clips": [str(p) for p in clip_paths],
+            "theme": draft.theme,
+            "notion_url": draft.notion_url,
+            "chat_id": draft.chat_id,
+        }
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=_build_preview(draft.script_text, [str(p) for p in clip_paths]),
+            parse_mode="HTML",
+            reply_markup=_approval_keyboard(draft.notion_url),
+            disable_web_page_preview=True,
+        )
+        return
+
+    # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.
+    await context.bot.send_message(chat_id, "Этот режим скоро будет доступен.")
 
 
 async def assemble_broll_from_draft(
@@ -303,6 +382,7 @@ async def cancel_broll(
 
 __all__ = [
     "generate_broll_preview",
+    "handle_broll_source",
     "assemble_broll_from_draft",
     "regenerate_broll_preview",
     "cancel_broll",

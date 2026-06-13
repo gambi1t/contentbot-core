@@ -62,15 +62,15 @@ class BrollItem:
     kind: video | image | hf_scene; origin: library | upload | auto | hf.
     Сырой mp4-путь получается из любого item только перед сборкой
     (см. broll.materialize), что упрощает preview/fallback/cleanup.
+
+    Поля строго те, что использует Фаза 1 (kind/origin/path/label). Поля под
+    микс (semantic_role и т.п.) добавляются в Фазе 3, когда VisualBeatPlan их
+    реально потребует — не закладываем под гипотетику.
     """
     kind: str
     origin: str
     path: str
     label: str = ""
-    duration_hint: float | None = None
-    semantic_role: str | None = None
-    source_category: str | None = None
-    safe_to_loop: bool = True
 
     def __post_init__(self):
         if self.kind not in _ITEM_KINDS:
@@ -85,6 +85,21 @@ class BrollItem:
     def from_dict(cls, d: dict) -> "BrollItem":
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in d.items() if k in known})
+
+
+def from_picker_items(picker_items) -> list[BrollItem]:
+    """selfie.broll_picker.BrollItem (duck-typed: .kind/.source/.label) →
+    draft.BrollItem. Граница между переиспользуемым пикером селфи и durable-
+    слоем Pipeline 2. origin выводим из метки: 'upload/...' → upload, иначе
+    library."""
+    out: list[BrollItem] = []
+    for it in picker_items:
+        label = getattr(it, "label", None) or ""
+        origin = "upload" if label.startswith("upload/") else "library"
+        out.append(BrollItem(
+            kind=it.kind, origin=origin, path=str(it.source), label=label,
+        ))
+    return out
 
 
 @dataclass

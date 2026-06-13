@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from broll.draft import (  # noqa: E402
     BrollItem, BrollDraft, Status, SourceMode,
     save_draft, load_draft, new_draft_id, cleanup_expired,
+    from_picker_items,
 )
 
 
@@ -37,20 +38,34 @@ def main():
     errors = []
     drafts_dir = Path(tempfile.mkdtemp(prefix="broll_drafts_"))
 
-    print("\n[BrollItem — контракт + сериализация]")
-    it = BrollItem(kind="image", origin="upload", path="/x/a.jpg", label="фото",
-                   semantic_role="hook")
+    print("\n[BrollItem — контракт (только поля Фазы 1) + сериализация]")
+    it = BrollItem(kind="image", origin="upload", path="/x/a.jpg", label="фото")
     d = it.to_dict()
-    _assert(d["kind"] == "image" and d["origin"] == "upload", "to_dict ключевые поля", errors)
+    _assert(set(d) == {"kind", "origin", "path", "label"},
+            f"ровно 4 поля Фазы 1 (без спекулятивных), got {set(d)}", errors)
     it2 = BrollItem.from_dict(d)
-    _assert(it2.path == "/x/a.jpg" and it2.semantic_role == "hook",
-            "round-trip from_dict", errors)
-    _assert(it2.safe_to_loop is True, "дефолт safe_to_loop", errors)
+    _assert(it2.path == "/x/a.jpg" and it2.label == "фото", "round-trip from_dict", errors)
     try:
         BrollItem(kind="bogus", origin="upload", path="/x")
         _assert(False, "невалидный kind → ValueError", errors)
     except ValueError:
         _assert(True, "невалидный kind → ValueError", errors)
+
+    print("\n[from_picker_items — конвертер selfie-пикер → draft.BrollItem]")
+    class _PickerItem:  # duck-typed как selfie.broll_picker.BrollItem
+        def __init__(self, kind, source, label):
+            self.kind = kind; self.source = source; self.label = label
+    picked = [
+        _PickerItem("video", Path("/lib/karting/c1.mp4"), "karting/c1"),
+        _PickerItem("image", Path("/proj/uploads/upload_photo_001.jpg"), "upload/upload_photo_001.jpg"),
+    ]
+    conv = from_picker_items(picked)
+    _assert(len(conv) == 2 and all(isinstance(x, BrollItem) for x in conv),
+            "вернул draft.BrollItem-ы", errors)
+    _assert(conv[0].kind == "video" and Path(conv[0].path) == picked[0].source,
+            "kind/path перенесены (Path-эквивалентны, OS-независимо)", errors)
+    _assert(conv[0].origin == "library", "без upload-метки → origin=library", errors)
+    _assert(conv[1].origin == "upload", "метка upload/ → origin=upload", errors)
 
     print("\n[new_draft_id — уникальный, стабильный по входу]")
     a = new_draft_id(123, 1781000000.0)

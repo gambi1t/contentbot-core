@@ -26,11 +26,16 @@ _MODE_ORDER = (SourceMode.AUTO, SourceMode.MANUAL, SourceMode.UPLOAD,
 _CB_PREFIX = "b2src"
 
 
-def source_menu_keyboard(draft_id: str) -> InlineKeyboardMarkup:
-    """Плоское меню источников. Каждый callback несёт draft_id."""
+def source_menu_keyboard(draft_id: str,
+                         enabled_modes=None) -> InlineKeyboardMarkup:
+    """Плоское меню источников. Каждый callback несёт draft_id.
+
+    enabled_modes — какие режимы показать (фазовая выкатка: режимы
+    добавляются по мере проводки). None → все пять."""
+    shown = enabled_modes if enabled_modes is not None else _MODE_ORDER
     rows = [
         [InlineKeyboardButton(_MODE_LABELS[m], callback_data=f"{_CB_PREFIX}:{m}:{draft_id}")]
-        for m in _MODE_ORDER
+        for m in _MODE_ORDER if m in shown
     ]
     rows.append([InlineKeyboardButton(
         "❌ Отмена", callback_data=f"{_CB_PREFIX}:cancel:{draft_id}")])
