@@ -12693,6 +12693,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_broll_source(update, context, claude, draft_id, mode)
         return
 
+    if query.data.startswith("b2hfre:"):
+        # #14: меню ручной пересборки HF-сцены (шлёт клипы + пикер).
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        from broll.handlers import handle_hf_regen_menu
+        await handle_hf_regen_menu(update, context, query.data.split(":", 1)[1])
+        return
+
+    if query.data.startswith("b2hfsc:"):
+        # #14: пересобрать сцену N (b2hfsc:<draft_id>:<n>).
+        try:
+            await query.answer("🔁 Пересобираю…")
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        _parts = query.data.split(":")
+        from broll.handlers import handle_hf_regen_scene
+        try:
+            _n = int(_parts[2])
+        except (IndexError, ValueError):
+            await query.message.reply_text("Кнопка устарела.")
+            return
+        await handle_hf_regen_scene(update, context, _parts[1], _n)
+        return
+
+    if query.data.startswith("b2hfback:"):
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        from broll.handlers import handle_hf_regen_back
+        await handle_hf_regen_back(update, context, query.data.split(":", 1)[1])
+        return
+
     if query.data == "broll_approve":
         try:
             await query.answer("🎬 Собираю ролик…")

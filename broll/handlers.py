@@ -66,11 +66,16 @@ _SCENE_LABELS = {
 }
 
 
-def _approval_keyboard(notion_url: str | None = None) -> InlineKeyboardMarkup:
+def _approval_keyboard(notion_url: str | None = None,
+                       hf_draft_id: str | None = None) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("✅ Собрать ролик", callback_data="broll_approve")],
-        [InlineKeyboardButton("🔄 Другой сценарий", callback_data="broll_regen")],
     ]
+    # Только для HF-only (графика): ручная пересборка одной сцены (#14).
+    if hf_draft_id:
+        rows.append([InlineKeyboardButton(
+            "🔁 Перегенерировать сцену", callback_data=f"b2hfre:{hf_draft_id}")])
+    rows.append([InlineKeyboardButton("🔄 Другой сценарий", callback_data="broll_regen")])
     if notion_url:
         rows.append([InlineKeyboardButton("📋 К карточке", url=notion_url)])
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")])
@@ -395,13 +400,112 @@ async def handle_broll_source(
             chat_id=chat_id,
             text=_build_preview(draft.script_text, [str(p) for p in clip_paths]),
             parse_mode="HTML",
-            reply_markup=_approval_keyboard(draft.notion_url),
+            reply_markup=_approval_keyboard(draft.notion_url, hf_draft_id=draft_id),
             disable_web_page_preview=True,
         )
         return
 
     # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.
     await context.bot.send_message(chat_id, "Этот режим скоро будет доступен.")
+
+
+# ── #14: ручная пересборка одной HF-сцены ────────────────────────────────
+async def _send_hf_preview(context, chat_id, draft, draft_id: str) -> None:
+    """Заново показать превью HF-ролика (с кнопкой пересборки)."""
+    clips = [str(it.path) for it in draft.source_items]
+    context.user_data["broll_draft"] = {
+        "script": draft.script_text, "clips": clips, "theme": draft.theme,
+        "notion_url": draft.notion_url, "chat_id": draft.chat_id,
+    }
+    await context.bot.send_message(
+        chat_id, _build_preview(draft.script_text, clips), parse_mode="HTML",
+        reply_markup=_approval_keyboard(draft.notion_url, hf_draft_id=draft_id),
+        disable_web_page_preview=True)
+
+
+async def handle_hf_regen_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                               draft_id: str) -> None:
+    """Шлёт 6 сцен-клипов с номерами + пикер «какую пересобрать» (callback b2hfre)."""
+    q = update.callback_query
+    chat_id = q.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items:
+        await context.bot.send_message(chat_id, "⚠️ Черновик устарел — запусти ролик заново.")
+        return
+    if not (Path(draft.work_dir) / "storyboard.json").is_file():
+        await context.bot.send_message(
+            chat_id, "⚠️ Пересборка доступна только для свежей графики — сделай "
+            "новый ролик (🎨 Только графика).")
+        return
+    n = len(draft.source_items)
+    await context.bot.send_message(chat_id, "Сцены по порядку — какую пересобрать?")
+    for i, it in enumerate(draft.source_items, start=1):
+        try:
+            with open(it.path, "rb") as f:
+                await context.bot.send_video(chat_id, f, caption=f"Сцена {i}")
+        except Exception:
+            await context.bot.send_message(chat_id, f"Сцена {i}: превью не отправилось")
+    btns = [InlineKeyboardButton(str(i), callback_data=f"b2hfsc:{draft_id}:{i}")
+            for i in range(1, n + 1)]
+    rows = [btns[:3], btns[3:]] if n > 3 else [btns]
+    rows.append([InlineKeyboardButton("⬅️ Назад к ролику", callback_data=f"b2hfback:{draft_id}")])
+    await context.bot.send_message(
+        chat_id, f"🔁 Номер сцены для пересборки (1–{n}):",
+        reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def handle_hf_regen_scene(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                draft_id: str, n: int) -> None:
+    """Пересобрать сцену N (callback b2hfsc:<draft_id>:<n>)."""
+    import json as _json
+    from hyperframes_broll import regenerate_scene
+    q = update.callback_query
+    chat_id = q.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items:
+        await context.bot.send_message(chat_id, "⚠️ Черновик устарел.")
+        return
+    sb_path = Path(draft.work_dir) / "storyboard.json"
+    if not sb_path.is_file():
+        await context.bot.send_message(chat_id, "⚠️ Раскадровка не найдена — сделай новый ролик.")
+        return
+    if not (1 <= n <= len(draft.source_items)):
+        await context.bot.send_message(chat_id, "⚠️ Нет такой сцены.")
+        return
+    try:
+        storyboard = _json.loads(sb_path.read_text(encoding="utf-8"))
+    except Exception:
+        await context.bot.send_message(chat_id, "⚠️ Раскадровка повреждена — сделай новый ролик.")
+        return
+    status = await context.bot.send_message(chat_id, f"🔁 Пересобираю сцену {n} (~1-2 мин)…")
+    mp4 = await asyncio.to_thread(
+        regenerate_scene, storyboard, f"scene_{n:02d}", Path(draft.work_dir))
+    if not mp4:
+        await status.edit_text(
+            f"⚠️ Сцену {n} пересобрать не вышло — старая осталась. Можно повторить.")
+        return
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    try:
+        with open(mp4, "rb") as f:
+            await context.bot.send_video(chat_id, f, caption=f"✅ Сцена {n} пересобрана")
+    except Exception:
+        pass
+    # путь клипа не изменился (hf_NN.mp4 перезаписан) — заново показываем превью
+    await _send_hf_preview(context, chat_id, draft, draft_id)
+
+
+async def handle_hf_regen_back(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                               draft_id: str) -> None:
+    """Назад к превью HF-ролика (callback b2hfback)."""
+    chat_id = update.callback_query.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items:
+        await context.bot.send_message(chat_id, "⚠️ Черновик устарел — запусти ролик заново.")
+        return
+    await _send_hf_preview(context, chat_id, draft, draft_id)
 
 
 async def handle_broll2_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

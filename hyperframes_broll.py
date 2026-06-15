@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -590,6 +591,16 @@ motion_family из контракта выше. primary_text — главный 
 {idx_sample}
 ══════ КОНЕЦ ОБРАЗЦА ══════
 {fix_block}
+🚫 БЕЗОПАСНОСТЬ ТЕКСТА (обязательно — частые дефекты):
+- Любой текст ПОЛНОСТЬЮ помещается в свой контейнер. Запрещено обрезать текст
+  (overflow:hidden/clip на текстовом блоке) и выводить его за рамку 1080×1920.
+- Длинный заголовок — уменьшай font-size, чтобы влез, НЕ обрезай и не выноси за край.
+- Слова НЕ рвутся посреди: запрещены word-break:break-all и overflow-wrap:anywhere.
+  Латиница (напр. «Life Drive») и любое слово переносятся ЦЕЛИКОМ. Если делаешь
+  typewriter/печать по буквам — держи строку короче ширины ИЛИ white-space:nowrap,
+  чтобы строка не разорвалась посреди слова (типа «Lif|e»).
+- Карточки/блоки подгоняй ПОД их текст (по содержимому), а не текст под фикс-размер.
+
 📤 ФОРМАТ ОТВЕТА (строго):
 - Выведи ТОЛЬКО полный HTML-документ: первый символ ответа — `<!doctype html>`,
   последний — `</html>`.
@@ -950,6 +961,82 @@ def _render_all_native(out_dir: Path) -> tuple[list[Path], list[str]]:
     except Exception as e:
         logger.warning(f"[hf_broll] render-cache не записан: {e}")
     return clips, errors
+
+
+def _render_single_scene(scene_file: str, out_dir: Path) -> tuple[Path | None, str | None]:
+    """Рендер ОДНОЙ сцены (HF_PROJECT/scene_NN.html) → out_dir/hyperframes/
+    hf_NN.mp4 (перезапись). Для ручной пересборки сцены (#14) — остальные
+    клипы не трогает. Обновляет .render_cache.json по этой сцене."""
+    render_script = Path(__file__).resolve().parent / "tools" / "render_scene.mjs"
+    scene_path = HF_PROJECT / scene_file
+    if not scene_path.exists():
+        return None, f"{scene_file}: нет в HF_PROJECT"
+    try:
+        idx = int(scene_file.split("_")[1].split(".")[0])
+    except Exception:
+        return None, f"{scene_file}: не разобрал номер"
+    hf_dir = out_dir / "hyperframes"
+    hf_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir = hf_dir / f"_frames_{idx:02d}"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    out_mp4 = hf_dir / f"hf_{idx:02d}.mp4"
+    try:
+        r1 = subprocess.run(
+            ["node", str(render_script), str(scene_path), str(frames_dir), "5", "30"],
+            cwd=HF_PROJECT, env=_render_env(),
+            capture_output=True, text=True, timeout=RENDER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f"{scene_file}: render таймаут"
+    if r1.returncode != 0:
+        return None, f"{scene_file}: render rc={r1.returncode}: {(r1.stderr or r1.stdout)[-300:]}"
+    try:
+        r2 = subprocess.run(
+            ["ffmpeg", "-y", "-framerate", "30",
+             "-i", str(frames_dir / "frame_%04d.png"),
+             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+             "-crf", "20", "-preset", "medium", str(out_mp4)],
+            capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return None, f"{scene_file}: ffmpeg таймаут"
+    if r2.returncode != 0 or not out_mp4.exists():
+        return None, f"{scene_file}: ffmpeg rc={r2.returncode}"
+    # обновляем render-cache по сцене (поздний полный рендер её не продублирует)
+    cache_file = hf_dir / ".render_cache.json"
+    try:
+        cache = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        cache = {}
+    cache[scene_file] = hashlib.md5(scene_path.read_bytes()).hexdigest()
+    try:
+        cache_file.write_text(json.dumps(cache), encoding="utf-8")
+    except Exception:
+        pass
+    return out_mp4, None
+
+
+def regenerate_scene(storyboard: dict, scene_id: str, out_dir: Path) -> Path | None:
+    """Пересобрать ОДНУ сцену (#14, ручная доводка): LLM → новый HTML →
+    HF_PROJECT/{scene_id}.html → рендер → out_dir/hyperframes/hf_NN.mp4.
+    Возвращает путь нового клипа или None (LLM/валидация/рендер не удались —
+    старый клип сохраняется). scene_id формата 'scene_03'."""
+    try:
+        html = _singleshot_generate_scene(storyboard, scene_id)
+    except (ValueError, RuntimeError) as e:
+        logger.warning(f"[hf_broll] regen {scene_id}: LLM не удался: {e}")
+        return None
+    scene_file = f"{scene_id}.html"
+    target = HF_PROJECT / scene_file
+    target.write_text(html, encoding="utf-8")
+    ok, iss = _scene_valid_minimal(target, scene_id)
+    if not ok:
+        logger.warning(f"[hf_broll] regen {scene_id}: HTML невалиден ({iss})")
+        return None
+    mp4, err = _render_single_scene(scene_file, out_dir)
+    if err:
+        logger.warning(f"[hf_broll] regen {scene_id}: рендер: {err}")
+        return None
+    logger.info(f"[hf_broll] regen {scene_id}: пересобрана → {mp4}")
+    return mp4
 
 
 # import для типов в _run_build_phase_async (ленивый, чтобы не падать на старте)
@@ -1694,6 +1781,16 @@ def generate_hyperframes_broll(
                 _fix_scenes_singleshot(storyboard, _problems_by_scene({}, errors))
     finally:
         _GEN_LOCK.release()
+
+    # Сохраняем раскадровку рядом с клипами (#14): ручная пересборка одной
+    # сцены берёт storyboard ОТСЮДА, а не из HF_PROJECT (тот перезатирается
+    # следующим прогоном).
+    try:
+        sb_src = HF_PROJECT / STORYBOARD_FILE
+        if sb_src.exists():
+            shutil.copyfile(sb_src, Path(out_dir) / STORYBOARD_FILE)
+    except Exception as e:
+        logger.warning(f"[hf_broll] storyboard не скопирован в draft: {e}")
 
     logger.info(
         f"[hf_broll] ✅ готово: {len(clips)} вставок в {out_dir}/hyperframes, "
