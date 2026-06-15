@@ -102,6 +102,16 @@ def _build_preview(script: str, clip_paths: list[str]) -> str:
     )
 
 
+def _broll_card_data(theme: str) -> dict:
+    """card_data для create_notion_card из темы B-roll (своя идея → карточка
+    на Kanban). Формат — короткое видео; рубрика/площадки/призыв — дефолты бренда."""
+    return {
+        "title": (theme or "B-roll ролик").strip()[:80],
+        "format": ["Short video"],
+        "cta": "",
+    }
+
+
 async def generate_broll_preview(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -109,10 +119,14 @@ async def generate_broll_preview(
     theme: str,
     chat_id: int | None = None,
     notion_url: str | None = None,
+    notion_card_fn=None,
 ) -> None:
     """Фаза 1: сгенерить сценарий + выбрать клипы, показать preview.
 
     Черновик кладётся в `context.user_data["broll_draft"]` для фазы 2.
+    notion_card_fn — create_notion_card (передаётся из bot.py, т.к. обратный
+    импорт нельзя): если карточки ещё нет (своя идея, notion_url пуст) — создаём
+    её со сценарием → идея попадает на Kanban SMM-менеджера.
     """
     if chat_id is None:
         q = update.callback_query
@@ -147,12 +161,21 @@ async def generate_broll_preview(
     uid = (update.effective_user.id if update.effective_user else
            (update.callback_query.from_user.id if update.callback_query else 0))
     now = time.time()
+    # Своя идея (notion_url пуст) → создаём карточку Notion со сценарием, чтобы
+    # идея попала на Kanban SMM. Из банка идей карточка уже есть — не дублируем.
+    notion_page_id = None
+    if not notion_url and notion_card_fn:
+        try:
+            notion_url, notion_page_id = await asyncio.to_thread(
+                notion_card_fn, _broll_card_data(theme), script)
+        except Exception as e:
+            logger.warning(f"[broll] не создал Notion-карточку: {e}")
     draft = BrollDraft(
         draft_id=new_draft_id(uid, now), user_id=uid, chat_id=chat_id,
         status=Status.AWAITING_SOURCE, source_mode=None,
         script_text=script, voice_estimate_sec=0.0, source_items=[],
-        work_dir="", notion_url=notion_url, theme=theme,
-        created_at=now, updated_at=now,
+        work_dir="", notion_url=notion_url, notion_page_id=notion_page_id,
+        theme=theme, created_at=now, updated_at=now,
     )
     save_draft(draft, DRAFTS_DIR)
     context.user_data["broll_draft_id"] = draft.draft_id
@@ -228,6 +251,7 @@ async def handle_broll_source(
             "clips": [str(p) for p in clip_paths],
             "theme": draft.theme,
             "notion_url": draft.notion_url,
+            "notion_page_id": draft.notion_page_id,
             "chat_id": draft.chat_id,
         }
         try:
@@ -383,42 +407,99 @@ async def handle_broll_source(
         save_draft(draft, DRAFTS_DIR)
         # hf_scene = passthrough mp4 (materialize не перекодирует) — единообразно
         # с другими источниками.
-        clip_paths = await asyncio.to_thread(
-            materialize_items, items, draft.work_dir)
-        context.user_data["broll_draft"] = {
-            "script": draft.script_text,
-            "clips": [str(p) for p in clip_paths],
-            "theme": draft.theme,
-            "notion_url": draft.notion_url,
-            "chat_id": draft.chat_id,
-        }
+        await asyncio.to_thread(materialize_items, items, draft.work_dir)
         try:
             await status.delete()
         except Exception:
             pass
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=_build_preview(draft.script_text, [str(p) for p in clip_paths]),
-            parse_mode="HTML",
-            reply_markup=_approval_keyboard(draft.notion_url, hf_draft_id=draft_id),
-            disable_web_page_preview=True,
-        )
+        # Превью: 6 нумерованных клипов сцен + короткий текст (без повтора
+        # сценария — он уже на шаге источника) + кнопки.
+        await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True)
         return
 
     # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.
     await context.bot.send_message(chat_id, "Этот режим скоро будет доступен.")
 
 
+# ── Выбор голоса озвучки (ИИ-клон Максима ИЛИ свой голос) ─────────────────
+_BROLL_OWNVOICE_STATE = "broll2_ownvoice"
+
+
+def _voice_choice_keyboard() -> InlineKeyboardMarkup:
+    """Развилка озвучки: ИИ-клон Максима ИЛИ свой записанный голос."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Голос Максима (ИИ-клон)", callback_data="b2vc:ai")],
+        [InlineKeyboardButton("🎤 Запишу сам (свой голос)", callback_data="b2vc:own")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")],
+    ])
+
+
+async def prompt_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«Собрать ролик» → спросить, каким голосом озвучивать (callback broll_approve)."""
+    chat_id = update.callback_query.message.chat_id
+    if not (context.user_data.get("broll_draft") or {}).get("script"):
+        await context.bot.send_message(chat_id, "⚠️ Черновик потерян — собери ролик заново.")
+        return
+    await context.bot.send_message(
+        chat_id,
+        "🎙 <b>Каким голосом озвучить?</b>\n\n"
+        "🤖 <b>ИИ-клон Максима</b> — мгновенно, но клон голоса пока не идеален.\n"
+        "🎤 <b>Свой голос</b> — пришлёшь голосовое с прочитанным сценарием, "
+        "соберу ролик на нём (субтитры лягут автоматом).",
+        parse_mode="HTML", reply_markup=_voice_choice_keyboard())
+
+
+async def start_broll_ownvoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«🎤 Запишу сам» → перевести в режим приёма голосового + показать сценарий."""
+    chat_id = update.callback_query.message.chat_id
+    uid = update.callback_query.from_user.id
+    script = (context.user_data.get("broll_draft") or {}).get("script", "")
+    if not script:
+        await context.bot.send_message(chat_id, "⚠️ Черновик потерян — собери ролик заново.")
+        return
+    _bot_pending[uid] = {"state": _BROLL_OWNVOICE_STATE}
+    _bot_save_pending(_bot_pending)
+    await context.bot.send_message(
+        chat_id,
+        "🎤 Запиши голосовое — прочитай этот сценарий вслух:\n\n"
+        f"<i>{html_mod.escape(script)}</i>\n\n"
+        "Пришли голосовое — соберу ролик на твоём голосе.",
+        parse_mode="HTML")
+
+
 # ── #14: ручная пересборка одной HF-сцены ────────────────────────────────
-async def _send_hf_preview(context, chat_id, draft, draft_id: str) -> None:
-    """Заново показать превью HF-ролика (с кнопкой пересборки)."""
+async def _send_scene_clips(context, chat_id, source_items) -> None:
+    """Шлёт N клипов сцен с подписями «Сцена N» (для превью и пикера пересборки)."""
+    for i, it in enumerate(source_items, start=1):
+        try:
+            with open(it.path, "rb") as f:
+                await context.bot.send_video(chat_id, f, caption=f"Сцена {i}")
+        except Exception:
+            await context.bot.send_message(chat_id, f"Сцена {i}: превью не отправилось")
+
+
+def _hf_preview_text(n_scenes: int) -> str:
+    """Короткое HF-превью БЕЗ повтора сценария (он уже показан на шаге источника)."""
+    return (
+        f"🎨 <b>Графика готова: {n_scenes} сцен(ы)</b> — клипы выше.\n\n"
+        f"Кривая сцена → <b>«🔁 Перегенерировать сцену»</b> (выбери номер).\n"
+        f"Всё ок → <b>«✅ Собрать ролик»</b>: озвучка + монтаж + субтитры."
+    )
+
+
+async def _send_hf_preview(context, chat_id, draft, draft_id: str,
+                           with_clips: bool = False) -> None:
+    """Превью HF-ролика. with_clips=True → сперва шлёт нумерованные клипы сцен."""
     clips = [str(it.path) for it in draft.source_items]
     context.user_data["broll_draft"] = {
         "script": draft.script_text, "clips": clips, "theme": draft.theme,
-        "notion_url": draft.notion_url, "chat_id": draft.chat_id,
+        "notion_url": draft.notion_url, "notion_page_id": draft.notion_page_id,
+        "chat_id": draft.chat_id,
     }
+    if with_clips:
+        await _send_scene_clips(context, chat_id, draft.source_items)
     await context.bot.send_message(
-        chat_id, _build_preview(draft.script_text, clips), parse_mode="HTML",
+        chat_id, _hf_preview_text(len(clips)), parse_mode="HTML",
         reply_markup=_approval_keyboard(draft.notion_url, hf_draft_id=draft_id),
         disable_web_page_preview=True)
 
@@ -439,12 +520,7 @@ async def handle_hf_regen_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     n = len(draft.source_items)
     await context.bot.send_message(chat_id, "Сцены по порядку — какую пересобрать?")
-    for i, it in enumerate(draft.source_items, start=1):
-        try:
-            with open(it.path, "rb") as f:
-                await context.bot.send_video(chat_id, f, caption=f"Сцена {i}")
-        except Exception:
-            await context.bot.send_message(chat_id, f"Сцена {i}: превью не отправилось")
+    await _send_scene_clips(context, chat_id, draft.source_items)
     btns = [InlineKeyboardButton(str(i), callback_data=f"b2hfsc:{draft_id}:{i}")
             for i in range(1, n + 1)]
     rows = [btns[:3], btns[3:]] if n > 3 else [btns]
@@ -595,6 +671,7 @@ async def handle_broll2_manual_cb(update: Update, context: ContextTypes.DEFAULT_
             "clips": [str(p) for p in clip_paths],
             "theme": draft.theme,
             "notion_url": draft.notion_url,
+            "notion_page_id": draft.notion_page_id,
             "chat_id": draft.chat_id,
         }
         try:
@@ -699,6 +776,7 @@ async def finish_broll_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
         "clips": [str(p) for p in clip_paths],
         "theme": draft.theme,
         "notion_url": draft.notion_url,
+        "notion_page_id": draft.notion_page_id,
         "chat_id": draft.chat_id,
     }
     try:
@@ -734,11 +812,14 @@ async def assemble_broll_from_draft(
     context: ContextTypes.DEFAULT_TYPE,
     voiceover_fn,
     chat_id: int | None = None,
+    status_fn=None,
 ) -> None:
     """Фаза 2: озвучка → ffmpeg-монтаж → субтитры → отправка MP4.
 
     voiceover_fn — функция generate_voiceover(text, out_path) из bot.py
     (передаётся параметром, чтобы не плодить циклический импорт).
+    status_fn — update_notion_status(page_id, status) из bot.py: при готовом
+    ролике двигаем карточку на Kanban в «Готово к публикации».
     """
     draft = context.user_data.get("broll_draft")
     if not draft:
@@ -751,6 +832,7 @@ async def assemble_broll_from_draft(
     script = draft["script"]
     clip_paths = [Path(p) for p in draft["clips"]]
     notion_url = draft.get("notion_url")
+    notion_page_id = draft.get("notion_page_id")
     if chat_id is None:
         chat_id = draft.get("chat_id") or update.effective_chat.id
 
@@ -826,6 +908,13 @@ async def assemble_broll_from_draft(
                 parse_mode="HTML",
                 supports_streaming=True,
             )
+
+        # Карточка на Kanban → «Готово к публикации» (ролик собран = идея реализована).
+        if notion_page_id and status_fn:
+            try:
+                await asyncio.to_thread(status_fn, notion_page_id, "Готово к публикации")
+            except Exception as e:
+                logger.warning(f"[broll] статус карточки не обновлён: {e}")
 
         action_rows = [[InlineKeyboardButton("🔄 Ещё B-roll ролик", callback_data="broll_regen")]]
         if notion_url:

@@ -9610,6 +9610,59 @@ async def _render_avatar_from_audio(context, chat_id, audio_path, look_id,
         await status.edit_text(f"❌ Ошибка генерации аватара: {e}")
 
 
+async def _voice_to_mp3(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                        out_path: str) -> bool:
+    """Общий захват «свой голос»: голосовое/аудио юзера → ogg → ffmpeg mp3 (128k)
+    в out_path. True если получилось. Ядро фичи озвучки своим голосом (вынесено
+    из _consume_voiceover_ownvoice/_consume_selfvoice_audio-паттерна для реюза)."""
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return False
+    tg_file = await context.bot.get_file(voice.file_id)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        await tg_file.download_to_drive(tmp.name)
+        ogg = tmp.name
+    try:
+        await asyncio.to_thread(
+            subprocess.run,
+            ["ffmpeg", "-y", "-i", ogg, "-c:a", "libmp3lame", "-b:a", "128k", out_path],
+            capture_output=True, timeout=120,
+        )
+    except Exception:
+        return False
+    return Path(out_path).exists() and Path(out_path).stat().st_size > 0
+
+
+async def _consume_broll_ownvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """B-roll (Pipeline 2): принять голосовое → ogg→mp3 → собрать ролик НА НЁМ
+    (вместо ИИ-озвучки). Субтитры лягут Whisper'ом по этому же аудио."""
+    import shutil as _sh
+    user_id = update.effective_user.id
+    if not (update.message.voice or update.message.audio):
+        await update.message.reply_text("Пришли голосовое сообщение (запись своего голоса).")
+        return
+    msg = await update.message.reply_text("🎤 Принял голос, конвертирую…")
+    mp3 = str(ASSETS_DIR / f"broll_ownvoice_{user_id}.mp3")
+    if not await _voice_to_mp3(update, context, mp3):
+        await msg.edit_text("❌ Не смог принять аудио — пришли голосовое ещё раз.")
+        return
+    # Сбрасываем state (дальше сборка) и собираем ролик на записанном голосе.
+    pending[user_id] = {**pending.get(user_id, {}), "state": None}
+    _save_pending(pending)
+    try:
+        await msg.edit_text("🎬 Голос принят — собираю ролик на нём…")
+    except Exception:
+        pass
+
+    def _own_voiceover(_script, out_path):
+        _sh.copyfile(mp3, out_path)
+
+    from broll.handlers import assemble_broll_from_draft
+    await assemble_broll_from_draft(
+        update, context, _own_voiceover, chat_id=update.effective_chat.id,
+        status_fn=update_notion_status)
+
+
 async def _consume_selfvoice_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Принять голосовое Максима для фичи «свой голос» → конвертнуть → аватар."""
     user_id = update.effective_user.id
@@ -9755,6 +9808,11 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # «Свой голос» на шаге ОЗВУЧКИ: запись становится озвучкой ролика (вместо TTS).
     if state == "awaiting_voiceover_ownvoice":
         await _consume_voiceover_ownvoice(update, context)
+        return
+
+    # B-roll (Pipeline 2): свой голос вместо ИИ-клона — запись = озвучка ролика.
+    if state == "broll2_ownvoice":
+        await _consume_broll_ownvoice(update, context)
         return
 
     logger.info(f"[user:{user_id}] Голосовое сообщение")
@@ -12642,6 +12700,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await generate_broll_preview(
                 pseudo, context, claude, theme=idea_text,
                 chat_id=query.message.chat_id,
+                notion_card_fn=create_notion_card,  # своя идея → карточка на Kanban
             )
         else:  # avatar (дефолт)
             await _generate_script(pseudo, context, idea_text)
@@ -12730,23 +12789,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "broll_approve":
+        # «Собрать ролик» → сперва выбор голоса (ИИ-клон или свой), потом сборка.
         try:
-            await query.answer("🎬 Собираю ролик…")
-        except Exception:
-            pass
-        try:
-            from broll.handlers import assemble_broll_from_draft
-        except Exception as e:
-            logger.error(f"[broll] import failed in approve: {e}", exc_info=True)
-            await query.message.reply_text(f"❌ Модуль B-roll не загружен: {e}")
-            return
-        try:
+            await query.answer()
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        from broll.handlers import prompt_voice_choice
+        await prompt_voice_choice(update, context)
+        return
+
+    if query.data == "b2vc:ai":
+        # Озвучка ИИ-клоном Максима (текущая сборка).
+        try:
+            await query.answer("🎬 Собираю ролик…")
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import assemble_broll_from_draft
         await assemble_broll_from_draft(
             update, context, generate_voiceover, chat_id=query.message.chat_id,
-        )
+            status_fn=update_notion_status)
+        return
+
+    if query.data == "b2vc:own":
+        # Свой голос: перевести в приём голосового + показать сценарий.
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import start_broll_ownvoice
+        await start_broll_ownvoice(update, context)
         return
 
     if query.data == "broll_regen":

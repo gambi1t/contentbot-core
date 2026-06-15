@@ -127,6 +127,7 @@ class BrollDraft:
     source_items: list[BrollItem] = field(default_factory=list)
     work_dir: str = ""
     notion_url: str | None = None
+    notion_page_id: str | None = None  # для update_notion_status при готовности
     theme: str | None = None
     created_at: float = 0.0
     updated_at: float = 0.0
