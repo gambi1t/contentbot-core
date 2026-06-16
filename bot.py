@@ -20648,7 +20648,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     """Set bot commands menu and menu button after startup."""
     from telegram import MenuButtonCommands
-    await application.bot.set_my_commands([
+    # Меню per-tenant (Phase 3 Фаза 2): /update /report /launches /brand видны
+    # только у тенанта с соответствующей фичей — синхронно с регистрацией
+    # handler-ов в main() (feedback_commands_menu). У maksim их не будет, у
+    # panferov будут; transitional без конфига — будут (прод цел).
+    _cmds = [
         ("start", "Главный экран — с чего начать"),
         ("script", "📝 Записать готовый сценарий (без переписывания)"),
         ("notion", "💡 Закинуть идею в Notion (без сценария)"),
@@ -20657,21 +20661,31 @@ async def post_init(application):
         ("cards_all", "📚 Все карточки включая опубликованные"),
         ("calendar", "🗓 Календарь публикаций"),
         ("stats", "📊 Последний замер подписчиков"),
-        # /update и /report скрыты для Maksim (20 мая 2026) — handler-ы
-        # сохранены, при нужде раскомментировать здесь и в register-блоке.
+    ]
+    if not _tenant.feature_blocked(_ACTIVE_TENANT, "subscriber_stats"):
+        _cmds += [
+            ("update", "✏️ Внести замер подписчиков"),
+            ("report", "📈 Отчёт роста подписчиков"),
+        ]
+    _cmds += [
         ("selfie", "🎥 Живое видео с телефона + субтитры"),
         ("image", "🖼 Сгенерировать фото по описанию"),
         ("video", "🎬 Сгенерировать видео (5 или 10 сек)"),
         ("heygen_test", "🧪 Тест аватара: фото + аудио → видео"),
         ("tgpost", "📝 TG-пост эксперимента"),
-        # /brand и /launches скрыты для Maksim (20 мая 2026) — один бренд +
-        # инфра Launch Monitor будет переподключена под трендомер ниш.
+    ]
+    if not _tenant.feature_blocked(_ACTIVE_TENANT, "launch_monitor"):
+        _cmds.append(("launches", "🚀 Дайджест AI-запусков"))
+    if _tenant.brand_switch_available(_ACTIVE_TENANT):
+        _cmds.append(("brand", "🏷 Сменить бренд"))
+    _cmds += [
         ("yt_auth", "Авторизовать YouTube"),
         ("vk_auth", "Авторизовать VK"),
         ("admin", "⚙️ Админ-панель (биллинг, клиенты)"),
         ("billing", "💰 Баланс и биллинг"),
         ("help", "❓ Все команды"),
-    ])
+    ]
+    await application.bot.set_my_commands(_cmds)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("Меню команд установлено")
 
@@ -21757,11 +21771,12 @@ def main():
     app.add_handler(CommandHandler("library", library_manager.library_command))
     app.add_handler(CommandHandler("cards_all", cards_all_command))
     app.add_handler(CommandHandler("stats", stats_command))
-    # /update и /report скрыты для Maksim — замеры подписчиков по личному
-    # TG-каналу пока не используем. Handler-функции сохранены, при нужде —
-    # раскомментировать. (20 мая 2026)
-    # app.add_handler(CommandHandler("update", update_command))
-    # app.add_handler(CommandHandler("report", report_command))
+    # /update + /report — замеры подписчиков (личный бренд). Регистрируются
+    # per-tenant: только если subscriber_stats не выключен явно (panferov — да,
+    # maksim — нет; transitional без конфига — да, прод цел). (Phase 3 Фаза 2)
+    if not _tenant.feature_blocked(_ACTIVE_TENANT, "subscriber_stats"):
+        app.add_handler(CommandHandler("update", update_command))
+        app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("calendar", calendar_command))
     # /pub removed 2026-04-21 — unused. Publication flags are set via the
     # card's «Опубликовано на» field in Notion directly, or via the crosspost
@@ -21770,14 +21785,17 @@ def main():
     app.add_handler(CommandHandler("ig_code", ig_code_command))
     app.add_handler(CommandHandler("yt_auth", yt_auth_command))
     app.add_handler(CommandHandler("vk_auth", vk_auth_command))
-    # /launches — дайджест AI-запусков. Инфра остаётся (cron Launch Monitor,
-    # источники), но команда скрыта: для Maksim будет переподключена под его
-    # ниши (трендомер) как вторая кнопка после Банка идей. (20 мая 2026)
-    # app.add_handler(CommandHandler("launches", launches_command))
+    # /launches — дайджест AI-запусков. Регистрируется per-tenant: только если
+    # launch_monitor не выключен (panferov — да, maksim — нет). Инфра (cron,
+    # источники) остаётся в коде. (Phase 3 Фаза 2)
+    if not _tenant.feature_blocked(_ACTIVE_TENANT, "launch_monitor"):
+        app.add_handler(CommandHandler("launches", launches_command))
     app.add_handler(CommandHandler("selfie", selfie_command))
-    # /brand — переключение брендов. У Maksim один бренд (DEFAULT_BRAND=maksim).
-    # При возврате multi-brand UI — раскомментировать. (20 мая 2026)
-    # app.add_handler(CommandHandler("brand", brand_command))
+    # /brand — переключение брендов. Регистрируется только если у тенанта >1
+    # бренда (panferov: default+shoes; maksim: один → команда не нужна;
+    # transitional без конфига — да, прод цел). (Phase 3 Фаза 2)
+    if _tenant.brand_switch_available(_ACTIVE_TENANT):
+        app.add_handler(CommandHandler("brand", brand_command))
     # /image and /video are added by register_fal_handlers(app, ...) below
 
     # TG-post generator (/tgpost + callback pattern ^tgpost:)

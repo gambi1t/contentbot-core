@@ -12,7 +12,8 @@
     "image_gen": true,
     "video_gen": true,
     "instagram_dm": true,
-    "billing": true
+    "billing": true,
+    "subscriber_stats": true
   },
   "_brand_overrides_comment": "У Артёма два бренда (личный default + обувной shoes). Override накладывается поверх соответствующего бренда из BRANDS-dict. env:KEY → из .env. Пустой/нет записи → берётся из кода (текущее поведение panferov-legacy не меняется).",
   "brand_overrides": {

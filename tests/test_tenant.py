@@ -201,6 +201,25 @@ def test_example_configs_distinct():
     _assert(mk.get("features") != pf.get("features"), "наборы фич различны (не копипаст)")
 
 
+# ── Phase 3 Фаза 2: per-tenant регистрация команд ───────────────────────────
+
+def test_brand_switch_available():
+    print("\n-- brand_switch_available: /brand только при >1 бренде --")
+    _assert(tenant.brand_switch_available({}) is True, "нет конфига → True (transitional, прод цел)")
+    _assert(tenant.brand_switch_available({"brands": {"allowed": ["maksim"]}}) is False,
+            "1 бренд (maksim) → False (нет смысла переключать)")
+    _assert(tenant.brand_switch_available({"brands": {"allowed": ["default", "shoes"]}}) is True,
+            "2 бренда (panferov) → True")
+
+
+def test_subscriber_stats_known_feature():
+    print("\n-- subscriber_stats — известный фичефлаг (для /update /report) --")
+    _assert("subscriber_stats" in tenant._KNOWN_FEATURES, "subscriber_stats в _KNOWN_FEATURES")
+    # config_doctor не ругается на него
+    probs = tenant.config_doctor({"tenant_id": "panferov", "features": {"subscriber_stats": True}})
+    _assert(probs == [], "subscriber_stats:true валиден (config_doctor чисто)")
+
+
 # ── Phase 2c-1: strict-режим + config_doctor глубже ─────────────────────────
 
 def test_load_strict_no_file_raises():

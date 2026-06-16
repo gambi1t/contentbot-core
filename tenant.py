@@ -66,6 +66,7 @@ _KNOWN_FEATURES = frozenset({
     "video_gen",        # /video (Kling)
     "instagram_dm",     # comment-to-DM воронка
     "billing",          # биллинг-гейт + баланс
+    "subscriber_stats", # /update + /report — замеры подписчиков (личный бренд)
 })
 
 
@@ -167,6 +168,14 @@ def brand_allowed(tenant: dict, name: str) -> bool:
     прод без конфига не меняется)."""
     allowed = allowed_brands(tenant)
     return True if allowed is None else name in allowed
+
+
+def brand_switch_available(tenant: dict) -> bool:
+    """Есть ли смысл в команде /brand (переключение бренда). True если у тенанта
+    >1 разрешённого бренда. Нет ограничений (None) → True (transitional, прод
+    цел). 1 бренд (напр. maksim) → False — команду не регистрируем."""
+    allowed = allowed_brands(tenant)
+    return True if allowed is None else len(allowed) > 1
 
 
 def config_doctor(
