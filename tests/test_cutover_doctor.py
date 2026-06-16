@@ -137,6 +137,44 @@ def test_files_all_ok():
     _assert(cd.check_files_present(states) == [], "все ok → пусто")
 
 
+# ── 6. check_token_status (readiness C3 / G1 — IG не истёк?) ─────────────────
+NOW = 1_000_000  # фикс. «сейчас» для детерминизма
+
+
+def test_token_refreshable_not_blocker():
+    print("\n-- token: есть refresh_token → refreshable (бот обновит, не блокер) --")
+    # YouTube/VK: даже истёкший access обновится через refresh_token
+    td = {"access_token": "x", "refresh_token": "r", "obtained_at": 1, "expires_in": 3600}
+    v = cd.check_token_status(td, now=NOW)
+    _assert(v["status"] == "refreshable", f"refresh_token есть → refreshable (got {v})")
+    _assert(v["level"] == "ok", "refreshable → не блокер")
+
+
+def test_token_expired_no_refresh_is_blocker():
+    print("\n-- token: истёк + нет refresh → manual reauth (blocker) --")
+    # Instagram long-lived без refresh: obtained_at+expires_in в прошлом
+    td = {"access_token": "x", "obtained_at": NOW - 5000, "expires_in": 3600}
+    v = cd.check_token_status(td, now=NOW)
+    _assert(v["status"] == "expired", f"истёк без refresh → expired (got {v})")
+    _assert(v["level"] == "blocker", "истёкший без refresh → blocker (ручная reauth)")
+
+
+def test_token_valid_no_refresh():
+    print("\n-- token: не истёк, без refresh → valid --")
+    td = {"access_token": "x", "obtained_at": NOW - 100, "expires_in": 3600}
+    v = cd.check_token_status(td, now=NOW)
+    _assert(v["status"] == "valid", f"не истёк → valid (got {v})")
+    _assert(v["level"] == "ok", "valid → ok")
+
+
+def test_token_unknown_no_fields():
+    print("\n-- token: нет refresh и нет expiry-полей → unknown (warn) --")
+    td = {"access_token": "x"}
+    v = cd.check_token_status(td, now=NOW)
+    _assert(v["status"] == "unknown", f"нет полей → unknown (got {v})")
+    _assert(v["level"] == "warn", "unknown → warn (ручная проверка)")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} cutover_doctor tests\n{'='*60}")

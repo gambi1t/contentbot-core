@@ -101,6 +101,28 @@ def check_files_present(states: dict) -> list[str]:
     return [f"{path}: {st}" for path, st in states.items() if st != "ok"]
 
 
+def check_token_status(token_data: dict, now: float) -> dict:
+    """Readiness OAuth-токена (C3/G1) — БЕЗ публикации, только статус.
+    Логика истечения консистентна с ботом (crosspost: obtained_at+expires_in-300).
+
+    - refresh_token есть → 'refreshable' (бот сам обновит после cutover) → ok.
+    - нет refresh, истёк (obtained_at+expires_in < now) → 'expired' → blocker
+      (нужна ручная переавторизация — постинг отвалится; напр. IG long-lived).
+    - нет refresh, не истёк → 'valid' → ok.
+    - нет refresh и нет expiry-полей → 'unknown' → warn (проверить вручную)."""
+    if not isinstance(token_data, dict):
+        return {"status": "unknown", "level": "warn", "msg": "не dict"}
+    if token_data.get("refresh_token"):
+        return {"status": "refreshable", "level": "ok", "msg": "есть refresh_token (бот обновит)"}
+    obtained = token_data.get("obtained_at")
+    expires_in = token_data.get("expires_in")
+    if obtained is None or expires_in is None:
+        return {"status": "unknown", "level": "warn", "msg": "нет refresh и нет obtained_at/expires_in — проверить вручную"}
+    if now > obtained + expires_in - 300:
+        return {"status": "expired", "level": "blocker", "msg": "истёк без refresh_token — нужна ручная переавторизация"}
+    return {"status": "valid", "level": "ok", "msg": f"валиден ещё ~{int((obtained + expires_in - now) / 3600)}ч"}
+
+
 # ── I/O-слой (сбор фактов на сервере; НЕ под TDD — проверяется запуском) ──────
 
 def _cli() -> int:
@@ -194,6 +216,21 @@ def _cli() -> int:
         blockers.append(f"[files] {pr}")
     if states and not probs:
         print(f"[files] токены/сессии целостны: {sorted(states)}")
+
+    # 5b) readiness OAuth-токенов (C3/G1 — не истёк ли, без публикации)
+    import time
+    now = time.time()
+    for tok in root.glob("*token*.json"):
+        try:
+            td = json.loads(tok.read_text(encoding="utf-8"))
+        except Exception:
+            continue  # битый — уже учтён в files-секции выше
+        v = check_token_status(td, now)
+        print(f"[token] {tok.name}: {v['status']} — {v['msg']}")
+        if v["level"] == "blocker":
+            blockers.append(f"[token] {tok.name}: {v['msg']}")
+        elif v["level"] == "warn":
+            warns.append(f"[token] {tok.name}: {v['msg']}")
 
     # 6) tenant config_doctor (переиспользуем готовое)
     if args.config and Path(args.config).is_file():
