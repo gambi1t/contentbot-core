@@ -38,7 +38,7 @@ from .draft import (
     save_draft, load_draft, new_draft_id, cleanup_expired,
 )
 from .materialize import materialize_items, validate_upload_media
-from .source_menu import source_menu_keyboard
+from .source_menu import source_menu_keyboard, hf_fallback_action
 from bot_state import pending as _bot_pending, save_pending as _bot_save_pending
 
 logger = logging.getLogger("broll.handlers")
@@ -51,7 +51,7 @@ DRAFTS_DIR = Path(__file__).resolve().parent.parent / "broll_drafts"
 # MANUAL (Вручную из библиотеки), HF_ONLY (только графика). AUTO_HF (микс) —
 # Фаза 3.
 _ENABLED_MODES = (SourceMode.AUTO, SourceMode.UPLOAD, SourceMode.MANUAL,
-                  SourceMode.HF_ONLY)
+                  SourceMode.HF_ONLY, SourceMode.AUTO_HF)
 
 # State (в общем pending) для приёма загрузок / ручного выбора Pipeline 2.
 _UPLOAD_STATE = "broll2_uploading"
@@ -100,6 +100,19 @@ def _build_preview(script: str, clip_paths: list[str]) -> str:
         f"видеоряд и наложит субтитры (~1-3 мин). <b>«Другой сценарий»</b> — "
         f"переписать заново."
     )
+
+
+def _interleave(primary: list, secondary: list) -> list:
+    """Чередует два списка [p0,s0,p1,s1,…]; более длинный хвост идёт в конец.
+    Фаза 3 (Авто+графика): графика + живое видео по очереди. Монтаж берёт
+    сбалансированный префикс под длину озвучки (assemble_broll_montage idx%len)."""
+    out = []
+    for i in range(max(len(primary), len(secondary))):
+        if i < len(primary):
+            out.append(primary[i])
+        if i < len(secondary):
+            out.append(secondary[i])
+    return out
 
 
 def _broll_card_data(theme: str) -> dict:
@@ -317,104 +330,60 @@ async def handle_broll_source(
         return
 
     if mode == SourceMode.HF_ONLY:
-        # Фаза 2: видеоряд целиком из HyperFrames. Отличие от AUTO ровно одно —
-        # вместо select_clips зовём generate_hyperframes_broll; downstream
-        # (items → materialize → превью → сборка) тот же.
-        from hyperframes_broll import (
-            generate_hyperframes_broll, HyperFramesInterrupted, HyperFramesTimeout,
-        )
+        # Фаза 2: видеоряд целиком из HyperFrames.
         from .draft import hf_items_from_clips
-
-        work = DRAFTS_DIR.parent / "broll_runs" / draft_id
-        work.mkdir(parents=True, exist_ok=True)
-        draft.source_mode = SourceMode.HF_ONLY
-        draft.status = Status.HF_RUNNING
-        draft.work_dir = str(work)
-        draft.touch(time.time())
-        save_draft(draft, DRAFTS_DIR)
-
-        header = "🎨 Графика (HyperFrames)"
-        status = await context.bot.send_message(
-            chat_id,
-            f"{header}\n\nClaude пишет 6 сцен и рендерит их. Обычно 10-15 мин, "
-            f"с доводкой вёрстки — до ~25. Шлю прогресс по шагам.",
-        )
-        # Прогресс-мост thread→Telegram (паттерн bot.py card_hfbroll): generate
-        # крутится в to_thread, апдейты юзеру — через run_coroutine_threadsafe.
-        # Fire-and-forget: сбой эдита («not modified») не валит генерацию.
-        loop = asyncio.get_running_loop()
-        _msg_id = status.message_id
-
-        def _hf_progress(text: str) -> None:
-            fut = asyncio.run_coroutine_threadsafe(
-                context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=_msg_id,
-                    text=f"{header}\n\n{text}"),
-                loop,
-            )
-            fut.add_done_callback(lambda f: f.exception())
-
-        def _hf_retry_kb() -> InlineKeyboardMarkup:
-            return InlineKeyboardMarkup([
-                [InlineKeyboardButton(
-                    "🔄 Повторить графику",
-                    callback_data=f"b2src:{SourceMode.HF_ONLY}:{draft_id}")],
-                [InlineKeyboardButton(
-                    "❌ Отмена", callback_data=f"b2src:cancel:{draft_id}")],
-            ])
-
-        # Чистим только старые hf_*.mp4 (namespace отдельный от autobroll/uploads).
-        hf_dir = work / "hyperframes"
-        if hf_dir.exists():
-            for old in hf_dir.glob("hf_*.mp4"):
-                try:
-                    old.unlink()
-                except OSError:
-                    pass
-
-        try:
-            clips, _cost = await asyncio.to_thread(
-                generate_hyperframes_broll, draft.script_text, work, _hf_progress)
-        except HyperFramesInterrupted:
-            await status.edit_text(
-                "🔁 Графика не успела собраться — сервис перезапускался во время "
-                "рендера. Сценарий на месте, жми «Повторить».",
-                reply_markup=_hf_retry_kb())
+        clips = await _generate_hf_clips(context, chat_id, draft, draft_id,
+                                         SourceMode.HF_ONLY)
+        if clips is None:
             return
-        except HyperFramesTimeout as e:
-            await status.edit_text(
-                f"⏱ {str(e)[:200]}\n\nГрафика не уложилась в лимит. Можно "
-                f"повторить или сократить сценарий.",
-                reply_markup=_hf_retry_kb())
-            return
-        except Exception as e:
-            logger.error(f"[broll] HF-only generation failed: {e}", exc_info=True)
-            await status.edit_text(
-                f"⚠️ Не удалось сгенерировать графику: {str(e)[:200]}",
-                reply_markup=_hf_retry_kb())
-            return
-
         items = hf_items_from_clips(clips)
         if not items:
-            await status.edit_text(
-                "⚠️ Графика не сгенерировалась (0 сцен). Попробуй повторить.",
-                reply_markup=_hf_retry_kb())
+            await context.bot.send_message(
+                chat_id, "⚠️ Графика не сгенерировалась. Попробуй повторить.")
             return
-
         draft.source_items = items
         draft.status = Status.PREVIEW_READY
         draft.touch(time.time())
         save_draft(draft, DRAFTS_DIR)
-        # hf_scene = passthrough mp4 (materialize не перекодирует) — единообразно
-        # с другими источниками.
         await asyncio.to_thread(materialize_items, items, draft.work_dir)
-        try:
-            await status.delete()
-        except Exception:
-            pass
-        # Превью: 6 нумерованных клипов сцен + короткий текст (без повтора
-        # сценария — он уже на шаге источника) + кнопки.
         await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True)
+        return
+
+    if mode == SourceMode.AUTO_HF:
+        # Фаза 3: МИКС — графика HyperFrames + живые клипы библиотеки, чередуются.
+        # Монтаж берёт сбалансированный префикс под длину озвучки. Графика тут
+        # ОПЦИОНАЛЬНА: если она сорвалась, а библиотека есть → собираем live_only.
+        from .draft import hf_items_from_clips
+        clips = await _generate_hf_clips(context, chat_id, draft, draft_id,
+                                         SourceMode.AUTO_HF, allow_live_fallback=True)
+        hf_items = hf_items_from_clips(clips) if clips else []
+        # Библиотечные клипы (реюз AUTO).
+        try:
+            lib_paths = await asyncio.to_thread(select_clips, draft.script_text, claude)
+        except Exception as e:
+            logger.warning(f"[broll] AUTO_HF select_clips: {e}")
+            lib_paths = []
+        lib_items = [BrollItem(kind="video", origin="auto", path=str(p),
+                               label=f"auto/{Path(p).name}") for p in lib_paths]
+        # Политика на провал графики (CTO-ревью Q7, hf_fallback_action).
+        action = hf_fallback_action(SourceMode.AUTO_HF, hf_ok_count=len(hf_items),
+                                    live_available=bool(lib_items))
+        if action == "fail":
+            await context.bot.send_message(
+                chat_id, "⚠️ Не из чего собрать — ни графики, ни клипов в библиотеке.")
+            return
+        if action == "live_only":
+            await context.bot.send_message(
+                chat_id, "⚠️ Графика не собралась — делаю ролик из живых клипов.")
+        items = _interleave(hf_items, lib_items)
+        draft.source_items = items
+        draft.status = Status.PREVIEW_READY
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        await asyncio.to_thread(materialize_items, items, draft.work_dir)
+        # Микс: пер-сценная пересборка не применима (позиции ≠ scene_NN) → regen=False.
+        await _send_hf_preview(context, chat_id, draft, draft_id,
+                               with_clips=True, regen=False)
         return
 
     # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.
@@ -478,18 +447,23 @@ async def _send_scene_clips(context, chat_id, source_items) -> None:
             await context.bot.send_message(chat_id, f"Сцена {i}: превью не отправилось")
 
 
-def _hf_preview_text(n_scenes: int) -> str:
-    """Короткое HF-превью БЕЗ повтора сценария (он уже показан на шаге источника)."""
-    return (
-        f"🎨 <b>Графика готова: {n_scenes} сцен(ы)</b> — клипы выше.\n\n"
-        f"Кривая сцена → <b>«🔁 Перегенерировать сцену»</b> (выбери номер).\n"
-        f"Всё ок → <b>«✅ Собрать ролик»</b>: озвучка + монтаж + субтитры."
-    )
+def _hf_preview_text(n_scenes: int, regen: bool = True) -> str:
+    """Короткое превью БЕЗ повтора сценария. regen=True (чистая графика) — подсказка
+    про пересборку сцены; False (микс Авто+графика) — просто собрать."""
+    head = (f"🎨 <b>Графика готова: {n_scenes} сцен(ы)</b> — клипы выше.\n\n"
+            if regen else
+            f"🎬 <b>Видеоряд готов: {n_scenes} клип(ов)</b> "
+            f"(графика + живое видео) — выше.\n\n")
+    regen_line = ("Кривая сцена → <b>«🔁 Перегенерировать сцену»</b> (выбери номер).\n"
+                  if regen else "")
+    return head + regen_line + (
+        "Всё ок → <b>«✅ Собрать ролик»</b>: озвучка + монтаж + субтитры.")
 
 
 async def _send_hf_preview(context, chat_id, draft, draft_id: str,
-                           with_clips: bool = False) -> None:
-    """Превью HF-ролика. with_clips=True → сперва шлёт нумерованные клипы сцен."""
+                           with_clips: bool = False, regen: bool = True) -> None:
+    """Превью HF-ролика. with_clips → нумерованные клипы. regen=False (микс) —
+    без кнопки пер-сценной пересборки (позиции в миксе ≠ scene_NN)."""
     clips = [str(it.path) for it in draft.source_items]
     context.user_data["broll_draft"] = {
         "script": draft.script_text, "clips": clips, "theme": draft.theme,
@@ -499,9 +473,96 @@ async def _send_hf_preview(context, chat_id, draft, draft_id: str,
     if with_clips:
         await _send_scene_clips(context, chat_id, draft.source_items)
     await context.bot.send_message(
-        chat_id, _hf_preview_text(len(clips)), parse_mode="HTML",
-        reply_markup=_approval_keyboard(draft.notion_url, hf_draft_id=draft_id),
+        chat_id, _hf_preview_text(len(clips), regen=regen), parse_mode="HTML",
+        reply_markup=_approval_keyboard(
+            draft.notion_url, hf_draft_id=draft_id if regen else None),
         disable_web_page_preview=True)
+
+
+async def _generate_hf_clips(context, chat_id, draft, draft_id: str, source_mode: str,
+                             allow_live_fallback: bool = False):
+    """Генерация HF-графики — ОБЩАЯ для HF_ONLY и AUTO_HF: work_dir + прогресс-мост
+    thread→Telegram + обработка Interrupted/Timeout/Exception. Возвращает list[Path]
+    клипов или None при сбое.
+
+    allow_live_fallback=False (HF_ONLY): при сбое показывает retry-UI (юзер выбрал
+    именно графику — не подменять молча). True (AUTO_HF): графика опциональна —
+    при сбое тихо убирает статус и возвращает None, решение отдаёт caller'у."""
+    from hyperframes_broll import (
+        generate_hyperframes_broll, HyperFramesInterrupted, HyperFramesTimeout,
+    )
+    work = DRAFTS_DIR.parent / "broll_runs" / draft_id
+    work.mkdir(parents=True, exist_ok=True)
+    draft.source_mode = source_mode
+    draft.status = Status.HF_RUNNING
+    draft.work_dir = str(work)
+    draft.touch(time.time())
+    save_draft(draft, DRAFTS_DIR)
+
+    header = "🎨 Графика (HyperFrames)"
+    status = await context.bot.send_message(
+        chat_id,
+        f"{header}\n\nClaude пишет 6 сцен и рендерит их. Обычно 10-15 мин, "
+        f"с доводкой вёрстки — до ~25. Шлю прогресс по шагам.",
+    )
+    loop = asyncio.get_running_loop()
+    _msg_id = status.message_id
+
+    def _hf_progress(text: str) -> None:
+        fut = asyncio.run_coroutine_threadsafe(
+            context.bot.edit_message_text(
+                chat_id=chat_id, message_id=_msg_id, text=f"{header}\n\n{text}"),
+            loop)
+        fut.add_done_callback(lambda f: f.exception())
+
+    def _retry_kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Повторить графику",
+                                  callback_data=f"b2src:{source_mode}:{draft_id}")],
+            [InlineKeyboardButton("❌ Отмена", callback_data=f"b2src:cancel:{draft_id}")],
+        ])
+
+    async def _fail(msg: str):
+        # AUTO_HF: графика опциональна → тихо снимаем статус, caller решит (live_only).
+        # HF_ONLY: юзер выбрал графику → retry-UI, не подменяем молча.
+        if allow_live_fallback:
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        else:
+            await status.edit_text(msg, reply_markup=_retry_kb())
+        return None
+
+    hf_dir = work / "hyperframes"
+    if hf_dir.exists():
+        for old in hf_dir.glob("hf_*.mp4"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    try:
+        clips, _cost = await asyncio.to_thread(
+            generate_hyperframes_broll, draft.script_text, work, _hf_progress)
+    except HyperFramesInterrupted:
+        return await _fail(
+            "🔁 Графика не успела собраться — сервис перезапускался во время "
+            "рендера. Сценарий на месте, жми «Повторить».")
+    except HyperFramesTimeout as e:
+        return await _fail(
+            f"⏱ {str(e)[:200]}\n\nГрафика не уложилась в лимит. Можно повторить "
+            f"или сократить сценарий.")
+    except Exception as e:
+        logger.error(f"[broll] HF generation failed: {e}", exc_info=True)
+        return await _fail(f"⚠️ Не удалось сгенерировать графику: {str(e)[:200]}")
+    if not clips:
+        return await _fail("⚠️ Графика не сгенерировалась (0 сцен). Попробуй повторить.")
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    return clips
 
 
 async def handle_hf_regen_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
