@@ -80,3 +80,27 @@
 **Фаза 6 — боевой свитч:** по DEPLOY_RUNBOOK Phase 3 (unit-level stop old → start new boevой токен → smoke /start+callback+stateful → поэтапный disable старого).
 
 HF-графика (hyperframes=true + резолв style_contract.panferov.json) — ПОСЛЕ успешного cutover, отдельным шагом.
+
+---
+
+## 🛡️ Защитный слой — принято из ChatGPT-ревью (16 июня, CONDITIONAL GO)
+
+Внешнее ревью (`chatgpt_review_phase3_cutover_2026-06-16.md` в docs) сместило фокус с «unit переключился = ок» на **stateful rollback + живые данные** — главный риск разового cutover. Это ~0.5-1 сессия защитных работ ПЕРЕД боевым свитчем. Отфильтровано под масштаб (1 бот/1 сервер), все принятые пункты — реальная защита, не overkill.
+
+**Принято (добавить в cutover до боевого свитча):**
+- **C1 🔴 — snapshot state + restore-режим rollback.** Текущий `rollback_panferov.sh` откатывает только unit. Нужно: перед cutover — полный snapshot (`pending/billing.db/projects/assets/voices/OAuth-токены/Telethon .session/stats/calendar`) + `MANIFEST.sha256` + **репетиция restore на копии**. Rollback расширить: stop new → restore snapshot mutable-файлов → start old → verify. Иначе откат после частичного запуска нового = legacy-код на изменённом state.
+- **C2 — drain перед stop**: нет активной генерации/ffmpeg/claude/node/puppeteer/upload/telethon + `lsof` на billing.db/pending.json + `PRAGMA integrity_check` sqlite. Не hard-cutover при активном job.
+- **C4 — cutover-doctor**: расширить существующий `python -m tenant doctor` проверками: billing rows = Артём (не maksim), OAuth/Telethon файлы есть+парсятся, deps-версии (ffmpeg/node/npm/chrome/claude), команды /launches/update/report/brand зарегистрированы, prompt sha256, нет maksim/lifedrive маркеров в боевом env/tenant. Non-zero при любом blocker.
+- **C5 — copy-on-cutover модель** (явно): old работает со своим state; new dry-run на КОПИИ; в freeze — stop old → финальный rsync → start new. НИКАКИХ symlink на pending/billing/projects между old/new.
+- **I1** systemd обоих unit: `KillMode=control-group` + `TimeoutStopSec=30` + проверка `pgrep -af "/root/content-bot-2|/root/contentbot-core"` (по working dir, не bot.py).
+- **I3** pending-мигратор по ALLOWLIST (не blacklist): перенести только `notion_page_id/card_data/script/card_brand/selected_brand`. Сохранить `pending.raw.json` + `pending.migrated.json` + diff.
+- **I4** billing semantic check (не только SELECT clients): `PRAGMA integrity_check` + `.schema` + COUNT clients/operations + SUM + app-level `/balance` на копии + idempotency списания на копии.
+- **I5** commands registration в doctor (автотест `expected_commands <= registered`), не ручной grep.
+- **I6** media public URL check (`curl -I` боевого медиа-домена + nginx root).
+- **Post-start watch 15 мин** (не только /start): T+1 логи чистые, T+3 /start+/brand+/cards+/balance, T+5 реальная карточка + безопасный preview (без paid/publish), T+10 OAuth readiness, T+15 нет traceback/polling-conflict/tenant-fallback.
+- **N1-N3** (дёшево): `cutover_status.sh` (active unit/tenant/commit/strict/paths/last errors), `DEPLOYED_COMMIT` файл, `grep -RInE "maksim|livedrive|yumsunov|life drive"` боевого env/tenant/prompts.
+
+**ОТФИЛЬТРОВАНО (оспорено, НЕ берём как предложено):**
+- **C3 `DRY_RUN_EXTERNALS=1` как флаг в коде** — нет. Писать в бот режим отключения Notion-write/crosspost/paid — разработка кода ради разового cutover (против минимализма). Замена: смок на тест-токене с **тест-конфигом без боевых OAuth-кредов** (соцсети не подключены) + **readiness-check токенов отдельным скриптом** (валиден ли YouTube/IG/VK/Telethon, без публикации). Тот же эффект, без нового кода в боте.
+
+**Обновлённый порядок Phase 3:** Фаза 0 (доразведка) → **защитные работы (snapshot+restore-репетиция, drain-чек, cutover-doctor, pending-мигратор, systemd KillMode, readiness-check)** → Фаза 1-3 (инфра/код/конфиг) → смок тест-токен → Фаза 6 (боевой свитч + post-start watch). Финальный GO-чеклист — раздел 5 ревью-файла.
