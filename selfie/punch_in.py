@@ -274,7 +274,7 @@ def render_punch_in(source: Path, segments: list[dict], output: Path) -> Path:
         "ffmpeg", "-y", "-i", str(source),
         "-filter_complex", filter_complex,
         "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
         str(output),
     ]

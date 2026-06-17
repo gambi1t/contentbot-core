@@ -14179,21 +14179,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as _ce:
                     logger.warning(f"[montage] компрессия не удалась: {_ce}")
 
-            _send_mb = send_file.stat().st_size / 1024 / 1024
+            # Отдаём ДОКУМЕНТОМ: Telegram не пережимает документы (send_video
+            # пережимал на отдаче) + лимит 2 ГБ вместо 48 МБ. mp4-документ
+            # играется в чате и с превью. Максимальное качество до зрителя
+            # (Артём 17 июня). Шлём ОРИГИНАЛ final_path (без 413-сжатия).
             sent_ok = False
-            if _send_mb <= 48:
-                try:
-                    with open(send_file, "rb") as f:
-                        await context.bot.send_video(
-                            chat_id=query.message.chat_id,
-                            video=f,
-                            caption=caption_text,
-                            supports_streaming=True,
-                            reply_markup=InlineKeyboardMarkup(buttons),
-                        )
-                    sent_ok = True
-                except Exception as _se:
-                    logger.warning(f"[montage] send_video не прошёл: {_se}")
+            try:
+                with open(final_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=query.message.chat_id,
+                        document=f,
+                        caption=caption_text,
+                        reply_markup=InlineKeyboardMarkup(buttons),
+                    )
+                sent_ok = True
+            except Exception as _se:
+                logger.warning(f"[montage] send_document не прошёл: {_se}")
 
             if not sent_ok:
                 # Tier 2 — публичная ссылка на nginx-media.
