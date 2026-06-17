@@ -5358,8 +5358,6 @@ def download_and_cut_youtube(url: str, clip_duration: int = 5, max_clips: int = 
     """Download a video from any URL (YouTube, Vimeo, generic <video> pages, etc.)
     via yt-dlp and cut into clips.  Returns list of clip dicts."""
     import sys
-    import shutil as _shutil
-    import tempfile
 
     yt_dir = ASSETS_DIR / "youtube_clips"
     yt_dir.mkdir(parents=True, exist_ok=True)
@@ -5401,8 +5399,10 @@ def download_and_cut_youtube(url: str, clip_duration: int = 5, max_clips: int = 
     yt_dlp_bin = str(venv_bin) if venv_bin.exists() else "yt-dlp"
 
     cmd = [yt_dlp_bin,
-           "-f", "best[height<=720][ext=mp4]/best[height<=720]/best",
-           "--max-filesize", "100M",
+           # DASH-merge: прогрессив mp4 у YouTube max 360p, HD = bestvideo+bestaudio.
+           "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+           "--merge-output-format", "mp4",
+           "--max-filesize", "300M",
            "-o", video_path,
            "--no-playlist",
            ]
@@ -5423,30 +5423,16 @@ def download_and_cut_youtube(url: str, clip_duration: int = 5, max_clips: int = 
         except Exception as e:
             logger.warning(f"[yt-dlp] webshare proxy unavailable: {e}")
 
-    # YouTube-specific: cookies (temp-copy to protect master) + EJS solver
-    cookies_tmp: Path | None = None
+    # Анонимно (БЕЗ куки): куки аккаунта через резидентный прокси YouTube
+    # флагует (only-images) + риск флага Google-аккаунта; публичный B-roll
+    # куки не требует. EJS-солвер (нужен Deno на сервере) расшифровывает
+    # HD nsig-подписи DASH-форматов.
     if is_youtube:
-        cookies_master = Path(__file__).parent / "assets" / "youtube_cookies.txt"
-        if not cookies_master.exists():
-            cookies_master = Path(__file__).parent / "cookies.txt"
-        if cookies_master.exists() and cookies_master.stat().st_size > 500:
-            fd, tmp_path = tempfile.mkstemp(suffix=".txt", prefix="yt_cookies_")
-            os.close(fd)
-            cookies_tmp = Path(tmp_path)
-            _shutil.copyfile(cookies_master, cookies_tmp)
-            cmd += ["--cookies", str(cookies_tmp)]
         cmd += ["--remote-components", "ejs:github"]
 
     cmd.append(url)
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    finally:
-        if cookies_tmp and cookies_tmp.exists():
-            try:
-                cookies_tmp.unlink()
-            except OSError:
-                pass
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     logger.info(f"yt-dlp exit={result.returncode}, stderr={result.stderr[:200] if result.stderr else 'none'}")
 
     if not Path(video_path).exists():
