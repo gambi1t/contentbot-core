@@ -7409,6 +7409,23 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
             except Exception as e:
                 logger.warning(f"[selfie] Failed to send preview: {e}")
 
+            # HD-версия документом: send_video Telegram пережимает на отдаче,
+            # документ отдаёт байт-в-байт (mp4-документ всё равно играется +
+            # с превью). Для скачивания и публикации без потери качества
+            # (Артём 17 июня). Превью выше — для быстрого просмотра в чате.
+            try:
+                _fname = ("".join(c for c in (title or "video")
+                                  if c.isalnum() or c in " -_()").strip()[:40] or "video") + ".mp4"
+                with open(subtitled_path, "rb") as df:
+                    await context.bot.send_document(
+                        chat_id=chat_id,
+                        document=df,
+                        filename=_fname,
+                        caption="📄 HD-версия (без сжатия Telegram) — скачай отсюда для публикации.",
+                    )
+            except Exception as e:
+                logger.warning(f"[selfie] Failed to send HD document: {e}")
+
         card_prefix = notion_page_id[:8] if notion_page_id else ""
 
         # Финальный экран: описание для публикации + TG-пост (оба ОПЦИОНАЛЬНЫ,
