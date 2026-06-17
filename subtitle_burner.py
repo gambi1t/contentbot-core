@@ -478,7 +478,7 @@ def burn_subtitles(
         "ffmpeg", "-y",
         "-i", str(video_path),
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
         "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-movflags", "+faststart",
