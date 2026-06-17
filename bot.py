@@ -16699,6 +16699,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Pass attached TG-post photos (Maksim brand). Empty list
                     # → телеграм-пост уходит без фото (legacy-совместимо).
                     tg_photos_attach = data.get("selfie_tg_photos") or None
+                    # telegram_post_to_channel шадовится локальными импортами
+                    # ниже в этой же handle_callback → тут было UnboundLocalError.
+                    # Локальный импорт по образцу тех веток (Артём 17 июня).
+                    from crosspost import telegram_post_to_channel
                     result = await telegram_post_to_channel(
                         context.bot, post_text,
                         photos=tg_photos_attach,
@@ -19296,9 +19300,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import music_mixer
         card_prefix = query.data.split(":", 1)[1]
         cats = music_mixer.list_categories()
+        # Кнопка music_pick висит на ВИДЕО-сообщении (send_video) — у него нет
+        # текста, edit_message_text падает. Шлём НОВОЕ сообщение (Артём 17 июня).
         if not cats:
-            await query.edit_message_text(
-                "❌ Музыкальная библиотека пуста. Проверь "
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="❌ Музыкальная библиотека пуста. Проверь "
                 f"{os.getenv('MAKSIM_MUSIC_DIR', '/srv/bot-music-maksim')}/",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")
@@ -19310,8 +19317,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             label = f"{meta.get('emoji', '🎵')} {meta.get('label', cat)}"
             buttons.append([InlineKeyboardButton(label, callback_data=f"music_cat:{cat}:{card_prefix}")])
         buttons.append([InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")])
-        await query.edit_message_text(
-            "🎵 <b>Выбери категорию музыки</b>\n\n"
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="🎵 <b>Выбери категорию музыки</b>\n\n"
             "Музыка будет наложена на финальный ролик с автоматическим приглушением под голосом.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
