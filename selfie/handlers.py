@@ -1079,16 +1079,19 @@ def _drop_gen_dir(data: dict, gen_dir) -> None:
         pass
 
 
-AIVID_STALE_SEC = 900   # a live AI-video gen can't run longer than this; older key = stale
+AIVID_STALE_SEC = 900    # a live AI-video (Seedance) gen can't run longer than this
+HF_STALE_SEC = 1800      # HyperFrames runs 10-25 min → bigger window before a key is stale
 
 
-def _aivid_inflight(data: dict, now: float, stale_sec: float = AIVID_STALE_SEC) -> bool:
-    """Is a paid AI-video generation currently in flight for this user?
+def _aivid_inflight(data: dict, now: float, stale_sec: float = AIVID_STALE_SEC,
+                    key: str = "selfie_aivid_job_id") -> bool:
+    """Is a heavy generation (`key`) currently in flight for this user?
 
-    Guards against a double-paid start. Time-based: a key persisted to disk and
-    orphaned by a bot restart goes stale instead of locking the user out forever.
+    Used by both Seedance (selfie_aivid_job_id) and HyperFrames (selfie_hf_job_id).
+    Guards against a double start. Time-based: a key persisted to disk and orphaned
+    by a bot restart goes stale instead of locking the user out forever.
     """
-    entry = data.get("selfie_aivid_job_id")
+    entry = data.get(key)
     if not isinstance(entry, dict):
         return False
     ts = entry.get("ts")
@@ -1097,13 +1100,13 @@ def _aivid_inflight(data: dict, now: float, stale_sec: float = AIVID_STALE_SEC) 
     return (now - ts) <= stale_sec
 
 
-def _aivid_job_matches(data: dict, job_id: str) -> bool:
-    """Does the in-pending AI-video job still belong to this generation?
+def _aivid_job_matches(data: dict, job_id: str, key: str = "selfie_aivid_job_id") -> bool:
+    """Does the in-pending job (`key`) still belong to this generation?
 
-    False if a newer aivid run replaced the key, or cancel/skip cleared it — in
-    both cases this run's (already-paid) clips must NOT be applied.
+    False if a newer run replaced the key, or cancel/skip cleared it — in both
+    cases this run's result must NOT be applied.
     """
-    entry = data.get("selfie_aivid_job_id")
+    entry = data.get(key)
     return isinstance(entry, dict) and entry.get("id") == job_id
 
 
@@ -1263,6 +1266,97 @@ async def handle_broll_callback(
                 f"🎨 Готово — добавил {added} AI-сцен{capped}.\n\n"
                 + selfie_broll.build_picker_message(items)
             ),
+            reply_markup=selfie_broll.build_picker_keyboard(items),
+        )
+        return True
+
+    # «🎞 Графика HyperFrames» → HyperFrames-движок графики ИЗ ТЕКСТА селфи
+    # (рядом с Remotion 'gen'). Тяжёлый (10-25 мин) → busy-guard как у aivid, но
+    # свой ключ selfie_hf_job_id и большой stale-window. Скелет скопирован с aivid.
+    if action == "hf":
+        import hyperframes_broll
+        import uuid
+        transcript = (data.get("selfie_edited") or data.get("selfie_transcript") or "").strip()
+        items = _items_from_pending(data)
+        free = selfie_broll.MAX_BROLL_ITEMS - len(items)
+        chat_id = query.message.chat_id
+        if not transcript:
+            await query.edit_message_text("⚠️ Нет текста для генерации графики.")
+            return True
+        if free <= 0:
+            await query.edit_message_text(
+                f"Достигнут лимит {selfie_broll.MAX_BROLL_ITEMS} вставок — убери что-то.",
+                reply_markup=selfie_broll.build_picker_keyboard(items),
+            )
+            return True
+        now = time.time()
+        if _aivid_inflight(data, now, stale_sec=HF_STALE_SEC, key="selfie_hf_job_id"):
+            await context.bot.send_message(chat_id=chat_id, text="⏳ Графика уже генерится — дождись результата.")
+            return True
+        job_id = uuid.uuid4().hex[:12]
+        data["selfie_hf_job_id"] = {"id": job_id, "ts": now}
+        await query.edit_message_text(
+            "🎞 Генерю графику из текста (HyperFrames)…\n"
+            "Это 10-25 минут — рендер на сервере. Дождись, пришлю результат."
+        )
+        clips: list = []
+        gen_err = ""
+        gen_dir = Path(tempfile.mkdtemp(prefix=f"selfie_hf_{user_id}_"))
+        data.setdefault("selfie_gen_dirs", []).append(str(gen_dir))
+        _SAVE_PENDING(_PENDING)
+        try:
+            clips, _cost = await asyncio.to_thread(
+                hyperframes_broll.generate_hyperframes_broll, transcript, gen_dir, None,
+            )
+        except Exception as e:
+            _LOGGER.error(f"[selfie/hf] hyperframes_broll failed: {e}", exc_info=True)
+            clips = []
+            gen_err = str(e)[:150]
+
+        cur = _PENDING.get(user_id) or {}
+        _PICK_STATES = (
+            "selfie_broll_offer", "selfie_broll_picking",
+            "selfie_broll_uploading_photo", "selfie_broll_uploading_video",
+        )
+        if not _aivid_job_matches(cur, job_id, key="selfie_hf_job_id") or cur.get("state") not in _PICK_STATES:
+            if _aivid_job_matches(cur, job_id, key="selfie_hf_job_id"):
+                cur.pop("selfie_hf_job_id", None)
+            _drop_gen_dir(cur, gen_dir)
+            _SAVE_PENDING(_PENDING)
+            await context.bot.send_message(
+                chat_id=chat_id, text="ℹ️ Сценарий изменился за время генерации — графику не применил.")
+            return True
+
+        if not clips:
+            cur.pop("selfie_hf_job_id", None)
+            _drop_gen_dir(cur, gen_dir)
+            _SAVE_PENDING(_PENDING)
+            items = _items_from_pending(cur)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "❌ Не удалось сгенерировать графику. "
+                    + (f"({gen_err}) " if gen_err else "")
+                    + "Попробуй ещё раз или выбери B-roll из библиотеки."
+                ),
+                reply_markup=selfie_broll.build_picker_keyboard(items),
+            )
+            return True
+
+        items = _items_from_pending(cur)
+        free_now = selfie_broll.MAX_BROLL_ITEMS - len(items)
+        added = 0
+        for clip in clips[:max(0, free_now)]:
+            _store_item(cur, selfie_broll.BrollItem(
+                kind="video", source=Path(clip), label=f"[HF] {Path(clip).stem}",
+            ))
+            added += 1
+        cur.pop("selfie_hf_job_id", None)
+        _SAVE_PENDING(_PENDING)
+        items = _items_from_pending(cur)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🎞 Готово — добавил {added} граф-сцен(ы). Добавь ещё B-roll или жми «Готово».",
             reply_markup=selfie_broll.build_picker_keyboard(items),
         )
         return True

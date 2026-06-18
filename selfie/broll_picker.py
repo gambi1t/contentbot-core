@@ -139,6 +139,7 @@ def build_picker_keyboard(items: list[BrollItem]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("📤 Загрузить своё видео", callback_data="selfie_broll:upload_video")])
         rows.append([InlineKeyboardButton("🎨 Сгенерировать графику (AI)", callback_data="selfie_broll:gen")])
         rows.append([InlineKeyboardButton("🎬 AI-видео по сценарию", callback_data="selfie_broll:aivideo")])
+        rows.append([InlineKeyboardButton("🎞 Графика HyperFrames", callback_data="selfie_broll:hf")])
 
     if items:
         rows.append([InlineKeyboardButton(
