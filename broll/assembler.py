@@ -45,6 +45,7 @@ FPS = 30
 # такие клипы обычно отсеивает selector.
 MAX_SEG_SEC = 5.0
 MIN_SEG_SEC = 1.0
+MAX_NARRATIVE_SEG_SEC = 15.0   # narrative (AI-видео): клип целиком, но safety-кап против runaway (Seedance max 12с)
 
 # Параллелизм нормализации. Сервер nox-maksim — 4 ядра.
 NORMALIZE_WORKERS = 4
@@ -128,11 +129,13 @@ def _normalize_clip(src: Path, seg_len: float, dst: Path) -> None:
 def _seg_len(clip_dur: float, narrative: bool = False) -> float:
     """Длина сегмента из натуральной длины клипа.
 
-    narrative=True (AI-видео фуллскрин) — БЕЗ 5с-капа: 10с-клип играет целиком,
-    мульти-шот не режется. По умолчанию — прижать к [MIN, MAX] (взаимозам. B-roll).
+    narrative=True (AI-видео фуллскрин) — без 5с-капа: 10с-клип играет целиком,
+    мульти-шот не режется; но safety-кап MAX_NARRATIVE_SEG_SEC от runaway
+    (битый/чужой длинный файл не превращаем в один гигантский сегмент).
+    По умолчанию — прижать к [MIN, MAX] (взаимозам. B-roll).
     """
     if narrative:
-        return max(MIN_SEG_SEC, clip_dur)
+        return max(MIN_SEG_SEC, min(clip_dur, MAX_NARRATIVE_SEG_SEC))
     return max(MIN_SEG_SEC, min(clip_dur, MAX_SEG_SEC))
 
 
@@ -142,7 +145,11 @@ def _build_sequence(segments: list[tuple[Path, float]], voiceover_dur: float,
 
     По умолчанию — по кругу (idx % len) до покрытия (взаимозаменяемый B-roll).
     narrative=True (AI-видео) — ОДИН проход по порядку без повторов: клипы =
-    сюжет, последний подрежется финальным -t. Без зацикливания.
+    сюжет, последний подрежется финальным -t. Без зацикливания. Если клипов
+    не хватило под озвучку (недобор: часть Seedance упала / голос длиннее оценки)
+    — НЕ отдаём короткий ряд (хвост = звук поверх замёрзшего/чёрного кадра),
+    а падаем явно: пусть вызывающий пересоберёт. Запас клипов (+1) обычно
+    покрывает; guard ловит редкий край.
     """
     sequence: list[Path] = []
     total = 0.0
@@ -151,8 +158,10 @@ def _build_sequence(segments: list[tuple[Path, float]], voiceover_dur: float,
             sequence.append(seg_path)
             total += seg_dur
             if total >= voiceover_dur:
-                break
-        return sequence
+                return sequence
+        raise MontageError(
+            f"AI-видео: клипов мало под озвучку "
+            f"(видео {total:.1f}с < озвучка {voiceover_dur:.1f}с) — пересоберите")
     idx = 0
     # +1 сегмент сверху как запас — финальный -t всё равно подрежет точно.
     while total < voiceover_dur + MAX_SEG_SEC:

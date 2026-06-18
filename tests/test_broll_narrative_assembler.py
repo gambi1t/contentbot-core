@@ -23,8 +23,14 @@ def test_seg_len_default_caps_at_max():
 
 
 def test_seg_len_narrative_keeps_full_length():
-    assert A._seg_len(10.0, narrative=True) == 10.0             # no cap — full multi-shot
+    assert A._seg_len(10.0, narrative=True) == 10.0             # 10s clip plays full (no 5s cap)
     assert A._seg_len(0.4, narrative=True) == A.MIN_SEG_SEC      # still floored
+
+
+def test_seg_len_narrative_caps_runaway():
+    # safety: a stray long file must not become one giant segment
+    assert A._seg_len(300.0, narrative=True) == A.MAX_NARRATIVE_SEG_SEC
+    assert A.MAX_NARRATIVE_SEG_SEC >= 12.0   # Seedance max clip is 12s
 
 
 # ── _build_sequence: cycle vs single ordered pass ───────────────────────────
@@ -42,10 +48,13 @@ def test_build_sequence_narrative_single_pass_in_order():
     assert [p.name for p in seq] == ["a.mp4", "b.mp4", "c.mp4"]   # 3×10=30, in order, no repeat
 
 
-def test_build_sequence_narrative_uses_all_when_short():
-    segs = [(Path("a.mp4"), 10.0), (Path("b.mp4"), 10.0)]   # 20s < 30s voiceover
-    seq = A._build_sequence(segs, voiceover_dur=30.0, narrative=True)
-    assert [p.name for p in seq] == ["a.mp4", "b.mp4"]      # all clips once, NO cycling
+def test_build_sequence_narrative_short_raises():
+    # clips total (20s) < voiceover (30s): no cycling, no frozen tail — fail loud
+    # (caller retries). 30s+ buffer normally prevents this; guard catches the rare case.
+    import pytest
+    segs = [(Path("a.mp4"), 10.0), (Path("b.mp4"), 10.0)]
+    with pytest.raises(A.MontageError):
+        A._build_sequence(segs, voiceover_dur=30.0, narrative=True)
 
 
 if __name__ == "__main__":

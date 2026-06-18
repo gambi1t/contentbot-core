@@ -1544,10 +1544,14 @@ async def assemble_broll_from_draft(
         except Exception:
             pass
         montage_path = work_dir / "montage.mp4"
+        narrative = bool(draft.get("narrative", False))
+        logger.info(
+            f"[broll] assemble narrative={narrative} clips={len(clip_paths)} "
+            f"music={'yes' if music_path else 'no'}")
         try:
             await asyncio.to_thread(
                 assemble_broll_montage, clip_paths, voice_path, montage_path, work_dir,
-                music_path, draft.get("narrative", False),
+                music_path=music_path, narrative=narrative,
             )
         except MontageError as e:
             logger.error(f"[broll] montage failed: {e}", exc_info=True)
