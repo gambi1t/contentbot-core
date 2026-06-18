@@ -13700,6 +13700,95 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if query.data.startswith("card_aivideo:"):
+        # AI-видео по сценарию через Seedance (ТРЕТИЙ источник, рядом с Remotion и
+        # HyperFrames). Режиссёр-LLM раскадровывает сценарий, Seedance рендерит
+        # клипы. Выход в proj_dir/aivideo/ai_NN.mp4 — отдельный namespace.
+        card_id_prefix = query.data.split(":", 1)[1]
+        all_cards = await asyncio.to_thread(fetch_notion_cards, limit=30)
+        card = _pick_card_apply_brand(all_cards, card_id_prefix)
+        if not card:
+            await query.edit_message_text("Карточка не найдена.")
+            return
+        full_id = card["id"]
+        _av_data = {"notion_page_id": full_id, "card_data": {"title": card["title"]}}
+        proj_dir = _project_dir(_av_data)
+        if not proj_dir:
+            await query.edit_message_text("❌ Не удалось определить папку проекта.")
+            return
+        proj_dir.mkdir(parents=True, exist_ok=True)
+
+        script_text = await asyncio.to_thread(fetch_notion_page_script, full_id)
+        if not script_text or len(script_text.strip()) < 30:
+            await query.edit_message_text(
+                "❌ В карточке нет сценария.\n\n"
+                "Сначала сгенерируй или впиши сценарий — видео строится из него."
+            )
+            return
+
+        _av_header = f"🎬 AI-видео (Seedance) для «{card['title']}»"
+        await query.edit_message_text(
+            f"{_av_header}\n\n"
+            f"Режиссёр раскадровывает сценарий, Seedance рендерит клипы в облаке. "
+            f"Несколько минут — буду присылать прогресс."
+        )
+
+        # Прогресс-мост поток→loop (как в card_hfbroll); сбой эдита не валит генерацию.
+        _av_loop = asyncio.get_running_loop()
+        _av_chat = query.message.chat_id
+        _av_msg = query.message.message_id
+
+        def _av_progress(text: str) -> None:
+            fut = asyncio.run_coroutine_threadsafe(
+                context.bot.edit_message_text(
+                    chat_id=_av_chat, message_id=_av_msg,
+                    text=f"{_av_header}\n\n{text}",
+                ),
+                _av_loop,
+            )
+            fut.add_done_callback(lambda f: f.exception())
+
+        try:
+            from ai_video_broll import generate_ai_broll
+            # Чистим старые ai_*.mp4 (namespace отдельный от hyperframes/ и broll_*).
+            _av_dir = proj_dir / "aivideo"
+            if _av_dir.exists():
+                for _old in _av_dir.glob("ai_*.mp4"):
+                    _old.unlink()
+            # progress_cb — keyword (5-й позиционный у движка; claude/duration/max_clips дефолтны).
+            clips, cost_usd = await asyncio.to_thread(
+                generate_ai_broll, script_text, proj_dir, progress_cb=_av_progress,
+            )
+        except Exception as e:
+            logger.error(f"card_aivideo failed: {e}", exc_info=True)
+            short_e = str(e)
+            if len(short_e) > 200:
+                short_e = short_e[:200] + "…"
+            await query.edit_message_text(
+                f"⚠️ Не удалось сгенерировать AI-видео:\n{short_e}\n\n"
+                f"Можно повторить, попробовать HyperFrames/Remotion или B-roll вручную.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔁 Повторить AI-видео", callback_data=query.data)],
+                    [InlineKeyboardButton(
+                        "🎨 Попробовать HyperFrames",
+                        callback_data=f"card_hfbroll:{card_id_prefix}")],
+                    [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_id_prefix}")],
+                ]),
+            )
+            return
+
+        _on_sub = bool(os.getenv("CLAUDE_CODE_OAUTH_TOKEN"))
+        await query.edit_message_text(
+            f"✅ AI-видео (Seedance) готово: {len(clips)} клипов для «{card['title']}».\n"
+            f"💵 Seedance: ~${cost_usd:.2f}\n\n"
+            f"Дальше — собери ролик в Про-монтаже (хук-аватар → 50/50 → CTA).",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 Собрать ролик", callback_data=f"card_assemble:{full_id[:20]}")],
+                [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{full_id[:20]}")],
+            ]),
+        )
+        return
+
     if query.data.startswith("card_assemble:"):
         card_id_prefix = query.data.split(":", 1)[1]
         cid = card_id_prefix[:20]
@@ -13877,12 +13966,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Выбор источника B-roll по namespace (фикс бага C1: план монтажа и
         # клипы для сборки ОБЯЗАНЫ браться из одного источника). Приоритет:
-        # HyperFrames > Remotion > SMM-реал > mix. Это же даёт чистое сравнение
-        # движков — собирается ровно та графика, что только что сгенерили.
-        # `_find_broll(proj_dir, mode)` — единый источник истины и для плана
-        # (ниже), и для ассемблера (broll_mode прокидывается в него).
+        # HyperFrames > AI-видео(Seedance) > Remotion > SMM-реал > mix. Это же
+        # даёт чистое сравнение движков — собирается ровно то, что сгенерили.
+        # ⚠️ "ai" = Remotion (autobroll/), Seedance = отдельный "aivideo" — не
+        # путать. `_find_broll(proj_dir, mode)` — единый источник истины и для
+        # плана (ниже), и для ассемблера (broll_mode прокидывается в него).
         if _find_broll(proj_dir, "hf"):
             broll_mode = "hf"
+        elif _find_broll(proj_dir, "aivideo"):
+            broll_mode = "aivideo"
         elif _find_broll(proj_dir, "ai"):
             broll_mode = "ai"
         elif _find_broll(proj_dir, "real"):
@@ -14576,6 +14668,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton(
                 "🎨 Графика из сценария (HyperFrames)",
                 callback_data=f"card_hfbroll:{full_id[:20]}",
+            )])
+            buttons.append([InlineKeyboardButton(
+                "🎬 AI-видео из сценария (Seedance)",
+                callback_data=f"card_aivideo:{full_id[:20]}",
             )])
             if NOTION_GUIDES_DB:
                 buttons.append([InlineKeyboardButton("📎 Создать гайд", callback_data=f"card_guide:{full_id[:20]}")])

@@ -223,6 +223,7 @@ def _find_broll(project_dir: Path, mode: str = "mix") -> list[Path]:
     - `mode='real'` → только `broll_*.mp4` (SMM-загрузки / YouTube-нарезки / прочее).
     - `mode='ai'`   → только `autobroll/auto_*.mp4` (Remotion-вставки от AutoBroll).
     - `mode='hf'`   → только `hyperframes/hf_*.mp4` (HyperFrames-вставки).
+    - `mode='aivideo'` → только `aivideo/ai_*.mp4` (Seedance AI-видео).
     - `mode='mix'`  → все источники (default, backward-compat).
 
     Раньше AutoBroll писал в `broll_NN.mp4` — общий namespace с SMM. При
@@ -249,6 +250,10 @@ def _find_broll(project_dir: Path, mode: str = "mix") -> list[Path]:
         hyperframes_dir = project_dir / "hyperframes"
         if hyperframes_dir.exists():
             paths.extend(hyperframes_dir.glob("hf_*.mp4"))
+    if mode in ("aivideo", "mix"):
+        aivideo_dir = project_dir / "aivideo"
+        if aivideo_dir.exists():
+            paths.extend(aivideo_dir.glob("ai_*.mp4"))
     return sorted(paths, key=_sort_key)
 
 
