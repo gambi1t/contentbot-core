@@ -12828,14 +12828,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "broll_approve":
-        # «Собрать ролик» → сперва выбор голоса (ИИ-клон или свой), потом сборка.
+        # «Собрать ролик» → сперва выбор музыки (инкремент 3), потом голос, потом сборка.
         try:
             await query.answer()
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        from broll.handlers import prompt_voice_choice
-        await prompt_voice_choice(update, context)
+        from broll.handlers import start_broll_music_pick
+        await start_broll_music_pick(update, context, chat_id=query.message.chat_id)
+        return
+
+    if query.data.startswith("b2mus:"):
+        # Инкремент 3: выбор фоновой музыки до развилки голоса.
+        # b2mus:<action>[:<category>], action ∈ cat|reroll|back|skip|accept.
+        _parts = query.data.split(":", 2)
+        _action = _parts[1] if len(_parts) > 1 else ""
+        _cat = _parts[2] if len(_parts) > 2 else None
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import handle_broll_music_cb
+        await handle_broll_music_cb(
+            update, context, _action, category=_cat, chat_id=query.message.chat_id)
         return
 
     if query.data == "b2vc:ai":

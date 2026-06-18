@@ -40,6 +40,7 @@ from .draft import (
 from .materialize import materialize_items, validate_upload_media
 from .source_menu import source_menu_keyboard, hf_fallback_action
 from bot_state import pending as _bot_pending, save_pending as _bot_save_pending
+from music_mixer import list_categories, pick_random_track
 
 logger = logging.getLogger("broll.handlers")
 
@@ -416,6 +417,107 @@ async def handle_broll_source(
 
 # ── Выбор голоса озвучки (ИИ-клон Максима ИЛИ свой голос) ─────────────────
 _BROLL_OWNVOICE_STATE = "broll2_ownvoice"
+
+
+# ── Инкремент 3: выбор фоновой музыки (до развилки голоса) ────────────────
+
+_MUSIC_CAT_LABELS = {
+    "chill": "😌 Chill", "energetic": "⚡ Энергичная", "cinematic": "🎬 Кинематограф",
+    "corporate": "💼 Деловая", "inspiring": "✨ Вдохновляющая",
+}
+
+
+def _music_category_keyboard() -> InlineKeyboardMarkup:
+    """Категории музыки (2 в ряд) + «Без музыки». Отмена реюзит broll_cancel."""
+    rows, row = [], []
+    for cat in list_categories().keys():
+        row.append(InlineKeyboardButton(
+            _MUSIC_CAT_LABELS.get(cat, cat), callback_data=f"b2mus:cat:{cat}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🚫 Без музыки", callback_data="b2mus:skip")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _music_picked_keyboard(category: str) -> InlineKeyboardMarkup:
+    """После превью трека: принять / другой трек / сменить категорию / без музыки."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Эта музыка — дальше", callback_data="b2mus:accept")],
+        [InlineKeyboardButton("🔄 Другой трек", callback_data=f"b2mus:reroll:{category}")],
+        [InlineKeyboardButton("⬅️ Сменить категорию", callback_data="b2mus:back")],
+        [InlineKeyboardButton("🚫 Без музыки", callback_data="b2mus:skip")],
+    ])
+
+
+async def start_broll_music_pick(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                 chat_id: int | None = None) -> None:
+    """«Собрать ролик» (broll_approve) → выбор музыки ДО развилки голоса. Выбор
+    падает в broll_draft['music_path'] и подмешивается в монтаж на ОБОИХ
+    голосовых форках (ИИ и свой) — одна точка вставки, полное покрытие."""
+    draft = context.user_data.get("broll_draft")
+    if not draft or not draft.get("script"):
+        await context.bot.send_message(
+            chat_id=chat_id or update.effective_chat.id,
+            text="⚠️ Черновик потерян — собери ролик заново.")
+        return
+    if chat_id is None:
+        chat_id = draft.get("chat_id") or update.effective_chat.id
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="🎵 <b>Фоновая музыка</b>\n\nВыбери настроение — добавлю тихим фоном "
+             "под озвучку. Или «🚫 Без музыки».",
+        parse_mode="HTML", reply_markup=_music_category_keyboard())
+
+
+async def handle_broll_music_cb(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                action: str, category: str | None = None,
+                                chat_id: int | None = None) -> None:
+    """b2mus:* — cat/reroll (превью трека) · back (категории) · accept/skip
+    (дальше к голосу). Только ЗАХВАТ пути; микширование делает ассемблер."""
+    draft = context.user_data.get("broll_draft")
+    if chat_id is None:
+        chat_id = (draft or {}).get("chat_id") or update.effective_chat.id
+    if not draft or not draft.get("script"):
+        await context.bot.send_message(
+            chat_id=chat_id, text="⚠️ Черновик потерян — собери ролик заново.")
+        return
+
+    if action == "back":
+        draft.pop("music_path", None)
+        await context.bot.send_message(
+            chat_id=chat_id, text="🎵 Выбери категорию музыки:",
+            reply_markup=_music_category_keyboard())
+        return
+
+    if action == "skip":
+        draft.pop("music_path", None)
+        await prompt_voice_choice(update, context)
+        return
+
+    if action == "accept":
+        await prompt_voice_choice(update, context)
+        return
+
+    # cat / reroll — подобрать случайный трек категории и прислать превью.
+    track = pick_random_track(category)
+    if not track or not track.get("file"):
+        draft.pop("music_path", None)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🚫 В этой категории нет треков — выбери другую или «Без музыки».",
+            reply_markup=_music_category_keyboard())
+        return
+    draft["music_path"] = track["file"]
+    cat_label = _MUSIC_CAT_LABELS.get(category, category)
+    with open(track["file"], "rb") as af:
+        await context.bot.send_audio(
+            chat_id=chat_id, audio=af,
+            title=f"Музыка — {cat_label}",
+            caption=f"🎧 {cat_label}. Подойдёт → «Эта музыка», иначе «Другой трек».",
+            reply_markup=_music_picked_keyboard(category))
 
 
 def _voice_choice_keyboard() -> InlineKeyboardMarkup:
@@ -1035,6 +1137,7 @@ async def assemble_broll_from_draft(
     clip_paths = [Path(p) for p in draft["clips"]]
     notion_url = draft.get("notion_url")
     notion_page_id = draft.get("notion_page_id")
+    music_path = draft.get("music_path")  # инкремент 3: фон под озвучку (None = без музыки)
     if chat_id is None:
         chat_id = draft.get("chat_id") or update.effective_chat.id
 
@@ -1067,6 +1170,7 @@ async def assemble_broll_from_draft(
         try:
             await asyncio.to_thread(
                 assemble_broll_montage, clip_paths, voice_path, montage_path, work_dir,
+                music_path,
             )
         except MontageError as e:
             logger.error(f"[broll] montage failed: {e}", exc_info=True)
@@ -1311,4 +1415,6 @@ __all__ = [
     "preview_broll_voiceover",
     "accept_broll_voiceover",
     "regen_broll_voiceover",
+    "start_broll_music_pick",
+    "handle_broll_music_cb",
 ]
