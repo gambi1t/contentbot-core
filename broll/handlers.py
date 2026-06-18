@@ -56,6 +56,8 @@ _ENABLED_MODES = (SourceMode.AUTO, SourceMode.UPLOAD, SourceMode.MANUAL,
 # State (в общем pending) для приёма загрузок / ручного выбора Pipeline 2.
 _UPLOAD_STATE = "broll2_uploading"
 _MANUAL_STATE = "broll2_manual"
+# Инкремент 1: правка сценария свободным текстом (гейт до меню источника).
+_EDIT_SCRIPT_STATE = "broll2_edit_script"
 
 # Подписи категорий для preview.
 _SCENE_LABELS = {
@@ -80,6 +82,26 @@ def _approval_keyboard(notion_url: str | None = None,
         rows.append([InlineKeyboardButton("📋 К карточке", url=notion_url)])
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")])
     return InlineKeyboardMarkup(rows)
+
+
+def _script_gate_keyboard(draft_id: str) -> InlineKeyboardMarkup:
+    """Гейт #1 (инкремент 1): сценарий написан — править или утвердить.
+    Стоит ДО меню источника видеоряда. Отмена реюзит общий broll_cancel
+    (cancel_broll безопасен без dict-черновика). «Другой сценарий» сюда НЕ
+    кладём: regenerate_broll_preview читает context.user_data['broll_draft']
+    (dict), которого на этом шаге ещё нет — упадёт."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Править сценарий", callback_data=f"b2scr:edit:{draft_id}")],
+        [InlineKeyboardButton("✅ Утвердить сценарий", callback_data=f"b2scr:ok:{draft_id}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")],
+    ])
+
+
+def _script_editing_keyboard(draft_id: str) -> InlineKeyboardMarkup:
+    """Во время правки: единственная кнопка — выйти обратно на гейт."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Отмена правки", callback_data=f"b2scr:cancel_edit:{draft_id}")],
+    ])
 
 
 def _build_preview(script: str, clip_paths: list[str]) -> str:
@@ -204,10 +226,12 @@ async def generate_broll_preview(
             f"🎞 <b>B-roll ролик</b> — закадровый голос + видеоряд, без аватара\n\n"
             f"<b>Сценарий (озвучка голосом Максима):</b>\n"
             f"<i>{html_mod.escape(script)}</i>\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\nОткуда взять видеоряд?"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Проверь сценарий: <b>«✏️ Править»</b> — поправить текст, "
+            f"<b>«✅ Утвердить»</b> — перейти к выбору видеоряда."
         ),
         parse_mode="HTML",
-        reply_markup=source_menu_keyboard(draft.draft_id, enabled_modes=_ENABLED_MODES),
+        reply_markup=_script_gate_keyboard(draft.draft_id),
         disable_web_page_preview=True,
     )
 
@@ -403,6 +427,27 @@ def _voice_choice_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _voiceover_gate_keyboard() -> InlineKeyboardMarkup:
+    """Гейт #2 (инкремент 2): превью ИИ-озвучки — принять и собрать, перегенерить,
+    либо записать свой голос. Тяжёлый монтаж — только после «Собрать». «Записать
+    свой» и «Отмена» реюзят существующие b2vc:own / broll_cancel."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Озвучка ок — собрать ролик", callback_data="b2vop:accept")],
+        [InlineKeyboardButton("🔄 Перегенерировать", callback_data="b2vop:regen")],
+        [InlineKeyboardButton("🎤 Записать свой голос", callback_data="b2vc:own")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")],
+    ])
+
+
+def _ai_voice_path(uid: int) -> Path:
+    """Стабильный путь превью-озвучки (1 файл/юзер, перезапись на regen) — как
+    own-voice broll_ownvoice_{uid}.mp3. Переживает round-trip превью→accept
+    в рамках живого процесса; DRAFTS_DIR читается в рантайме (тест его подменяет)."""
+    d = DRAFTS_DIR.parent / "broll_voice"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"aivoice_{uid}.mp3"
+
+
 async def prompt_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """«Собрать ролик» → спросить, каким голосом озвучивать (callback broll_approve)."""
     chat_id = update.callback_query.message.chat_id
@@ -434,6 +479,102 @@ async def start_broll_ownvoice(update: Update, context: ContextTypes.DEFAULT_TYP
         f"<i>{html_mod.escape(script)}</i>\n\n"
         "Пришли голосовое — соберу ролик на твоём голосе.",
         parse_mode="HTML")
+
+
+# ── Инкремент 2: превью ИИ-озвучки до монтажа ─────────────────────────────
+
+async def preview_broll_voiceover(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    voiceover_fn,
+    chat_id: int | None = None,
+    status_fn=None,
+) -> None:
+    """b2vc:ai → СНАЧАЛА превью озвучки. Генерим ИИ-озвучку ОДИН раз в стабильный
+    файл, шлём её аудио-превью + гейт. Тяжёлый монтаж — только после accept
+    (тогда mp3 переиспользуется шимом, ElevenLabs второй раз не дёргается)."""
+    draft = context.user_data.get("broll_draft")
+    if not draft or not draft.get("script"):
+        await context.bot.send_message(
+            chat_id=chat_id or update.effective_chat.id,
+            text="⚠️ Черновик потерян (бот мог рестартнуть). Собери ролик заново.",
+        )
+        return
+    uid = _uid_from_update(update)
+    if chat_id is None:
+        chat_id = draft.get("chat_id") or update.effective_chat.id
+    mp3 = _ai_voice_path(uid)
+    status = await context.bot.send_message(
+        chat_id=chat_id,
+        text="🎙 Озвучиваю сценарий голосом Максима…\n<i>~10-30 сек</i>",
+        parse_mode="HTML",
+    )
+    try:
+        await asyncio.to_thread(voiceover_fn, draft["script"], str(mp3))
+    except Exception as e:
+        logger.error(f"[broll] voiceover preview failed: {e}", exc_info=True)
+        try:
+            await status.edit_text(f"❌ Озвучка не получилась: {e}")
+        except Exception:
+            pass
+        return
+    if not mp3.exists() or mp3.stat().st_size < 1000:
+        await status.edit_text("❌ Озвучка вернула пустой файл. Нажми «🔄 Перегенерировать».")
+        return
+    draft["ai_voice_path"] = str(mp3)
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    with open(mp3, "rb") as af:
+        await context.bot.send_audio(
+            chat_id=chat_id,
+            audio=af,
+            title="Озвучка (ИИ-голос Максима)",
+            caption="🎧 Послушай озвучку. Ок → «Собрать ролик». Не нравится → "
+                    "«Перегенерировать» (новая генерация) или «Записать свой голос».",
+            reply_markup=_voiceover_gate_keyboard(),
+        )
+
+
+async def accept_broll_voiceover(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int | None = None,
+    status_fn=None,
+) -> None:
+    """b2vop:accept → озвучка принята: собрать ролик, ПЕРЕИСПОЛЬЗУЯ уже
+    сгенерённый mp3 через voiceover_fn-шим (copyfile) — как own-voice. assemble
+    не модифицируется и ElevenLabs повторно не вызывается."""
+    draft = context.user_data.get("broll_draft")
+    if chat_id is None:
+        chat_id = (draft or {}).get("chat_id") or update.effective_chat.id
+    mp3 = (draft or {}).get("ai_voice_path")
+    if not draft or not mp3 or not Path(mp3).exists() or Path(mp3).stat().st_size < 1000:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Озвучка не найдена — нажми «🔄 Перегенерировать».",
+        )
+        return
+
+    def _reuse_voiceover(_script, out_path):
+        shutil.copyfile(mp3, out_path)
+
+    await assemble_broll_from_draft(
+        update, context, _reuse_voiceover, chat_id=chat_id, status_fn=status_fn)
+
+
+async def regen_broll_voiceover(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    voiceover_fn,
+    chat_id: int | None = None,
+    status_fn=None,
+) -> None:
+    """b2vop:regen → перегенерить ИИ-озвучку и снова показать превью (1 ElevenLabs
+    на нажатие, by design — regen платный)."""
+    await preview_broll_voiceover(
+        update, context, voiceover_fn, chat_id=chat_id, status_fn=status_fn)
 
 
 # ── #14: ручная пересборка одной HF-сцены ────────────────────────────────
@@ -1025,6 +1166,134 @@ async def cancel_broll(
     )
 
 
+# ── Инкремент 1: гейт правки/утверждения сценария (до меню источника) ──
+
+def _uid_from_update(update) -> int:
+    if getattr(update, "effective_user", None):
+        return update.effective_user.id
+    q = getattr(update, "callback_query", None)
+    return q.from_user.id if q else 0
+
+
+async def _send_script_gate(context, draft) -> None:
+    """Показать сценарий + клавиатуру гейта (Править / Утвердить)."""
+    await context.bot.send_message(
+        chat_id=draft.chat_id,
+        text=(
+            f"🎞 <b>B-roll ролик</b> — сценарий\n\n"
+            f"<i>{html_mod.escape(draft.script_text)}</i>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>«✏️ Править»</b> — поправить текст, "
+            f"<b>«✅ Утвердить»</b> — перейти к выбору видеоряда."
+        ),
+        parse_mode="HTML",
+        reply_markup=_script_gate_keyboard(draft.draft_id),
+        disable_web_page_preview=True,
+    )
+
+
+async def start_broll_script_edit(update, context, draft_id: str) -> None:
+    """b2scr:edit — войти в режим правки сценария свободным текстом.
+
+    Реюз 2-state паттерна селфи (callback ставит состояние → следующий текст
+    применяется), но БЕЗ apply_user_edits: B-roll сценарий не привязан к
+    таймкодам субтитров, правится как угодно по объёму."""
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None:
+        await context.bot.send_message(
+            chat_id=(update.effective_chat.id if getattr(update, "effective_chat", None) else 0),
+            text="⚠️ Черновик устарел — запусти B-roll ролик заново.",
+        )
+        return
+    uid = _uid_from_update(update)
+    _bot_pending[uid] = {"state": _EDIT_SCRIPT_STATE, "broll_edit_draft_id": draft_id}
+    _bot_save_pending(_bot_pending)
+    await context.bot.send_message(
+        chat_id=draft.chat_id,
+        text=(
+            f"✏️ <b>Правка сценария</b>\n\n"
+            f"Текущий текст:\n<i>{html_mod.escape(draft.script_text)}</i>\n\n"
+            f"Пришли исправленный сценарий одним сообщением — заменю целиком. "
+            f"Объём любой."
+        ),
+        parse_mode="HTML",
+        reply_markup=_script_editing_keyboard(draft_id),
+        disable_web_page_preview=True,
+    )
+
+
+async def handle_script_edit_message(update, context) -> bool:
+    """Приём исправленного сценария (state broll2_edit_script).
+
+    Контракт-зеркало handle_broll2_upload_message (-> bool: True, если
+    сообщение обработано этим хендлером). БЕЗ валидации количества слов —
+    любой текст заменяет draft.script_text целиком."""
+    uid = _uid_from_update(update)
+    st = _bot_pending.get(uid)
+    if not st or st.get("state") != _EDIT_SCRIPT_STATE:
+        return False
+    draft_id = st.get("broll_edit_draft_id")
+    new_text = (getattr(update.message, "text", "") or "").strip()
+    if not new_text:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Пришли текст сценария сообщением (или «⬅️ Отмена правки»).",
+            reply_markup=_script_editing_keyboard(draft_id),
+        )
+        return True
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None:
+        _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="⚠️ Черновик устарел — запусти B-roll ролик заново.",
+        )
+        return True
+    # Перезаписываем, только если текст реально изменился (по словам). Без
+    # предупреждений — B-roll сценарий свободный, любой объём допустим.
+    if new_text.split() != draft.script_text.split():
+        draft.script_text = new_text
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+    _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+    await _send_script_gate(context, draft)
+    return True
+
+
+async def approve_broll_script(update, context, draft_id: str) -> None:
+    """b2scr:ok — сценарий утверждён, показать меню источника видеоряда.
+    Перенесённый из generate_broll_preview вызов source_menu_keyboard;
+    handle_broll_source (b2src) не трогаем."""
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None:
+        await context.bot.send_message(
+            chat_id=(update.effective_chat.id if getattr(update, "effective_chat", None) else 0),
+            text="⚠️ Черновик устарел — запусти B-roll ролик заново.",
+        )
+        return
+    await context.bot.send_message(
+        chat_id=draft.chat_id,
+        text="✅ Сценарий утверждён.\n\n━━━━━━━━━━━━━━━━━━━━━\nОткуда взять видеоряд?",
+        parse_mode="HTML",
+        reply_markup=source_menu_keyboard(draft.draft_id, enabled_modes=_ENABLED_MODES),
+    )
+
+
+async def cancel_broll_script_edit(update, context, draft_id: str) -> None:
+    """b2scr:cancel_edit — выйти из правки обратно на гейт без изменений."""
+    uid = _uid_from_update(update)
+    if _bot_pending.get(uid, {}).get("state") == _EDIT_SCRIPT_STATE:
+        _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None:
+        await context.bot.send_message(
+            chat_id=(update.effective_chat.id if getattr(update, "effective_chat", None) else 0),
+            text="⚠️ Черновик устарел — запусти B-roll ролик заново.",
+        )
+        return
+    await _send_script_gate(context, draft)
+
+
 __all__ = [
     "generate_broll_preview",
     "handle_broll_source",
@@ -1035,4 +1304,11 @@ __all__ = [
     "assemble_broll_from_draft",
     "regenerate_broll_preview",
     "cancel_broll",
+    "start_broll_script_edit",
+    "handle_script_edit_message",
+    "approve_broll_script",
+    "cancel_broll_script_edit",
+    "preview_broll_voiceover",
+    "accept_broll_voiceover",
+    "regen_broll_voiceover",
 ]

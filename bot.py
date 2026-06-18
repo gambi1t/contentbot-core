@@ -8582,6 +8582,12 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_broll2_upload_message(update, context):
             return
 
+    # Pipeline 2 — приём исправленного сценария (гейт правки, инкремент 1).
+    if user_id in pending and pending[user_id].get("state") == "broll2_edit_script":
+        from broll.handlers import handle_script_edit_message
+        if await handle_script_edit_message(update, context):
+            return
+
     # Selfie pipeline v2 — video intake routed to the selfie module.
     # Замещает старый inline-блок (~130 строк) на полнофункциональный модуль
     # с шагами правки субтитров → музыка → выбор обложки.
@@ -12734,6 +12740,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cancel_broll_upload(update, context)
         return
 
+    if query.data.startswith("b2scr:"):
+        # Pipeline 2: гейт правки/утверждения сценария (инкремент 1) — стоит
+        # ДО меню источника. b2scr:<action>:<draft_id>, action ∈ edit|ok|cancel_edit.
+        _parts = query.data.split(":", 2)
+        if len(_parts) != 3:
+            await query.answer("Кнопка устарела", show_alert=True)
+            return
+        _action, _scr_draft_id = _parts[1], _parts[2]
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            from broll.handlers import (
+                start_broll_script_edit, approve_broll_script,
+                cancel_broll_script_edit,
+            )
+        except Exception as e:
+            logger.error(f"[broll] import failed in script-gate: {e}", exc_info=True)
+            await query.message.reply_text(f"❌ Модуль B-roll не загружен: {e}")
+            return
+        if _action == "edit":
+            await start_broll_script_edit(update, context, _scr_draft_id)
+        elif _action == "ok":
+            await approve_broll_script(update, context, _scr_draft_id)
+        elif _action == "cancel_edit":
+            await cancel_broll_script_edit(update, context, _scr_draft_id)
+        return
+
     if query.data.startswith("b2src:"):
         # Pipeline 2: выбор источника видеоряда (durable-draft + меню).
         from broll.source_menu import parse_source_cb
@@ -12803,14 +12839,42 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "b2vc:ai":
-        # Озвучка ИИ-клоном Максима (текущая сборка).
+        # Озвучка ИИ-клоном → СНАЧАЛА превью озвучки (инкремент 2). Монтаж после
+        # «Собрать» (b2vop:accept), переиспользуя уже сгенерённый mp3.
+        try:
+            await query.answer("🎙 Озвучиваю…")
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import preview_broll_voiceover
+        await preview_broll_voiceover(
+            update, context, generate_voiceover, chat_id=query.message.chat_id,
+            status_fn=update_notion_status)
+        return
+
+    if query.data == "b2vop:accept":
+        # Превью озвучки принято → собрать ролик на уже сгенерённом mp3 (без
+        # повторного ElevenLabs — assemble получит copyfile-шим).
         try:
             await query.answer("🎬 Собираю ролик…")
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        from broll.handlers import assemble_broll_from_draft
-        await assemble_broll_from_draft(
+        from broll.handlers import accept_broll_voiceover
+        await accept_broll_voiceover(
+            update, context, chat_id=query.message.chat_id,
+            status_fn=update_notion_status)
+        return
+
+    if query.data == "b2vop:regen":
+        # Перегенерировать ИИ-озвучку и снова показать превью (новый ElevenLabs).
+        try:
+            await query.answer("🔄 Перегенерирую озвучку…")
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import regen_broll_voiceover
+        await regen_broll_voiceover(
             update, context, generate_voiceover, chat_id=query.message.chat_id,
             status_fn=update_notion_status)
         return
