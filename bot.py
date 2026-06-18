@@ -8602,6 +8602,12 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ):
             return
 
+    # Pipeline 2 — приём фото для обложки (гейт 4b, загрузка своей картинки).
+    if user_id in pending and pending[user_id].get("state") == "broll2_cover_upload":
+        from broll.handlers import handle_broll_cover_photo
+        if await handle_broll_cover_photo(update, context):
+            return
+
     # Selfie pipeline v2 — video intake routed to the selfie module.
     # Замещает старый inline-блок (~130 строк) на полнофункциональный модуль
     # с шагами правки субтитров → музыка → выбор обложки.
