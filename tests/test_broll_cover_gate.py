@@ -102,7 +102,7 @@ def _make_video(p):
 def test_assemble_persists_and_shows_cover_button(errors):
     print("\n[assemble — persist монтажа + кнопка обложки + не схлопывает черновик]")
 
-    def _fake_montage(clip_paths, voiceover_path, output_path, tmp_dir=None, music_path=None):
+    def _fake_montage(clip_paths, voiceover_path, output_path, tmp_dir=None, music_path=None, **kwargs):
         Path(output_path).write_bytes(b"\x00" * 4096)
 
     def _fake_voiceover(text, out_path, *a, **k):

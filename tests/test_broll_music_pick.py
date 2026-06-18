@@ -174,7 +174,7 @@ def test_music_threaded_into_assemble(errors):
     print("\n[assemble_broll_from_draft — music_path прокинут в монтаж]")
     captured = {}
 
-    def _fake_montage(clip_paths, voiceover_path, output_path, tmp_dir=None, music_path=None):
+    def _fake_montage(clip_paths, voiceover_path, output_path, tmp_dir=None, music_path=None, **kwargs):
         captured["music_path"] = music_path
         Path(output_path).write_bytes(b"\x00" * 100)
 

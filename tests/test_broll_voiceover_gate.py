@@ -143,7 +143,7 @@ def test_accept_reuses_same_mp3_single_generation(errors):
     fake = _FakeVoiceover()
     captured = {}
 
-    def _fake_montage(clip_paths, voiceover_path, output_path, tmp_dir=None, music_path=None):
+    def _fake_montage(clip_paths, voiceover_path, output_path, tmp_dir=None, music_path=None, **kwargs):
         captured["voice_bytes"] = Path(voiceover_path).read_bytes()
         Path(output_path).write_bytes(b"\x00" * 100)  # dummy mp4
 
