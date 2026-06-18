@@ -13,7 +13,7 @@
      звук клипа выкидывается. Нормализация клипов идёт ПАРАЛЛЕЛЬНО
      (ThreadPoolExecutor) — это главный пожиратель времени.
   3. нормализованные сегменты склеиваются по кругу, пока сумма не покроет
-     длину озвучки
+     длину озвучки (или ПО ПОРЯДКУ без кругов при narrative=True — AI-видео)
   4. финал: видео обрезается точно по озвучке, озвучка муксится как
      аудиодорожка (опц. — тихий музыкальный бэк)
 
@@ -125,12 +125,53 @@ def _normalize_clip(src: Path, seg_len: float, dst: Path) -> None:
     )
 
 
+def _seg_len(clip_dur: float, narrative: bool = False) -> float:
+    """Длина сегмента из натуральной длины клипа.
+
+    narrative=True (AI-видео фуллскрин) — БЕЗ 5с-капа: 10с-клип играет целиком,
+    мульти-шот не режется. По умолчанию — прижать к [MIN, MAX] (взаимозам. B-roll).
+    """
+    if narrative:
+        return max(MIN_SEG_SEC, clip_dur)
+    return max(MIN_SEG_SEC, min(clip_dur, MAX_SEG_SEC))
+
+
+def _build_sequence(segments: list[tuple[Path, float]], voiceover_dur: float,
+                    narrative: bool = False) -> list[Path]:
+    """Очередь сегментов под длину озвучки.
+
+    По умолчанию — по кругу (idx % len) до покрытия (взаимозаменяемый B-roll).
+    narrative=True (AI-видео) — ОДИН проход по порядку без повторов: клипы =
+    сюжет, последний подрежется финальным -t. Без зацикливания.
+    """
+    sequence: list[Path] = []
+    total = 0.0
+    if narrative:
+        for seg_path, seg_dur in segments:
+            sequence.append(seg_path)
+            total += seg_dur
+            if total >= voiceover_dur:
+                break
+        return sequence
+    idx = 0
+    # +1 сегмент сверху как запас — финальный -t всё равно подрежет точно.
+    while total < voiceover_dur + MAX_SEG_SEC:
+        seg_path, seg_dur = segments[idx % len(segments)]
+        sequence.append(seg_path)
+        total += seg_dur
+        idx += 1
+        if idx > 10000:
+            raise MontageError("не удаётся набрать длину — сегменты нулевые")
+    return sequence
+
+
 def assemble_broll_montage(
     clip_paths: list[Path],
     voiceover_path: Path,
     output_path: Path,
     tmp_dir: Path | None = None,
     music_path: Path | None = None,
+    narrative: bool = False,
 ) -> Path:
     """Собрать вертикальный B-roll монтаж под озвучку.
 
@@ -141,6 +182,8 @@ def assemble_broll_montage(
     tmp_dir        — рабочая папка (по умолчанию — временная, не чистится
                      вызывающим; чистку оставляем хендлеру).
     music_path     — опц. музыкальный бэк (микшируется тихо под озвучку).
+    narrative      — True для AI-видео (Seedance): клипы целиком (без 5с-капа),
+                     по порядку, без зацикливания. По умолчанию — кап+круг.
 
     Возвращает output_path. Бросает MontageError при пустом списке клипов
     или падении ffmpeg.
@@ -178,7 +221,7 @@ def assemble_broll_montage(
             return None
         try:
             clip_dur = _probe_duration(clip)
-            seg_len = max(MIN_SEG_SEC, min(clip_dur, MAX_SEG_SEC))
+            seg_len = _seg_len(clip_dur, narrative)
             seg_out = tmp_dir / f"seg_{i:02d}.mp4"
             _normalize_clip(clip, seg_len, seg_out)
             actual = _probe_duration(seg_out)
@@ -199,21 +242,11 @@ def assemble_broll_montage(
         raise MontageError("ни одного клипа не удалось нормализовать")
     logger.info(f"[broll.assembler] нормализовано {len(segments)} сегментов")
 
-    # ── 2. Выстроить очередь сегментов по кругу до покрытия озвучки ─────────
-    sequence: list[Path] = []
-    total = 0.0
-    idx = 0
-    # +1 сегмент сверху как запас — финальный -t всё равно подрежет точно.
-    while total < voiceover_dur + MAX_SEG_SEC:
-        seg_path, seg_dur = segments[idx % len(segments)]
-        sequence.append(seg_path)
-        total += seg_dur
-        idx += 1
-        if idx > 10000:
-            raise MontageError("не удаётся набрать длину — сегменты нулевые")
+    # ── 2. Выстроить очередь сегментов под длину озвучки ───────────────────
+    sequence = _build_sequence(segments, voiceover_dur, narrative)
     logger.info(
-        f"[broll.assembler] очередь: {len(sequence)} сегментов, "
-        f"суммарно ~{total:.1f}s (нужно {voiceover_dur:.1f}s)"
+        f"[broll.assembler] очередь: {len(sequence)} сегментов "
+        f"({'по порядку' if narrative else 'по кругу'}, нужно {voiceover_dur:.1f}s)"
     )
 
     # ── 3. Concat сегментов (демукс-конкат, потоки идентичны → -c copy) ─────
