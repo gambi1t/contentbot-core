@@ -41,6 +41,10 @@ from .materialize import materialize_items, validate_upload_media
 from .source_menu import source_menu_keyboard, hf_fallback_action
 from bot_state import pending as _bot_pending, save_pending as _bot_save_pending
 from music_mixer import list_categories, pick_random_track
+from selfie.cover import (
+    extract_frame, get_frame_timestamps, probe_video_duration,
+    list_library_sample, lookup_library_path,
+)
 
 logger = logging.getLogger("broll.handlers")
 
@@ -59,6 +63,17 @@ _UPLOAD_STATE = "broll2_uploading"
 _MANUAL_STATE = "broll2_manual"
 # Инкремент 1: правка сценария свободным текстом (гейт до меню источника).
 _EDIT_SCRIPT_STATE = "broll2_edit_script"
+# Инкремент 4: гейт обложки (пост-сборка). Состояние ввода текста обложки.
+_COVER_TEXT_STATE = "broll2_cover_text"
+
+
+def _broll_final_path(uid: int) -> Path:
+    """Per-user стабильный путь собранного монтажа (переживает rmtree work_dir,
+    нужен пост-сборочному гейту обложки для кадра). 1 файл/юзер, перезапись,
+    удаляется после готовой обложки — не копится (как ai_voice/music)."""
+    d = DRAFTS_DIR.parent / "broll_finals"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{uid}.mp4"
 
 # Подписи категорий для preview.
 _SCENE_LABELS = {
@@ -749,6 +764,189 @@ async def regen_broll_voiceover(
         update, context, voiceover_fn, chat_id=chat_id, status_fn=status_fn)
 
 
+# ── Инкремент 4: гейт обложки (пост-сборка, кадр из ролика + текст) ────────
+
+def _cover_picker_keyboard(draft_id: str) -> InlineKeyboardMarkup:
+    """Пикер обложки: кадр (начало/середина/финал) + первый-кадр + отмена.
+    (4b добавит «загрузить фото» и «библиотека».) Отмена реюзит broll_cancel."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📹 Начало", callback_data=f"b2cov:frame:{draft_id}:start"),
+         InlineKeyboardButton("📹 Середина", callback_data=f"b2cov:frame:{draft_id}:mid"),
+         InlineKeyboardButton("📹 Финал", callback_data=f"b2cov:frame:{draft_id}:end")],
+        [InlineKeyboardButton("➡️ Первый кадр", callback_data=f"b2cov:skip:{draft_id}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")],
+    ])
+
+
+def _cover_confirm_keyboard(draft_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Эта обложка", callback_data=f"b2cov:confirm:{draft_id}")],
+        [InlineKeyboardButton("🔄 Другой кадр", callback_data=f"b2cov:reject:{draft_id}")],
+    ])
+
+
+def _cover_text_keyboard(draft_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ С текстом", callback_data=f"b2cov:txt:{draft_id}:on")],
+        [InlineKeyboardButton("➡️ Без текста", callback_data=f"b2cov:txt:{draft_id}:off")],
+    ])
+
+
+def _cover_validate(draft, draft_id: str) -> bool:
+    """Защита от устаревшей кнопки (финал-экран живёт в чате долго): callback
+    должен совпасть с текущим черновиком и иметь готовый монтаж."""
+    return bool(draft) and draft.get("draft_id") == draft_id and bool(draft.get("final_path"))
+
+
+async def start_broll_cover_pick(update, context, draft_id: str, chat_id=None) -> None:
+    """b2cov:start — открыть пикер обложки (первый пост-сборочный гейт)."""
+    draft = context.user_data.get("broll_draft")
+    if chat_id is None:
+        chat_id = (draft or {}).get("chat_id") or update.effective_chat.id
+    if not _cover_validate(draft, draft_id):
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Это от прошлого ролика или черновик потерян — собери ролик заново.")
+        return
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="🖼 <b>Обложка ролика</b>\n\nВыбери кадр — наложу обложку (с текстом или без). "
+             "Или «➡️ Первый кадр».",
+        parse_mode="HTML", reply_markup=_cover_picker_keyboard(draft_id))
+
+
+async def handle_broll_cover_cb(update, context, action: str, draft_id: str, arg=None, *,
+                                cover_fn=None, publish_fn=None, notion_cover_fn=None,
+                                chat_id=None) -> None:
+    """b2cov:* — кадр/skip (превью) · reject (пикер) · confirm (выбор текста) ·
+    txt:on (ввод текста) · txt:off (готовая обложка без текста)."""
+    draft = context.user_data.get("broll_draft")
+    if chat_id is None:
+        chat_id = (draft or {}).get("chat_id") or update.effective_chat.id
+    if not _cover_validate(draft, draft_id):
+        await context.bot.send_message(
+            chat_id=chat_id, text="⚠️ Это от прошлого ролика — собери заново.")
+        return
+
+    if action in ("frame", "skip"):
+        which = arg if action == "frame" else "start"
+        final_path = draft["final_path"]
+        dur = await asyncio.to_thread(probe_video_duration, final_path)
+        ts_list = get_frame_timestamps(dur)
+        ts = {"start": ts_list[0], "mid": ts_list[1], "end": ts_list[2]}.get(which, ts_list[0])
+        out = Path(final_path).parent / f"cover_frame_{draft_id}.jpg"
+        ok = await asyncio.to_thread(extract_frame, final_path, ts, str(out))
+        if not ok:
+            await context.bot.send_message(
+                chat_id=chat_id, text="⚠️ Не удалось взять кадр. Выбери другой.",
+                reply_markup=_cover_picker_keyboard(draft_id))
+            return
+        draft["cover_image"] = str(out)
+        with open(out, "rb") as ph:
+            await context.bot.send_photo(
+                chat_id=chat_id, photo=ph,
+                caption="Эта обложка? Текст добавим следующим шагом.",
+                reply_markup=_cover_confirm_keyboard(draft_id))
+        return
+
+    if action == "reject":
+        await context.bot.send_message(
+            chat_id=chat_id, text="🖼 Выбери кадр:",
+            reply_markup=_cover_picker_keyboard(draft_id))
+        return
+
+    if action == "confirm":
+        if not draft.get("cover_image"):
+            await context.bot.send_message(
+                chat_id=chat_id, text="⚠️ Сначала выбери кадр.",
+                reply_markup=_cover_picker_keyboard(draft_id))
+            return
+        await context.bot.send_message(
+            chat_id=chat_id, text="Текст на обложке?",
+            reply_markup=_cover_text_keyboard(draft_id))
+        return
+
+    if action == "txt":
+        if arg == "on":
+            uid = _uid_from_update(update)
+            _bot_pending[uid] = {"state": _COVER_TEXT_STATE, "cover_draft_id": draft_id}
+            _bot_save_pending(_bot_pending)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="✏️ Пришли текст для обложки одним сообщением (коротко — заголовок/хук).")
+            return
+        # «без текста» → готовая обложка-фото, финализация
+        await _finalize_broll_cover(
+            update, context, "", chat_id=chat_id,
+            cover_fn=cover_fn, publish_fn=publish_fn, notion_cover_fn=notion_cover_fn)
+        return
+
+
+async def handle_broll_cover_text_message(update, context, *, cover_fn=None,
+                                          publish_fn=None, notion_cover_fn=None) -> bool:
+    """Приём текста обложки (state broll2_cover_text). Контракт -> bool."""
+    uid = _uid_from_update(update)
+    st = _bot_pending.get(uid)
+    if not st or st.get("state") != _COVER_TEXT_STATE:
+        return False
+    text = (getattr(update.message, "text", "") or "").strip()
+    if not text:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, text="Пришли текст обложки сообщением.")
+        return True
+    _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+    await _finalize_broll_cover(
+        update, context, text, chat_id=update.effective_chat.id,
+        cover_fn=cover_fn, publish_fn=publish_fn, notion_cover_fn=notion_cover_fn)
+    return True
+
+
+async def _finalize_broll_cover(update, context, cover_text: str, *, chat_id=None,
+                                cover_fn=None, publish_fn=None, notion_cover_fn=None) -> None:
+    """Рендер обложки на выбранном изображении → публикация + Notion (best-effort)
+    → отдача пользователю → чистка персистнутого монтажа."""
+    draft = context.user_data.get("broll_draft") or {}
+    if chat_id is None:
+        chat_id = draft.get("chat_id") or update.effective_chat.id
+    image = draft.get("cover_image")
+    # Гард: generate_cover без явного пути берёт СЛУЧАЙНЫЙ портрет Максима — нельзя.
+    if not image or not Path(image).is_file():
+        await context.bot.send_message(
+            chat_id=chat_id, text="⚠️ Изображение обложки потеряно — выбери кадр заново.")
+        return
+    out = Path(image).parent / f"cover_final_{draft.get('draft_id', 'x')}.jpg"
+    try:
+        await asyncio.to_thread(cover_fn, cover_text, str(out), str(image))
+    except Exception as e:
+        logger.error(f"[broll] cover render failed: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ Не удалось собрать обложку: {e}")
+        return
+    cover_url = None
+    if publish_fn:
+        try:
+            cover_url = await asyncio.to_thread(publish_fn, str(out), "broll_cover")
+        except Exception as e:
+            logger.warning(f"[broll] cover publish failed: {e}")
+    page_id = draft.get("notion_page_id")
+    if cover_url and page_id and notion_cover_fn:
+        try:
+            await asyncio.to_thread(notion_cover_fn, page_id, cover_url)
+        except Exception as e:
+            logger.warning(f"[broll] notion cover patch failed (non-fatal): {e}")
+    with open(out, "rb") as ph:
+        await context.bot.send_photo(
+            chat_id=chat_id, photo=ph,
+            caption="✅ Обложка готова." + (f"\n🔗 {cover_url}" if cover_url else ""))
+    # Монтаж больше не нужен — чистим персистнутую копию (не течёт диск).
+    fp = draft.get("final_path")
+    if fp:
+        try:
+            Path(fp).unlink(missing_ok=True)
+        except Exception:
+            pass
+    draft["stage"] = "cover_done"
+
+
 # ── #14: ручная пересборка одной HF-сцены ────────────────────────────────
 async def _send_scene_clips(context, chat_id, source_items) -> None:
     """Шлёт N клипов сцен с подписями «Сцена N» (для превью и пикера пересборки)."""
@@ -1265,6 +1463,21 @@ async def assemble_broll_from_draft(
         except Exception as e:
             logger.warning(f"[broll] subtitles failed (non-fatal): {e}")
 
+        # Инкремент 4: монтаж рождается тут и удаляется в finally. Сохраняем
+        # per-user АТОМАРНО, чтобы пост-сборочный гейт обложки взял из него кадр.
+        cover_draft_id = context.user_data.get("broll_draft_id")
+        cover_final = None
+        if cover_draft_id:
+            try:
+                _dst = _broll_final_path(_uid_from_update(update))
+                _tmp = _dst.with_suffix(".mp4.part")
+                await asyncio.to_thread(shutil.copy2, str(final_path), str(_tmp))
+                _tmp.replace(_dst)
+                if _dst.exists() and _dst.stat().st_size > 1000:
+                    cover_final = str(_dst)
+            except Exception as e:
+                logger.warning(f"[broll] persist final for cover failed: {e}")
+
         # 4. Отправка
         try:
             await status.delete()
@@ -1292,7 +1505,15 @@ async def assemble_broll_from_draft(
             except Exception as e:
                 logger.warning(f"[broll] статус карточки не обновлён: {e}")
 
-        action_rows = [[InlineKeyboardButton("🔄 Ещё B-roll ролик", callback_data="broll_regen")]]
+        action_rows = []
+        # Инкремент 4: обложка — первый пост-сборочный шаг (если монтаж сохранён).
+        if cover_final and cover_draft_id:
+            draft["final_path"] = cover_final
+            draft["draft_id"] = cover_draft_id
+            draft["stage"] = "assembled"
+            action_rows.append([InlineKeyboardButton(
+                "🖼 Сделать обложку", callback_data=f"b2cov:start:{cover_draft_id}")])
+        action_rows.append([InlineKeyboardButton("🔄 Ещё B-roll ролик", callback_data="broll_regen")])
         if notion_url:
             action_rows.append([InlineKeyboardButton("📋 К карточке", url=notion_url)])
         action_rows.append([InlineKeyboardButton("◀️ В главное меню", callback_data="idea_back_to_menu")])
@@ -1302,7 +1523,9 @@ async def assemble_broll_from_draft(
             reply_markup=InlineKeyboardMarkup(action_rows),
         )
 
-        context.user_data.pop("broll_draft", None)
+        # Черновик НЕ схлопываем, если доступна обложка (гейту нужны final_path/draft_id).
+        if not (cover_final and cover_draft_id):
+            context.user_data.pop("broll_draft", None)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -1487,4 +1710,7 @@ __all__ = [
     "regen_broll_voiceover",
     "start_broll_music_pick",
     "handle_broll_music_cb",
+    "start_broll_cover_pick",
+    "handle_broll_cover_cb",
+    "handle_broll_cover_text_message",
 ]

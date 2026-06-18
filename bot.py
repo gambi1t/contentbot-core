@@ -8588,6 +8588,20 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_script_edit_message(update, context):
             return
 
+    # Pipeline 2 — приём текста обложки (гейт 4, инкремент 4).
+    if user_id in pending and pending[user_id].get("state") == "broll2_cover_text":
+        from broll.handlers import handle_broll_cover_text_message
+
+        def _b2_notion_cover(page_id, url):
+            notion.pages.update(page_id=page_id,
+                                cover={"type": "external", "external": {"url": url}})
+
+        if await handle_broll_cover_text_message(
+            update, context, cover_fn=generate_cover,
+            publish_fn=save_media_permanent, notion_cover_fn=_b2_notion_cover,
+        ):
+            return
+
     # Selfie pipeline v2 — video intake routed to the selfie module.
     # Замещает старый inline-блок (~130 строк) на полнофункциональный модуль
     # с шагами правки субтитров → музыка → выбор обложки.
@@ -12852,6 +12866,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from broll.handlers import handle_broll_music_cb
         await handle_broll_music_cb(
             update, context, _action, category=_cat, chat_id=query.message.chat_id)
+        return
+
+    if query.data.startswith("b2cov:"):
+        # Инкремент 4: гейт обложки (пост-сборка). b2cov:<action>:<draft_id>[:<arg>],
+        # action ∈ start|frame|skip|reject|confirm|txt.
+        _parts = query.data.split(":")
+        _cov_action = _parts[1] if len(_parts) > 1 else ""
+        _cov_did = _parts[2] if len(_parts) > 2 else ""
+        _cov_arg = _parts[3] if len(_parts) > 3 else None
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        def _b2_notion_cover(page_id, url):
+            notion.pages.update(page_id=page_id,
+                                cover={"type": "external", "external": {"url": url}})
+
+        if _cov_action == "start":
+            from broll.handlers import start_broll_cover_pick
+            await start_broll_cover_pick(update, context, _cov_did, chat_id=query.message.chat_id)
+        else:
+            from broll.handlers import handle_broll_cover_cb
+            await handle_broll_cover_cb(
+                update, context, _cov_action, _cov_did, arg=_cov_arg,
+                cover_fn=generate_cover, publish_fn=save_media_permanent,
+                notion_cover_fn=_b2_notion_cover, chat_id=query.message.chat_id)
         return
 
     if query.data == "b2vc:ai":
