@@ -1165,6 +1165,48 @@ def _quantize_plan_to_frames(montage_plan: list[dict], fps: int = FPS) -> list[d
     return out
 
 
+def _pro_broll_full_seg_args(broll_clip, dur: float, seg_out) -> list[str]:
+    """Full-screen B-roll pro segment. Loops the (already-scaled) clip to fill the
+    slot instead of freezing its last frame — short AI/library clip < slot would
+    otherwise hold a стоп-кадр. Same `-stream_loop -1 … -t dur` as _assemble_dynamic.
+    """
+    return [
+        "ffmpeg", "-y",
+        "-stream_loop", "-1",
+        "-i", str(broll_clip),
+        "-t", f"{dur:.3f}",
+        "-an",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+        "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
+        str(seg_out),
+    ]
+
+
+def _pro_split_seg_args(broll_clip, avatar_half, start: float, dur: float, seg_out) -> list[str]:
+    """50/50 split pro segment: looped B-roll (top) + avatar (bottom).
+
+    `-ss start -t dur` sit before the SECOND `-i` → they seek the AVATAR to the
+    segment position (lip-sync) and are UNCHANGED. B-roll (input 0) loops to fill
+    the slot (was tpad=clone freeze); setpts resets its PTS after the loop so the
+    vstack pairs frames cleanly.
+    """
+    return [
+        "ffmpeg", "-y",
+        "-stream_loop", "-1",
+        "-i", str(broll_clip),
+        "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
+        "-i", str(avatar_half),
+        "-filter_complex",
+        "[0:v]setpts=PTS-STARTPTS[b];[b][1:v]vstack=inputs=2[outv]",
+        "-map", "[outv]",
+        "-t", f"{dur:.3f}",
+        "-an",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+        "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
+        str(seg_out),
+    ]
+
+
 def _assemble_pro(
     avatar_path: Path,
     broll_paths: list[Path],
@@ -1435,43 +1477,19 @@ def _assemble_pro(
             )
 
         elif layout == "broll_full" and bi is not None and bi in broll_full_clips:
-            # Full-screen B-roll (video only; clip starts from its 0)
-            # tpad клонирует последний кадр если клип короче слота —
-            # сегмент всегда ровно dur (раньше короткий клип сжимал таймлайн).
+            # Full-screen B-roll (video only): loop the clip to fill the slot —
+            # short clip used to freeze its last frame (tpad). seg всегда ровно dur.
             broll_clip = broll_full_clips[bi]
             _run(
-                [
-                    "ffmpeg", "-y",
-                    "-i", str(broll_clip),
-                    "-vf", "tpad=stop_mode=clone:stop=-1",
-                    "-t", f"{dur:.3f}",
-                    "-an",
-                    "-c:v", "libx264", "-preset", "medium", "-crf", "15",
-                    "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
-                    str(seg_out),
-                ],
+                _pro_broll_full_seg_args(broll_clip, dur, seg_out),
                 f"pro: seg {si} broll_full #{bi} ({dur:.1f}s)",
             )
 
         elif layout == "split" and bi is not None and bi in broll_half_clips:
-            # 50/50 split: B-roll top (from 0) + avatar bottom (video only)
+            # 50/50 split: B-roll top (looped to fill) + avatar bottom (seeked to seg).
             broll_clip = broll_half_clips[bi]
             _run(
-                [
-                    "ffmpeg", "-y",
-                    "-i", str(broll_clip),
-                    "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-                    "-i", str(avatar_half),
-                    "-filter_complex",
-                    "[0:v]tpad=stop_mode=clone:stop=-1[b];"
-                    "[b][1:v]vstack=inputs=2[outv]",
-                    "-map", "[outv]",
-                    "-t", f"{dur:.3f}",
-                    "-an",
-                    "-c:v", "libx264", "-preset", "medium", "-crf", "15",
-                    "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
-                    str(seg_out),
-                ],
+                _pro_split_seg_args(broll_clip, avatar_half, start, dur, seg_out),
                 f"pro: seg {si} split #{bi} ({dur:.1f}s)",
             )
 
