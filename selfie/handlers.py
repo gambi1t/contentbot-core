@@ -589,9 +589,17 @@ async def handle_music_callback(
 
     data = _PENDING.get(user_id)
     if not data or data.get("state") != "selfie_music_picking":
-        await query.edit_message_text(
-            "⚠️ Сессия selfie не найдена или закончилась. Начни заново через /selfie."
-        )
+        # Двойной тап «без музыки»: первый увёл flow дальше, дубль валит guard и
+        # бьёт в edit того же текста → Telegram BadRequest "not modified". Гасим
+        # ИМЕННО эту безвредную ошибку (дубль уже обработан), прочие пробрасываем.
+        from telegram.error import BadRequest
+        try:
+            await query.edit_message_text(
+                "⚠️ Сессия selfie не найдена или закончилась. Начни заново через /selfie."
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
         return True
 
     if action == "cat":
@@ -1099,6 +1107,15 @@ def _aivid_job_matches(data: dict, job_id: str) -> bool:
     return isinstance(entry, dict) and entry.get("id") == job_id
 
 
+def _aivid_done_text(added: int, generated: int) -> str:
+    """Result message for an AI-video run: clean (no per-file list — Артём счёл
+    имена ai_NN бесполезными), honest only when paid clips didn't all fit."""
+    txt = f"✅ Готово — создано {added} AI-видео-клип(а)."
+    if added < generated:
+        txt += f" (Сгенерировано и оплачено {generated}, в лимит влезло {added}.)"
+    return txt + " Добавь ещё B-roll или жми «Готово»."
+
+
 async def handle_broll_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
@@ -1380,16 +1397,9 @@ async def handle_broll_callback(
         if added < len(clips):
             _LOGGER.warning(
                 f"[selfie/aivid] user={user_id} discarded {len(clips) - added} PAID clips (free_now={free_now})")
-        extra = "" if added >= len(clips) else (
-            f" Сгенерировано {len(clips)} (оплачено), но в лимит влезло {added} — "
-            "остальные не добавил."
-        )
         await context.bot.send_message(
             chat_id=chat_id,
-            text=(
-                f"🎬 Готово — добавил {added} AI-видео-клип(а).{extra}\n\n"
-                + selfie_broll.build_picker_message(items)
-            ),
+            text=_aivid_done_text(added, len(clips)),
             reply_markup=selfie_broll.build_picker_keyboard(items),
         )
         return True

@@ -161,10 +161,10 @@ def plan_clips(script_text: str, claude, max_clips: int = MAX_CLIPS) -> list[dic
 
 # --- Engine ---------------------------------------------------------------
 
-# Verified fal.ai price for Seedance Pro Fast (1080p, 2026-06-17). fal does not
-# return per-call cost, so the engine estimates from this published rate; the
-# future себестоимость layer reuses the same number.
-SEEDANCE_PRICE_PER_5S_USD = 0.245
+# fal.ai price for Seedance Pro Fast, per 5s, at SEEDANCE_RESOLUTION (720p).
+# Token-priced (∝ pixels): 1080p≈$0.245 (verified live), 720p = ×(720·1280)/(1080·1920)=×4/9≈$0.11.
+# fal returns no per-call cost → engine estimates from this; себестоимость-фаза reuses it.
+SEEDANCE_PRICE_PER_5S_USD = 0.11
 
 CLIPS_SUBDIR = "aivideo"   # own namespace, parallel to Remotion (autobroll/) & HF (hyperframes/)
 

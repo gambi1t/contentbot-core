@@ -20,15 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 def test_estimate_cost_range_5s():
     import ai_video_broll
     lo, hi = ai_video_broll.estimate_cost_range(5)
-    assert lo == pytest.approx(2 * 0.245)   # MIN_CLIPS
-    assert hi == pytest.approx(4 * 0.245)   # MAX_CLIPS
+    assert lo == pytest.approx(2 * 0.11)    # MIN_CLIPS @ 720p price
+    assert hi == pytest.approx(4 * 0.11)    # MAX_CLIPS
 
 
 def test_estimate_cost_range_10s():
     import ai_video_broll
     lo, hi = ai_video_broll.estimate_cost_range(10)
-    assert lo == pytest.approx(2 * 2 * 0.245)
-    assert hi == pytest.approx(4 * 2 * 0.245)
+    assert lo == pytest.approx(2 * 2 * 0.11)
+    assert hi == pytest.approx(4 * 2 * 0.11)
 
 
 # ── busy-guard with staleness (prevents double-paid start + restart lockout) ──
@@ -66,6 +66,23 @@ def test_aivid_job_matches():
     assert handlers._aivid_job_matches(data, "abc") is True
     assert handlers._aivid_job_matches(data, "xyz") is False
     assert handlers._aivid_job_matches({}, "abc") is False
+
+
+# ── result message: clean, no per-file list (Артём 18 июня) ──────────────────
+
+def test_aivid_done_text_all_added_is_clean():
+    from selfie import handlers
+    t = handlers._aivid_done_text(4, 4)
+    assert "создано 4" in t
+    assert "ai_0" not in t and "[AI-видео]" not in t   # no useless filenames
+    assert "Сгенерировано" not in t                     # no paid-note when all fit
+
+
+def test_aivid_done_text_partial_is_honest():
+    from selfie import handlers
+    t = handlers._aivid_done_text(2, 4)
+    assert "создано 2" in t
+    assert "4" in t and "оплачено" in t                 # honest about paid-but-unused
 
 
 if __name__ == "__main__":

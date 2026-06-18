@@ -75,7 +75,7 @@ def test_seedance_arguments_shape(monkeypatch, tmp_path):
     assert args["prompt"] == "p"
     assert args["duration"] == "10"        # str, like Kling
     assert args["aspect_ratio"] == "9:16"
-    assert args["resolution"] == "1080p"   # required by Seedance fal schema
+    assert args["resolution"] == "720p"    # default: cheaper (~4/9 of 1080p), montage upscales
 
 
 # ── output path control (engine owns the namespace) ──────────────────────────

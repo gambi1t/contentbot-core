@@ -68,8 +68,8 @@ def test_engine_cost_scales_with_count_and_duration(monkeypatch, tmp_path):
     _patch_director(monkeypatch, 3)
     _patch_seedance(monkeypatch)
     _, cost = ai_video_broll.generate_ai_broll("s", tmp_path, claude=object(), duration=10)
-    # 3 clips * (10/5) * $0.245 (verified fal price) = 1.47
-    assert cost == pytest.approx(1.47)
+    # 3 clips * (10/5) * $0.11 (720p price) = 0.66
+    assert cost == pytest.approx(0.66)
 
 
 # ── resilience ────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ def test_engine_partial_when_some_clips_fail(monkeypatch, tmp_path):
     _patch_seedance(monkeypatch, fail_calls=(2,))   # 2nd clip fails
     paths, cost = ai_video_broll.generate_ai_broll("s", tmp_path, claude=object(), duration=5)
     assert len(paths) == 2                          # the two that succeeded
-    assert cost == pytest.approx(2 * 0.245)         # cost only for delivered clips
+    assert cost == pytest.approx(2 * 0.11)          # cost only for delivered clips (720p)
 
 
 def test_engine_raises_when_all_clips_fail(monkeypatch, tmp_path):
