@@ -7,6 +7,8 @@ Public API:
                    aspect="9:16")
     generate_video_from_image(prompt, image,    -> str | None   (path to MP4)
                               duration=5)
+    generate_seedance_video(prompt, dest,        -> str | None   (path to MP4)
+                            duration=5, aspect="9:16")
 
 Env:
     FAL_KEY — required; if missing, every call returns None (caller decides fallback).
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 import urllib.request
 from datetime import datetime
@@ -40,9 +43,15 @@ MEDIA_ROOT = Path(__file__).parent / "media" / "fal"
 IMAGE_ENDPOINT = "fal-ai/nano-banana-pro"
 VIDEO_T2V_ENDPOINT = "fal-ai/kling-video/v3/pro/text-to-video"
 VIDEO_I2V_ENDPOINT = "fal-ai/kling-video/v3/pro/image-to-video"
+SEEDANCE_T2V_ENDPOINT = "fal-ai/bytedance/seedance/v1/pro/fast/text-to-video"
 
 SUPPORTED_DURATIONS = (5, 10)
 SUPPORTED_ASPECTS = ("9:16", "16:9", "1:1")
+SEEDANCE_DURATIONS = (5, 10)        # user-facing subset (model accepts 2-12)
+SEEDANCE_RESOLUTION = "1080p"       # required by Seedance fal schema (token-priced)
+SEEDANCE_TIMEOUT_S = 900            # hard deadline for fal subscribe (paid cloud call must not hang)
+SEEDANCE_DOWNLOAD_TIMEOUT_S = 120   # socket timeout for clip download
+SEEDANCE_MIN_BYTES = 50_000         # below this the "mp4" is an error page / truncated → reject
 
 Duration = Literal[5, 10]
 Aspect = Literal["9:16", "16:9", "1:1"]
@@ -74,6 +83,27 @@ def _out_path(kind: str, ext: str) -> Path:
 def _download(url: str, dest: Path) -> Path:
     urllib.request.urlretrieve(url, dest)
     return dest
+
+
+def seedance_ready() -> "tuple[bool, str]":
+    """Cheap preflight: is Seedance callable right now? (FAL_KEY + fal_client).
+
+    Lets the engine fail fast with a clear reason BEFORE spending the Claude
+    director call.
+    """
+    if not _is_configured():
+        return False, "FAL_KEY not configured"
+    try:
+        import fal_client  # noqa: F401
+    except ImportError:
+        return False, "fal-client not installed"
+    return True, ""
+
+
+def _download_timeout(url: str, dest: "str | Path") -> None:
+    """Download url → dest with connect/read timeout (Seedance is paid — never hang)."""
+    with urllib.request.urlopen(url, timeout=SEEDANCE_DOWNLOAD_TIMEOUT_S) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
 
 
 # --- Public API -----------------------------------------------------------
@@ -252,4 +282,81 @@ def generate_video_from_image(
         return None
 
     logger.info(f"fal_media: i2v ready in {time.time()-t0:.1f}s → {dest}")
+    return str(dest)
+
+
+def generate_seedance_video(
+    prompt: str,
+    dest: "str | Path",
+    duration: Duration = 5,
+    aspect: Aspect = "9:16",
+) -> Optional[str]:
+    """Generate one cinematic clip via ByteDance Seedance Pro Fast (text-to-video).
+
+    Unlike generate_video (Kling), the caller passes `dest` — the engine owns
+    the output namespace (e.g. proj/aivideo/ai_01.mp4). Returns the path str or
+    None on any failure (callers must handle None gracefully — see module docstring).
+    """
+    if not _is_configured():
+        logger.warning("fal_media.generate_seedance_video: FAL_KEY missing, skipping")
+        return None
+    if duration not in SEEDANCE_DURATIONS:
+        logger.error(f"fal_media.generate_seedance_video: bad duration {duration!r} (supported: {SEEDANCE_DURATIONS})")
+        return None
+    if aspect not in SUPPORTED_ASPECTS:
+        logger.error(f"fal_media.generate_seedance_video: bad aspect {aspect!r}")
+        return None
+
+    try:
+        import fal_client
+    except ImportError:
+        logger.error("fal_media.generate_seedance_video: fal-client not installed")
+        return None
+
+    dest = Path(dest)
+    t0 = time.time()
+    logger.info(
+        f"fal_media: seedance {duration}s {aspect} prompt={prompt[:80]!r} "
+        f"key={_safe_key_preview()}"
+    )
+
+    try:
+        result = fal_client.subscribe(
+            SEEDANCE_T2V_ENDPOINT,
+            arguments={
+                "prompt": prompt,
+                "duration": str(duration),
+                "resolution": SEEDANCE_RESOLUTION,
+                "aspect_ratio": aspect,
+            },
+            with_logs=False,
+            start_timeout=SEEDANCE_TIMEOUT_S,
+            client_timeout=SEEDANCE_TIMEOUT_S,
+        )
+    except Exception as e:
+        logger.error(f"fal_media.generate_seedance_video: API error: {type(e).__name__}: {str(e)[:200]}")
+        return None
+
+    video = result.get("video") or {}
+    url = video.get("url") if isinstance(video, dict) else None
+    if not url:
+        logger.error(f"fal_media.generate_seedance_video: no video.url in result: {result!r}")
+        return None
+
+    # Atomic + validated: download to .part, reject tiny/broken (error pages), then rename.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        _download_timeout(url, part)
+    except Exception as e:
+        logger.error(f"fal_media.generate_seedance_video: download failed: {e}")
+        part.unlink(missing_ok=True)
+        return None
+    if part.stat().st_size < SEEDANCE_MIN_BYTES:
+        logger.error(f"fal_media.generate_seedance_video: download too small ({part.stat().st_size}B) — likely broken")
+        part.unlink(missing_ok=True)
+        return None
+    part.replace(dest)
+
+    logger.info(f"fal_media: seedance ready in {time.time()-t0:.1f}s → {dest}")
     return str(dest)

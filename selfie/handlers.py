@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -1070,6 +1071,34 @@ def _drop_gen_dir(data: dict, gen_dir) -> None:
         pass
 
 
+AIVID_STALE_SEC = 900   # a live AI-video gen can't run longer than this; older key = stale
+
+
+def _aivid_inflight(data: dict, now: float, stale_sec: float = AIVID_STALE_SEC) -> bool:
+    """Is a paid AI-video generation currently in flight for this user?
+
+    Guards against a double-paid start. Time-based: a key persisted to disk and
+    orphaned by a bot restart goes stale instead of locking the user out forever.
+    """
+    entry = data.get("selfie_aivid_job_id")
+    if not isinstance(entry, dict):
+        return False
+    ts = entry.get("ts")
+    if not isinstance(ts, (int, float)):
+        return False
+    return (now - ts) <= stale_sec
+
+
+def _aivid_job_matches(data: dict, job_id: str) -> bool:
+    """Does the in-pending AI-video job still belong to this generation?
+
+    False if a newer aivid run replaced the key, or cancel/skip cleared it — in
+    both cases this run's (already-paid) clips must NOT be applied.
+    """
+    entry = data.get("selfie_aivid_job_id")
+    return isinstance(entry, dict) and entry.get("id") == job_id
+
+
 async def handle_broll_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
@@ -1104,6 +1133,9 @@ async def handle_broll_callback(
         # No B-roll → straight to music picker (legacy Pipeline 1 flow).
         data["state"] = "selfie_music_picking"
         data["selfie_broll_items"] = []
+        # Clear any in-flight aivid key so its result is discarded (not applied
+        # from a dir _cleanup just rmtree'd → would crash on copy).
+        data.pop("selfie_aivid_job_id", None)
         _cleanup_selfie_gen_dirs(data)  # снять tmp AI-генерации, если была
         _SAVE_PENDING(_PENDING)
         await query.edit_message_text(
@@ -1212,6 +1244,150 @@ async def handle_broll_callback(
             chat_id=chat_id,
             text=(
                 f"🎨 Готово — добавил {added} AI-сцен{capped}.\n\n"
+                + selfie_broll.build_picker_message(items)
+            ),
+            reply_markup=selfie_broll.build_picker_keyboard(items),
+        )
+        return True
+
+    # «🎬 AI-видео по сценарию» → Seedance генерит кинематографичные клипы
+    # ИЗ ТЕКСТА селфи. Сначала спрашиваем длину 5/10с (как в /video).
+    if action == "aivideo":
+        import ai_video_broll
+        items = _items_from_pending(data)
+        free = selfie_broll.MAX_BROLL_ITEMS - len(items)
+        if free < ai_video_broll.MIN_CLIPS:
+            await query.edit_message_text(
+                f"Для AI-видео нужно ≥{ai_video_broll.MIN_CLIPS} свободных слота "
+                f"(сейчас {free}). Убери что-то из выбранного.",
+                reply_markup=selfie_broll.build_picker_keyboard(items),
+            )
+            return True
+        lo5, hi5 = ai_video_broll.estimate_cost_range(5)
+        lo10, hi10 = ai_video_broll.estimate_cost_range(10)
+        await query.edit_message_text(
+            "🎬 AI-видео по сценарию — выбери длину клипа (2-4 клипа на ролик):\n\n"
+            f"• 5 сек — для перебивок (~${lo5:.2f}-{hi5:.2f})\n"
+            f"• 10 сек — виден целиком в полноэкранных сегментах (smart/fullscreen/pro/ИИ), "
+            f"иначе обрежется (~${lo10:.2f}-{hi10:.2f})",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 5 сек", callback_data="selfie_broll:aivid:5"),
+                 InlineKeyboardButton("🎬 10 сек", callback_data="selfie_broll:aivid:10")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back")],
+            ]),
+        )
+        return True
+
+    # selfie_broll:aivid:<5|10> — запуск Seedance с выбранной длиной. Структура
+    # совпадает с «gen» (Remotion): тяжёлая генерация в to_thread, job_id-гард
+    # против смены флоу, клипы кладём как обычные video-B-roll items.
+    if action == "aivid":
+        import ai_video_broll
+        import uuid
+        duration = 10 if (len(parts) > 2 and parts[2] == "10") else 5
+        transcript = (data.get("selfie_edited") or data.get("selfie_transcript") or "").strip()
+        items = _items_from_pending(data)
+        free = selfie_broll.MAX_BROLL_ITEMS - len(items)
+        chat_id = query.message.chat_id
+        if not transcript:
+            await query.edit_message_text("⚠️ Нет текста для генерации AI-видео.")
+            return True
+        if free < ai_video_broll.MIN_CLIPS:
+            await query.edit_message_text(
+                f"Для AI-видео нужно ≥{ai_video_broll.MIN_CLIPS} свободных слота (сейчас {free}).",
+                reply_markup=selfie_broll.build_picker_keyboard(items),
+            )
+            return True
+        # Busy-guard: read+set are synchronous (no await between) → atomic vs a
+        # double-click. Timestamped so a restart-orphaned key goes stale, not locks.
+        now = time.time()
+        if _aivid_inflight(data, now):
+            await context.bot.send_message(
+                chat_id=chat_id, text="⏳ AI-видео уже генерится — дождись результата.")
+            return True
+        job_id = uuid.uuid4().hex[:12]
+        data["selfie_aivid_job_id"] = {"id": job_id, "ts": now}
+        max_clips = min(free, ai_video_broll.MAX_CLIPS)   # never plan/pay for more than fits
+        await query.edit_message_text(
+            f"🎬 Генерю AI-видео из текста (Seedance, ~{duration}с/клип)…\n"
+            "Несколько минут — рендер в облаке. Дождись, пришлю результат."
+        )
+        clips: list = []
+        cost = 0.0
+        gen_err = ""
+        gen_dir = Path(tempfile.mkdtemp(prefix=f"selfie_aivid_{user_id}_"))
+        data.setdefault("selfie_gen_dirs", []).append(str(gen_dir))
+        _SAVE_PENDING(_PENDING)
+        try:
+            clips, cost = await asyncio.to_thread(
+                ai_video_broll.generate_ai_broll, transcript, gen_dir, None, duration, None, max_clips,
+            )
+        except Exception as e:
+            _LOGGER.error(f"[selfie/aivid] ai_video_broll failed: {e}", exc_info=True)
+            clips = []
+            gen_err = str(e)[:150]
+        # Log spend regardless of whether the flow is still alive — the money is gone.
+        _LOGGER.info(f"[selfie/aivid] user={user_id} Seedance ~${cost:.2f} for {len(clips)} clips")
+
+        cur = _PENDING.get(user_id) or {}
+        _PICK_STATES = (
+            "selfie_broll_offer", "selfie_broll_picking",
+            "selfie_broll_uploading_photo", "selfie_broll_uploading_video",
+        )
+        if not _aivid_job_matches(cur, job_id) or cur.get("state") not in _PICK_STATES:
+            # newer run / cancel replaced our key — don't apply our (paid) clips.
+            # If the key is still OURS (only the state moved on), release it so the
+            # guard doesn't linger ~15 min; if a newer run owns it, leave it alone.
+            if _aivid_job_matches(cur, job_id):
+                cur.pop("selfie_aivid_job_id", None)
+            _drop_gen_dir(cur, gen_dir)
+            _SAVE_PENDING(_PENDING)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="ℹ️ Сценарий изменился за время генерации — AI-видео не применил.",
+            )
+            return True
+
+        if not clips:
+            cur.pop("selfie_aivid_job_id", None)   # clear so the user can retry (no lockout)
+            _drop_gen_dir(cur, gen_dir)
+            _SAVE_PENDING(_PENDING)
+            items = _items_from_pending(cur)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "❌ Не удалось сгенерировать AI-видео. "
+                    + (f"({gen_err}) " if gen_err else "")
+                    + "Попробуй ещё раз или выбери B-roll из библиотеки.\n\n"
+                    + selfie_broll.build_picker_message(items)
+                ),
+                reply_markup=selfie_broll.build_picker_keyboard(items),
+            )
+            return True
+
+        items = _items_from_pending(cur)
+        free_now = selfie_broll.MAX_BROLL_ITEMS - len(items)
+        added = 0
+        for clip in clips[:max(0, free_now)]:
+            _store_item(cur, selfie_broll.BrollItem(
+                kind="video", source=Path(clip), label=f"[AI-видео] {Path(clip).stem}",
+            ))
+            added += 1
+        cur.pop("selfie_aivid_job_id", None)
+        _SAVE_PENDING(_PENDING)
+        items = _items_from_pending(cur)
+        # Honest about paid-but-unused: clips are already generated & billed.
+        if added < len(clips):
+            _LOGGER.warning(
+                f"[selfie/aivid] user={user_id} discarded {len(clips) - added} PAID clips (free_now={free_now})")
+        extra = "" if added >= len(clips) else (
+            f" Сгенерировано {len(clips)} (оплачено), но в лимит влезло {added} — "
+            "остальные не добавил."
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🎬 Готово — добавил {added} AI-видео-клип(а).{extra}\n\n"
                 + selfie_broll.build_picker_message(items)
             ),
             reply_markup=selfie_broll.build_picker_keyboard(items),
