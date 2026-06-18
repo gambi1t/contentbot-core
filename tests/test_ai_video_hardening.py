@@ -167,7 +167,7 @@ def test_engine_threads_max_clips_and_caps_seedance_calls(monkeypatch, tmp_path)
     monkeypatch.setattr(ai_video_broll.fal_media, "seedance_ready", lambda: (True, ""))
     seen = {}
 
-    def director_spy(script, claude, max_clips=ai_video_broll.MAX_CLIPS):
+    def director_spy(script, claude, max_clips=ai_video_broll.MAX_CLIPS, target_clips=None):
         seen["max_clips"] = max_clips
         return [{"prompt": f"p{i}", "beat": "b"} for i in range(max_clips)]
 
@@ -190,7 +190,7 @@ def test_engine_forwards_prompt_and_duration_to_seedance(monkeypatch, tmp_path):
     import ai_video_broll
     monkeypatch.setattr(ai_video_broll.fal_media, "seedance_ready", lambda: (True, ""))
     monkeypatch.setattr(ai_video_broll, "plan_clips",
-                        lambda script, claude, max_clips=4: [{"prompt": "PROMPT_X", "beat": "b"}])
+                        lambda script, claude, max_clips=4, target_clips=None: [{"prompt": "PROMPT_X", "beat": "b"}])
     captured = {}
 
     def seedance(prompt, dest, duration=5, aspect="9:16"):

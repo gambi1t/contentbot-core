@@ -19,9 +19,10 @@ _MODE_LABELS = {
     SourceMode.UPLOAD:  "📤 Загрузить свои фото/видео",
     SourceMode.HF_ONLY: "🎨 Только графика — дольше (10-25 мин)",
     SourceMode.AUTO_HF: "🔀 Авто + графика — баланс (8-20 мин)",
+    SourceMode.AI_VIDEO: "🎬 AI-видео по сценарию (Seedance) — кинокадры",
 }
 _MODE_ORDER = (SourceMode.AUTO, SourceMode.MANUAL, SourceMode.UPLOAD,
-               SourceMode.HF_ONLY, SourceMode.AUTO_HF)
+               SourceMode.HF_ONLY, SourceMode.AUTO_HF, SourceMode.AI_VIDEO)
 
 _CB_PREFIX = "b2src"
 

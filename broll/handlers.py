@@ -52,7 +52,7 @@ DRAFTS_DIR = Path(__file__).resolve().parent.parent / "broll_drafts"
 # MANUAL (Вручную из библиотеки), HF_ONLY (только графика). AUTO_HF (микс) —
 # Фаза 3.
 _ENABLED_MODES = (SourceMode.AUTO, SourceMode.UPLOAD, SourceMode.MANUAL,
-                  SourceMode.HF_ONLY, SourceMode.AUTO_HF)
+                  SourceMode.HF_ONLY, SourceMode.AUTO_HF, SourceMode.AI_VIDEO)
 
 # State (в общем pending) для приёма загрузок / ручного выбора Pipeline 2.
 _UPLOAD_STATE = "broll2_uploading"
@@ -409,6 +409,76 @@ async def handle_broll_source(
         # Микс: пер-сценная пересборка не применима (позиции ≠ scene_NN) → regen=False.
         await _send_hf_preview(context, chat_id, draft, draft_id,
                                with_clips=True, regen=False)
+        return
+
+    if mode == SourceMode.AI_VIDEO:
+        # Фуллскрин Seedance. Экран подтверждения: число клипов под длину озвучки
+        # (оценка из слов) + цена → запуск (b2src:ai_video_go). Без зацикливания —
+        # генерим с запасом, ассемблер подрежет последний.
+        import ai_video_broll
+        plan = ai_video_broll.fullscreen_plan(draft.script_text)
+        await q.edit_message_text(
+            f"🎬 AI-видео по сценарию (Seedance)\n\n"
+            f"Сценарий ~{plan['est_sec']:.0f}с → сгенерирую {plan['n_clips']} клипов "
+            f"по {plan['clip_len']}с (~${plan['cost']:.2f}).\n"
+            f"Голос (свой/AI) + субтитры + музыка — как обычно.\n\n"
+            f"Несколько минут на генерацию. Запустить?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    f"🚀 Запустить ({plan['n_clips']} клипов ~${plan['cost']:.2f})",
+                    callback_data=f"b2src:{SourceMode.AI_VIDEO_GO}:{draft_id}")],
+                [InlineKeyboardButton(
+                    "⬅️ К источникам",
+                    callback_data=f"b2src:{SourceMode.AI_VIDEO_MENU}:{draft_id}")],
+            ]),
+        )
+        return
+
+    if mode == SourceMode.AI_VIDEO_MENU:
+        # «Назад к источникам» с экрана подтверждения — перерисовать меню.
+        await q.edit_message_text(
+            "Откуда взять видеоряд?",
+            reply_markup=source_menu_keyboard(draft_id, enabled_modes=_ENABLED_MODES),
+        )
+        return
+
+    if mode == SourceMode.AI_VIDEO_GO:
+        # Подтверждено — генерируем фуллскрин AI-видео (N клипов под длину).
+        from .draft import hf_items_from_clips
+        import ai_video_broll
+        plan = ai_video_broll.fullscreen_plan(draft.script_text)
+        work = DRAFTS_DIR.parent / "broll_runs" / draft_id
+        work.mkdir(parents=True, exist_ok=True)
+        draft.source_mode = SourceMode.AI_VIDEO
+        draft.status = Status.HF_RUNNING
+        draft.work_dir = str(work)
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        status = await context.bot.send_message(
+            chat_id, f"🎬 Генерирую AI-видео (Seedance): {plan['n_clips']} клипов по "
+                     f"{plan['clip_len']}с… Несколько минут.")
+        try:
+            clips, _cost = await asyncio.to_thread(
+                ai_video_broll.generate_ai_broll, draft.script_text, work,
+                duration=plan["clip_len"], target_clips=plan["n_clips"])
+        except Exception as e:
+            logger.error(f"[broll] ai_video failed: {e}", exc_info=True)
+            await status.edit_text(f"⚠️ Не удалось сгенерировать AI-видео: {str(e)[:200]}")
+            return
+        items = hf_items_from_clips(clips)
+        if not items:
+            await status.edit_text("⚠️ AI-видео не сгенерировалось. Попробуй повторить.")
+            return
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        draft.source_items = items
+        draft.status = Status.PREVIEW_READY
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        await asyncio.to_thread(materialize_items, items, draft.work_dir)
+        await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True, regen=False)
         return
 
     # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.

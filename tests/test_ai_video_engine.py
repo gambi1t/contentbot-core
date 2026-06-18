@@ -17,7 +17,7 @@ def _patch_director(monkeypatch, n):
     import ai_video_broll
     monkeypatch.setattr(
         ai_video_broll, "plan_clips",
-        lambda script, claude, max_clips=ai_video_broll.MAX_CLIPS:
+        lambda script, claude, max_clips=ai_video_broll.MAX_CLIPS, target_clips=None:
             [{"beat": f"b{i}", "prompt": f"p{i}"} for i in range(n)],
     )
 

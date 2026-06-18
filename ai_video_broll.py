@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 
@@ -123,16 +124,26 @@ def _release_director_lock(handle) -> None:
         pass
 
 
-def plan_clips(script_text: str, claude, max_clips: int = MAX_CLIPS) -> list[dict]:
-    """Turn a voiceover script into up to `max_clips` Seedance prompts via the LLM director.
+def plan_clips(script_text: str, claude, max_clips: int = MAX_CLIPS,
+               target_clips: int | None = None) -> list[dict]:
+    """Turn a voiceover script into Seedance prompts via the LLM director.
 
-    `claude` is injected (SubscriptionClient / anthropic.Anthropic). Returns a list
-    of {"beat", "prompt"} dicts. Retries once on malformed/insufficient output OR a
-    transient create() error, adding repair-feedback on the retry; raises AiVideoError
-    if it still fails. The Claude call is serialised via the shared gen-flock.
+    Phase 1 (cutaways): `target_clips=None` → "2-4 бита, сам реши" (unchanged).
+    Phase 2 (fullscreen): `target_clips=N` → ровно ~N бит, чтобы покрыть всю озвучку.
+    `claude` is injected. Retries once on malformed/insufficient/transient output with
+    repair-feedback; raises AiVideoError if it still fails. Claude call under gen-flock.
     """
-    base = f"{_DIRECTOR_PROMPT}\n{script_text}"
-    min_clips = min(MIN_CLIPS, max_clips)
+    if target_clips:
+        max_clips = target_clips
+        min_clips = max(2, target_clips - 1)
+        count_note = (
+            f"\n\nВАЖНО: это фуллскрин-ролик — сделай РОВНО {target_clips} бит/клипа "
+            f"(они покрывают всю озвучку по порядку), НЕ 2-4."
+        )
+    else:
+        min_clips = min(MIN_CLIPS, max_clips)
+        count_note = ""
+    base = f"{_DIRECTOR_PROMPT}{count_note}\n{script_text}"
     last_err: Exception | None = None
     flock = _acquire_director_lock()
     try:
@@ -179,6 +190,37 @@ def estimate_cost_range(duration: int) -> "tuple[float, float]":
     return MIN_CLIPS * per_clip, MAX_CLIPS * per_clip
 
 
+# --- Fullscreen (Pipeline 2): clip count from estimated voiceover length ---
+
+WORDS_PER_MIN = 150   # rough speech rate for estimating voiceover length before it's rendered
+
+
+def estimate_voiceover_sec(script_text: str) -> float:
+    """Грубая оценка длины озвучки из числа слов (озвучка генерится ПОЗЖЕ клипов,
+    точной длины ещё нет). ~150 слов/мин."""
+    words = len((script_text or "").split())
+    return words / WORDS_PER_MIN * 60.0
+
+
+def clips_needed(est_sec: float, clip_len: float, buffer: int = 1) -> int:
+    """Сколько клипов сгенерить, чтобы покрыть est_sec при длине clip_len, +запас.
+    Чуть с перебором — ассемблер подрежет последний под реальную озвучку (без кругов)."""
+    n = math.ceil(est_sec / clip_len) + buffer if est_sec > 0 else MIN_CLIPS
+    return max(MIN_CLIPS, n)
+
+
+FULLSCREEN_CLIP_LEN = 10   # дефолт для фуллскрина: 10с раскрывает мульти-шот, вдвое меньше вызовов
+
+
+def fullscreen_plan(script_text: str, clip_len: int = FULLSCREEN_CLIP_LEN) -> dict:
+    """План фуллскрин-ролика для экрана подтверждения: число клипов под длину
+    озвучки (оценка) + стоимость. Возвращает {n_clips, est_sec, clip_len, cost}."""
+    est = estimate_voiceover_sec(script_text)
+    n = clips_needed(est, clip_len)
+    cost = n * (clip_len / 5.0) * SEEDANCE_PRICE_PER_5S_USD
+    return {"n_clips": n, "est_sec": est, "clip_len": clip_len, "cost": cost}
+
+
 def _notify(progress_cb, msg: str) -> None:
     """Fire a progress message; a broken callback must never break generation."""
     if progress_cb is None:
@@ -203,7 +245,7 @@ def _default_claude():
 
 
 def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb=None,
-                      max_clips=MAX_CLIPS):
+                      max_clips=MAX_CLIPS, target_clips=None):
     """Script -> cinematic Seedance clips. Returns (list[Path], cost_usd).
 
     Same contract as generate_hyperframes_broll / generate_auto_broll. Clips land
@@ -221,7 +263,7 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
     clips_dir = Path(out_dir) / CLIPS_SUBDIR
 
     _notify(progress_cb, "🎬 Режиссёр придумывает раскадровку…")
-    plans = plan_clips(script_text, claude, max_clips=max_clips)
+    plans = plan_clips(script_text, claude, max_clips=max_clips, target_clips=target_clips)
 
     _notify(progress_cb, f"🎥 Генерю {len(plans)} кинематографичных клипа (Seedance, ~{duration}с)…")
     paths: list[Path] = []

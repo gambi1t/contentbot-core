@@ -52,7 +52,10 @@ class SourceMode:
     UPLOAD = "upload"
     HF_ONLY = "hf_only"
     AUTO_HF = "auto_hf"
-    ALL = (AUTO, MANUAL, UPLOAD, HF_ONLY, AUTO_HF)
+    AI_VIDEO = "ai_video"            # фуллскрин Seedance — кнопка в меню
+    AI_VIDEO_GO = "ai_video_go"      # «Запустить» с экрана подтверждения (не в меню)
+    AI_VIDEO_MENU = "ai_video_menu"  # «Назад к источникам» (не в меню)
+    ALL = (AUTO, MANUAL, UPLOAD, HF_ONLY, AUTO_HF, AI_VIDEO, AI_VIDEO_GO, AI_VIDEO_MENU)
 
 
 @dataclass
