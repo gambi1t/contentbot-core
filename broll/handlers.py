@@ -730,6 +730,7 @@ async def accept_broll_voiceover(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int | None = None,
     status_fn=None,
+    deliver_fn=None,
 ) -> None:
     """b2vop:accept → озвучка принята: собрать ролик, ПЕРЕИСПОЛЬЗУЯ уже
     сгенерённый mp3 через voiceover_fn-шим (copyfile) — как own-voice. assemble
@@ -749,7 +750,8 @@ async def accept_broll_voiceover(
         shutil.copyfile(mp3, out_path)
 
     await assemble_broll_from_draft(
-        update, context, _reuse_voiceover, chat_id=chat_id, status_fn=status_fn)
+        update, context, _reuse_voiceover, chat_id=chat_id, status_fn=status_fn,
+        deliver_fn=deliver_fn)
 
 
 async def regen_broll_voiceover(
@@ -1494,6 +1496,7 @@ async def assemble_broll_from_draft(
     voiceover_fn,
     chat_id: int | None = None,
     status_fn=None,
+    deliver_fn=None,
 ) -> None:
     """Фаза 2: озвучка → ffmpeg-монтаж → субтитры → отправка MP4.
 
@@ -1602,17 +1605,34 @@ async def assemble_broll_from_draft(
             f"Без аватара.\n\n"
             f"<i>Можно публиковать в Reels / TikTok / Shorts.</i>"
         )
-        with open(final_path, "rb") as vf:
-            await context.bot.send_video(
+        # Доставка финала (фикс 413-краша): deliver_fn = документ ≤48МБ / ссылка / None.
+        # Файл уже в broll_finals (гейт 4) — переживает rmtree даже при сбое доставки.
+        delivered = None
+        if deliver_fn:
+            try:
+                delivered = await deliver_fn(chat_id, str(final_path), caption)
+            except Exception as e:
+                logger.error(f"[broll] доставка упала (хвост не прерываем): {e}", exc_info=True)
+        else:
+            # Легаси-дефолт (совместимость/тесты): send_video, но обёрнут — без 413-краша.
+            try:
+                with open(final_path, "rb") as vf:
+                    await context.bot.send_video(
+                        chat_id=chat_id, video=vf, caption=caption,
+                        parse_mode="HTML", supports_streaming=True,
+                    )
+                delivered = "video"
+            except Exception as e:
+                logger.error(f"[broll] legacy send_video упал (хвост не прерываем): {e}", exc_info=True)
+        if delivered is None:
+            await context.bot.send_message(
                 chat_id=chat_id,
-                video=vf,
-                caption=caption,
-                parse_mode="HTML",
-                supports_streaming=True,
+                text="⚠️ Ролик собран, но доставить в чат не удалось. Файл сохранён — "
+                     "попробуй «🖼 Сделать обложку» ниже или пересобери.",
             )
 
-        # Карточка на Kanban → «Готово к публикации» (ролик собран = идея реализована).
-        if notion_page_id and status_fn:
+        # Карточка на Kanban → «Готово к публикации» — ТОЛЬКО если доставка прошла.
+        if notion_page_id and status_fn and delivered:
             try:
                 await asyncio.to_thread(status_fn, notion_page_id, "Готово к публикации")
             except Exception as e:

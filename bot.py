@@ -3943,6 +3943,44 @@ def save_media_permanent(source_path: str, prefix: str = "file") -> str:
     return f"{MEDIA_BASE_URL}/{filename}"
 
 
+_BROLL_TG_DOC_LIMIT = 48 * 1024 * 1024  # запас под ~50МБ лимит Bot API (как MAX_BOT_UPLOAD)
+
+
+async def _broll_deliver(tg_bot, chat_id: int, path: str, caption: str):
+    """Безопасная финальная отдача B-roll-ролика (фикс 413-краша). Лесенка —
+    реюз карточного пути: ≤48 МБ → документом (макс. качество, Telegram НЕ
+    транскодит); >48 МБ или сбой send_document → nginx-ссылка (без пережатия);
+    полный сбой → None (вызывающий сообщит честно, файл уже в broll_finals).
+    Возвращает 'document' | 'link' | None."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    if 0 < size <= _BROLL_TG_DOC_LIMIT:
+        try:
+            with open(path, "rb") as f:
+                await tg_bot.send_document(
+                    chat_id=chat_id, document=f, filename=Path(path).name,
+                    caption=caption, parse_mode="HTML",
+                    read_timeout=300, write_timeout=300,
+                )
+            return "document"
+        except Exception as e:
+            logger.warning(f"[broll] send_document не прошёл, fallback на ссылку: {e}")
+    # >48 МБ или документ не ушёл → публичная ссылка (полное качество, без пережатия).
+    try:
+        link = await asyncio.to_thread(save_media_permanent, str(path), "broll_final")
+        await tg_bot.send_message(
+            chat_id=chat_id,
+            text=f"{caption}\n\n📎 Файл крупный — без сжатия по ссылке:\n{link}",
+            parse_mode="HTML",
+        )
+        return "link"
+    except Exception as e:
+        logger.error(f"[broll] доставка полностью не удалась: {e}", exc_info=True)
+        return None
+
+
 # --- Notion helpers ---
 def create_notion_card(card_data: dict, script_text: str, cover_url: str = None,
                        source_urls: list = None, youtube_urls: list = None) -> tuple[str, str]:
@@ -9686,10 +9724,13 @@ async def _consume_broll_ownvoice(update: Update, context: ContextTypes.DEFAULT_
     def _own_voiceover(_script, out_path):
         _sh.copyfile(mp3, out_path)
 
+    async def _bdeliver(_cid, _path, _cap):
+        return await _broll_deliver(context.bot, _cid, _path, _cap)
+
     from broll.handlers import assemble_broll_from_draft
     await assemble_broll_from_draft(
         update, context, _own_voiceover, chat_id=update.effective_chat.id,
-        status_fn=update_notion_status)
+        status_fn=update_notion_status, deliver_fn=_bdeliver)
 
 
 async def _consume_selfvoice_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12924,10 +12965,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
+        async def _bdeliver(_cid, _path, _cap):
+            return await _broll_deliver(context.bot, _cid, _path, _cap)
         from broll.handlers import accept_broll_voiceover
         await accept_broll_voiceover(
             update, context, chat_id=query.message.chat_id,
-            status_fn=update_notion_status)
+            status_fn=update_notion_status, deliver_fn=_bdeliver)
         return
 
     if query.data == "b2vop:regen":
