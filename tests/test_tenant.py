@@ -327,6 +327,56 @@ def test_brand_allowed():
     _assert(tenant.brand_allowed({}, "maksim") is True, "без конфига → все разрешены")
 
 
+# ── Phase 3 A2: callback feature-gate (Seedance / Pipeline 2) ────────────────
+_A2_FMAP = {
+    "card_aivideo": "ai_video",
+    "selfie_broll:aivid": "ai_video",
+    "b2src:ai_video": "ai_video",
+    "b2src:": "broll_pipeline",
+    "b2mus:": "broll_pipeline",
+}
+
+
+def test_cb_gate_ai_video_off_blocks_seedance():
+    print("\n-- callback gate: ai_video off → Seedance-кнопки блок --")
+    t = {"features": {"ai_video": False, "broll_pipeline": True}}
+    _assert(tenant.callback_feature_blocked("card_aivideo:x", t, _A2_FMAP) == "ai_video",
+            "card_aivideo блок (ai_video off)")
+    _assert(tenant.callback_feature_blocked("selfie_broll:aivid:5", t, _A2_FMAP) == "ai_video",
+            "selfie_broll:aivid блок (ловит и aivideo, и aivid:N)")
+
+
+def test_cb_gate_pipeline2_seedance_double_gate():
+    print("\n-- callback gate: Pipeline2 on + ai_video off → Seedance в Pipeline2 блок (money-leak guard) --")
+    t = {"features": {"ai_video": False, "broll_pipeline": True}}
+    _assert(tenant.callback_feature_blocked("b2src:ai_video:d1", t, _A2_FMAP) == "ai_video",
+            "b2src:ai_video блок по ai_video даже если pipeline on")
+
+
+def test_cb_gate_pipeline2_off_blocks_all():
+    print("\n-- callback gate: broll_pipeline off → весь Pipeline2 блок --")
+    t = {"features": {"ai_video": True, "broll_pipeline": False}}
+    _assert(tenant.callback_feature_blocked("b2src:ai_video:d1", t, _A2_FMAP) is not None,
+            "b2src:ai_video блок (pipeline off)")
+    _assert(tenant.callback_feature_blocked("b2mus:cat:d1", t, _A2_FMAP) == "broll_pipeline",
+            "b2mus блок (pipeline off)")
+
+
+def test_cb_gate_all_on_passes():
+    print("\n-- callback gate: обе фичи on → проходит --")
+    t = {"features": {"ai_video": True, "broll_pipeline": True}}
+    _assert(tenant.callback_feature_blocked("b2src:ai_video:d1", t, _A2_FMAP) is None, "Seedance в Pipeline2 проходит")
+    _assert(tenant.callback_feature_blocked("card_aivideo:x", t, _A2_FMAP) is None, "card_aivideo проходит")
+    _assert(tenant.callback_feature_blocked("b2mus:cat", t, _A2_FMAP) is None, "b2mus проходит")
+
+
+def test_cb_gate_unrelated_passes():
+    print("\n-- callback gate: несвязанный callback не трогается --")
+    t = {"features": {"ai_video": False, "broll_pipeline": False}}
+    _assert(tenant.callback_feature_blocked("selfie_text:ok", t, _A2_FMAP) is None, "selfie_text не блок")
+    _assert(tenant.callback_feature_blocked("", t, _A2_FMAP) is None, "пустой callback не блок")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} tenant tests\n{'='*60}")

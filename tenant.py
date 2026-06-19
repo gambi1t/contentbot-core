@@ -67,6 +67,8 @@ _KNOWN_FEATURES = frozenset({
     "instagram_dm",     # comment-to-DM воронка
     "billing",          # биллинг-гейт + баланс
     "subscriber_stats", # /update + /report — замеры подписчиков (личный бренд)
+    "ai_video",         # Seedance (AI-видео из сценария, fal.ai — платный provider)
+    "broll_pipeline",   # Pipeline 2 — B-roll монтаж БЕЗ аватара (своя state-machine)
 })
 
 
@@ -115,6 +117,24 @@ def feature_blocked(tenant: dict, name: str) -> bool:
     if not isinstance(feats, dict) or not feats:
         return False
     return feats.get(name) is False
+
+
+def callback_feature_blocked(callback_data: str, tenant: dict, feature_map: dict) -> str | None:
+    """Какая опц-фича блокирует этот callback (или None). Логика gate в
+    handle_callback вынесена сюда (Phase 3 A2) для тестируемости.
+
+    Проверяет ВСЕ префиксы feature_map, под которые подпадает callback —
+    callback может матчить несколько (напр. ``b2src:ai_video`` → и
+    ``broll_pipeline``, и ``ai_video``); блок при ЛЮБОМ заблокированном
+    (money-leak guard: Seedance в Pipeline-2 закрыт, даже если broll_pipeline
+    включён, а ai_video — нет). Возвращает имя первой блокирующей фичи (для
+    сообщения юзеру), иначе None.
+    """
+    data = callback_data or ""
+    for pref, feat in feature_map.items():
+        if data.startswith(pref) and feature_blocked(tenant, feat):
+            return feat
+    return None
 
 
 def _resolve_env(value):

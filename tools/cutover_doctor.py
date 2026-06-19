@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import sys
 
-# Чужие бренд-маркеры — в боевом env/tenant/prompts panferov их быть НЕ должно (N3).
+# Чужие бренд-маркеры — в боевом env/tenant/prompts panferov их быть НЕ должно
+# (N3 + C3/C7 ревью: + контекст картинг/глэмпинг Life Drive и оранжевый акцент
+# Максима #ff5722 — протечка в HF/Remotion-промптах). НЕ включаем «Постулат» —
+# это бренд агентства самого Артёма, не чужой клиент.
 _FOREIGN_MARKERS = [
     "maksim", "lifedrive", "livedrive", "life drive", "live drive",
     "yumsunov", "юмсунов", "лайф драйв",
+    "karting", "картинг", "glamping", "глэмпинг", "#ff5722",
 ]
 
 # Минимальный набор зависимостей core, критичных для паритета фич Артёма.
@@ -30,7 +34,10 @@ REQUIRED_DEPS = {
     "requests-toolbelt": "1.0.0",
 }
 
-# Команды Артёма, закомментированные в core «под Максима» — должны быть активны.
+# Per-tenant команды. УСТАРЕЛО считать их «закомментированными под Максима»:
+# с Фазы 2 они зарегистрированы УСЛОВНО по features (bot.main():22056-22077).
+# Основная проверка теперь per-tenant (check_commands_per_tenant); это —
+# generic-fallback (все present в коде) когда tenant.json не передан.
 EXPECTED_COMMANDS = {"launches", "update", "report", "brand"}
 
 
@@ -41,6 +48,21 @@ def check_no_foreign_markers(text: str) -> list[str]:
     боевого конфига/env. Пусто = чисто."""
     low = (text or "").lower()
     return [m for m in _FOREIGN_MARKERS if m in low]
+
+
+def scan_texts_for_markers(named_texts: dict) -> dict:
+    """{name: text} → {name: [найденные маркеры]} только для файлов с хитами.
+
+    Anti-leakage (C3/C7 ревью): чужой бренд Максима в АКТИВНЫХ prompt/reference/
+    scene-файлах при tenant=panferov (HF reference_pack, Remotion-промпт/сцены).
+    Чисто → {}.
+    """
+    out = {}
+    for name, text in named_texts.items():
+        hits = check_no_foreign_markers(text or "")
+        if hits:
+            out[name] = hits
+    return out
 
 
 def check_billing_owner(rows: list[dict], expected_instance: str) -> dict:
@@ -94,6 +116,57 @@ def check_commands_registered(src: str, expected: set[str]) -> list[str]:
         if not active:
             missing.append(name)
     return sorted(missing)
+
+
+# Per-tenant команды (регистрируются условно по features — bot.main():22056-22077).
+_PER_TENANT_COMMANDS = ("update", "report", "launches", "brand")
+
+
+def expected_commands_for_tenant(tenant: dict) -> set[str]:
+    """Какие per-tenant команды ДОЛЖНЫ быть активны у этого тенанта (по features).
+    Зеркалит условия регистрации в bot.main() (C4 ревью):
+      subscriber_stats → update+report · launch_monitor → launches ·
+      brand_switch (>1 бренда) → brand.
+    """
+    import os
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import tenant as _t
+    exp: set[str] = set()
+    if not _t.feature_blocked(tenant, "subscriber_stats"):
+        exp |= {"update", "report"}
+    if not _t.feature_blocked(tenant, "launch_monitor"):
+        exp.add("launches")
+    if _t.brand_switch_available(tenant):
+        exp.add("brand")
+    return exp
+
+
+def _present_commands(src: str) -> set[str]:
+    """Какие per-tenant команды физически присутствуют в коде (строка
+    `CommandHandler("name"` без ведущего `#`)."""
+    return {name for name in _PER_TENANT_COMMANDS
+            if not check_commands_registered(src, {name})}
+
+
+def check_commands_per_tenant(src: str, tenant: dict) -> dict:
+    """Per-tenant вердикт по командам (C4 ревью): для каждой per-tenant команды —
+    expected (по features тенанта) vs present (в коде). Проблема ТОЛЬКО если
+    команда ожидается, но в коде отсутствует/закомментирована. Не ожидается
+    (фича выключена у тенанта) → ок, даже если строка есть в коде.
+
+    Returns {"rows": {cmd: {expected, present, ok}}, "problems": [...]}.
+    """
+    expected = expected_commands_for_tenant(tenant)
+    present = _present_commands(src)
+    rows, problems = {}, []
+    for cmd in _PER_TENANT_COMMANDS:
+        exp = cmd in expected
+        pres = cmd in present
+        rows[cmd] = {"expected": exp, "present": pres, "ok": (not exp) or pres}
+        if exp and not pres:
+            problems.append(f"{cmd}: expected (по features) но НЕ найдена в коде")
+    return {"rows": rows, "problems": problems}
 
 
 def check_files_present(states: dict) -> list[str]:
@@ -183,15 +256,30 @@ def _cli() -> int:
     except Exception as e:
         warns.append(f"[deps] проверка не удалась: {e}")
 
-    # 4) commands registered
+    # 4) commands — per-tenant (C4): expected по features tenant.json, не «есть/нет вообще»
     bot_py = args.bot_py or str(Path(args.state_root) / "bot.py")
     if Path(bot_py).is_file():
-        missing = check_commands_registered(
-            Path(bot_py).read_text(encoding="utf-8", errors="replace"), EXPECTED_COMMANDS)
-        if missing:
-            blockers.append(f"[commands] не зарегистрированы (закомментированы): {missing}")
+        src = Path(bot_py).read_text(encoding="utf-8", errors="replace")
+        _tcfg = None
+        if args.config and Path(args.config).is_file():
+            try:
+                _tcfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+            except Exception:
+                _tcfg = None
+        if _tcfg is not None:
+            v = check_commands_per_tenant(src, _tcfg)
+            for cmd, r in sorted(v["rows"].items()):
+                print(f"[commands] tenant={args.tenant} /{cmd}: expected={r['expected']} "
+                      f"registered={r['present']} {'OK' if r['ok'] else 'PROBLEM'}")
+            for pr in v["problems"]:
+                blockers.append(f"[commands] {pr}")
         else:
-            print(f"[commands] все активны: {sorted(EXPECTED_COMMANDS)}")
+            # fallback без tenant.json — generic-проверка (все per-tenant команды present)
+            missing = check_commands_registered(src, EXPECTED_COMMANDS)
+            if missing:
+                blockers.append(f"[commands] не найдены в коде: {missing}")
+            else:
+                print(f"[commands] все per-tenant команды present (generic): {sorted(EXPECTED_COMMANDS)}")
 
     # 5) files present (OAuth/telethon) — собрать states
     states = {}
@@ -245,6 +333,23 @@ def _cli() -> int:
                 print(f"[config] tenant.json валиден (strict, expected={args.tenant})")
         except Exception as e:
             blockers.append(f"[config] {e}")
+
+    # 7) anti-leakage scan активных prompt/reference/scene (C3/C7) — для panferov
+    # Чужой бренд Максима в дефолтных (активных при отсутствии panferov-варианта)
+    # файлах = warn на паритете (движки OFF), станет blocker-гейтом в срезе C
+    # перед включением HF/Remotion.
+    if args.tenant == "panferov":
+        named = {}
+        for rel in ["hyperframes_assets/reference_pack.md", "auto_broll.py"]:
+            f = root / rel
+            if f.is_file():
+                named[rel] = f.read_text(encoding="utf-8", errors="replace")
+        hits = scan_texts_for_markers(named)
+        if hits:
+            for name, ms in hits.items():
+                warns.append(f"[leakage] {name}: чужой бренд {ms} — нужен panferov-вариант ДО включения HF/Remotion")
+        elif named:
+            print(f"[leakage] активные prompt/reference чисты: {sorted(named)}")
 
     print("\n" + "=" * 60)
     if warns:

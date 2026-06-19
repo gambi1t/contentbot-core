@@ -175,6 +175,80 @@ def test_token_unknown_no_fields():
     _assert(v["level"] == "warn", "unknown → warn (ручная проверка)")
 
 
+# ── 7. expected_commands_for_tenant + per-tenant вывод (C4 ревью) ────────────
+_PANFEROV_T = {"tenant_id": "panferov",
+               "features": {"subscriber_stats": True, "launch_monitor": True},
+               "brands": {"allowed": ["default", "shoes"]}}
+_MAKSIM_T = {"tenant_id": "maksim",
+             "features": {"subscriber_stats": False, "launch_monitor": False},
+             "brands": {"allowed": ["maksim"]}}
+
+# Фрагмент реальной per-tenant регистрации (bot.py:22056-22077).
+_SRC_ALL = '''
+    if not _tenant.feature_blocked(_ACTIVE_TENANT, "subscriber_stats"):
+        app.add_handler(CommandHandler("update", update_command))
+        app.add_handler(CommandHandler("report", report_command))
+    if not _tenant.feature_blocked(_ACTIVE_TENANT, "launch_monitor"):
+        app.add_handler(CommandHandler("launches", launches_command))
+    if _tenant.brand_switch_available(_ACTIVE_TENANT):
+        app.add_handler(CommandHandler("brand", brand_command))
+'''
+
+
+def test_expected_commands_panferov():
+    print("\n-- expected_commands: panferov ждёт все 4 --")
+    exp = cd.expected_commands_for_tenant(_PANFEROV_T)
+    _assert(exp == {"update", "report", "launches", "brand"}, f"panferov → 4 (got {exp})")
+
+
+def test_expected_commands_maksim():
+    print("\n-- expected_commands: maksim (фичи off, 1 бренд) → пусто --")
+    exp = cd.expected_commands_for_tenant(_MAKSIM_T)
+    _assert(exp == set(), f"maksim → нет per-tenant команд (got {exp})")
+
+
+def test_per_tenant_panferov_all_present_ok():
+    print("\n-- per-tenant: panferov, все команды в коде → ok --")
+    v = cd.check_commands_per_tenant(_SRC_ALL, _PANFEROV_T)
+    _assert(v["problems"] == [], f"нет проблем (got {v['problems']})")
+    _assert(v["rows"]["launches"]["expected"] and v["rows"]["launches"]["present"],
+            "launches expected+present")
+
+
+def test_per_tenant_panferov_missing_is_blocker():
+    print("\n-- per-tenant: panferov ждёт launches, а его нет → problem --")
+    src = ('app.add_handler(CommandHandler("update", u)); '
+           'app.add_handler(CommandHandler("report", r)); '
+           'app.add_handler(CommandHandler("brand", b))')
+    v = cd.check_commands_per_tenant(src, _PANFEROV_T)
+    _assert(any("launches" in p for p in v["problems"]),
+            f"ожидаемый launches отсутствует → problem (got {v['problems']})")
+
+
+def test_per_tenant_maksim_no_expectation_ok():
+    print("\n-- per-tenant: maksim не ждёт update → ok даже если в коде --")
+    src = 'app.add_handler(CommandHandler("update", u))'
+    v = cd.check_commands_per_tenant(src, _MAKSIM_T)
+    _assert(v["problems"] == [], f"maksim не ждёт → нет проблем (got {v['problems']})")
+
+
+# ── 8. anti-leakage расширенный (C3/C7 ревью) ───────────────────────────────
+def test_markers_extended_maksim_brand():
+    print("\n-- markers: картинг/глэмпинг/#ff5722 (бренд Максима) пойманы --")
+    _assert(cd.check_no_foreign_markers("картинг и глэмпинг в Тюмени") != [], "картинг/глэмпинг")
+    _assert(cd.check_no_foreign_markers("accent: #FF5722") != [], "#ff5722 (цвет Максима)")
+    _assert("karting" in " ".join(cd.check_no_foreign_markers("karting track")).lower(), "karting")
+
+
+def test_scan_texts_for_markers():
+    print("\n-- scan_texts: хиты только в файлах с чужим брендом --")
+    named = {"reference_pack.md": "accent #ff5722 orange Life Drive",
+             "style_contract.panferov.json": '{"accent":"#2E9BE0","bg":"#0F172A"}'}
+    hits = cd.scan_texts_for_markers(named)
+    _assert("reference_pack.md" in hits, "reference_pack с #ff5722/Life Drive → хит")
+    _assert("style_contract.panferov.json" not in hits, "чистый panferov-контракт → не хит")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} cutover_doctor tests\n{'='*60}")
