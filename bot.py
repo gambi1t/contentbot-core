@@ -799,6 +799,20 @@ _CALLBACK_FEATURE_MAP = {
     "launch_retry:": "launch_monitor",
     "card_autobroll": "remotion",
     "card_hfbroll": "hyperframes",
+    "card_aivideo": "ai_video",
+    # Seedance (ai_video) — специфичные префиксы ПЕРЕД зонтиком b2src: ниже,
+    # чтобы Seedance в Pipeline-2 гейтился по ai_video (money-leak: платный fal.ai),
+    # даже когда broll_pipeline включён (callback_feature_blocked проверяет ВСЕ).
+    "selfie_broll:aivid": "ai_video",   # ловит selfie_broll:aivideo и :aivid:<5|10>
+    "b2src:ai_video": "ai_video",       # ловит ai_video / _go / _menu внутри Pipeline-2
+    # Pipeline 2 (broll_pipeline) — все b2*-callbacks (вход тоже гейтится отдельно
+    # в idea→broll ветке).
+    "b2man:": "broll_pipeline",
+    "b2scr:": "broll_pipeline",
+    "b2src:": "broll_pipeline",
+    "b2hf": "broll_pipeline",            # b2hfre / b2hfsc / b2hfback
+    "b2mus:": "broll_pipeline",
+    "b2cov:": "broll_pipeline",
 }
 
 # Per-call brand context. Set at the start of any handler that resolves a
@@ -8646,6 +8660,18 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_broll_cover_photo(update, context):
             return
 
+    # Pipeline 2 — приём своего заголовка (гейт 5, название/хук).
+    if user_id in pending and pending[user_id].get("state") == "broll2_title_text":
+        from broll.handlers import handle_broll_title_text_message
+
+        def _b2_notion_title(page_id, title):
+            notion.pages.update(
+                page_id=page_id,
+                properties={"Name": {"title": [{"text": {"content": title}}]}})
+
+        if await handle_broll_title_text_message(update, context, notion_title_fn=_b2_notion_title):
+            return
+
     # Selfie pipeline v2 — video intake routed to the selfie module.
     # Замещает старый inline-блок (~130 строк) на полнофункциональный модуль
     # с шагами правки субтитров → музыка → выбор обложки.
@@ -11385,10 +11411,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # у тенанта, не запускается НИ одной кнопкой — включая stale-кнопки из
     # старых сообщений. fail-open без конфига (tenant.feature_blocked).
     if query.data:
-        for _pref, _feat in _CALLBACK_FEATURE_MAP.items():
-            if query.data.startswith(_pref) and _tenant.feature_blocked(_ACTIVE_TENANT, _feat):
-                await query.answer("Эта функция не подключена в текущем тарифе.", show_alert=True)
-                return
+        if _tenant.callback_feature_blocked(query.data, _ACTIVE_TENANT, _CALLBACK_FEATURE_MAP):
+            await query.answer("Эта функция не подключена в текущем тарифе.", show_alert=True)
+            return
     await query.answer()
     logger.info(f"[user:{query.from_user.id}] Кнопка: {query.data}")
 
@@ -12151,6 +12176,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # тегированного архива клипов → субтитры. 2-фазный flow в
         # broll/handlers.py (по образцу карусели).
         if pipeline == "broll":
+            if _tenant.feature_blocked(_ACTIVE_TENANT, "broll_pipeline"):
+                await query.answer("Эта функция не подключена в текущем тарифе.", show_alert=True)
+                return
             try:
                 from broll.handlers import generate_broll_preview
             except Exception as e:
@@ -12941,6 +12969,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 update, context, _cov_action, _cov_did, arg=_cov_arg,
                 cover_fn=generate_cover, publish_fn=save_media_permanent,
                 notion_cover_fn=_b2_notion_cover, chat_id=query.message.chat_id)
+        return
+
+    if query.data.startswith("b2title:"):
+        # Инкремент 5: название/хук поста. b2title:<action>:<draft_id>[:<i>],
+        # action ∈ start|pick|more|own. Реюз движка хуков _generate_hook_options.
+        _parts = query.data.split(":")
+        _t_action = _parts[1] if len(_parts) > 1 else ""
+        _t_did = _parts[2] if len(_parts) > 2 else ""
+        _t_arg = _parts[3] if len(_parts) > 3 else None
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        def _b2_notion_title(page_id, title):
+            notion.pages.update(
+                page_id=page_id,
+                properties={"Name": {"title": [{"text": {"content": title}}]}})
+
+        if _t_action == "start":
+            from broll.handlers import start_broll_title_pick
+            await start_broll_title_pick(
+                update, context, _t_did,
+                hook_fn=_generate_hook_options, chat_id=query.message.chat_id)
+        else:
+            from broll.handlers import handle_broll_title_cb
+            await handle_broll_title_cb(
+                update, context, _t_action, _t_did, arg=_t_arg,
+                hook_fn=_generate_hook_options, notion_title_fn=_b2_notion_title,
+                chat_id=query.message.chat_id)
         return
 
     if query.data == "b2vc:ai":
