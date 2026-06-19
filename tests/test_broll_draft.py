@@ -98,8 +98,9 @@ def main():
                  Status.FAILED, Status.EXPIRED]) <= set(Status.ALL),
             "все статусы в Status.ALL", errors)
     _assert(set([SourceMode.AUTO, SourceMode.MANUAL, SourceMode.UPLOAD,
-                 SourceMode.HF_ONLY, SourceMode.AUTO_HF]) == set(SourceMode.ALL),
-            "5 режимов источника", errors)
+                 SourceMode.HF_ONLY, SourceMode.AUTO_HF, SourceMode.AI_VIDEO,
+                 SourceMode.AI_VIDEO_GO, SourceMode.AI_VIDEO_MENU]) == set(SourceMode.ALL),
+            "8 режимов источника (6 меню + 2 под-режима AI_VIDEO)", errors)
 
     print("\n[мутация + повторное сохранение]")
     loaded.status = Status.PREVIEW_READY

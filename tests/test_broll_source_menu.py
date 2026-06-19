@@ -36,14 +36,21 @@ def main():
     errors = []
     did = "broll_123_1781000000000"
 
-    print("\n[source_menu_keyboard — плоское, 5 режимов + time-labels]")
+    print("\n[source_menu_keyboard — плоское, 6 меню-режимов + time-labels]")
     kb = source_menu_keyboard(did)
     flat = [b for row in kb.inline_keyboard for b in row]
     cbs = [b.callback_data for b in flat]
     texts = " ".join(b.text for b in flat)
-    for mode in SourceMode.ALL:
+    # Меню = 6 режимов (AUTO/MANUAL/UPLOAD/HF_ONLY/AUTO_HF/AI_VIDEO). AI_VIDEO_GO /
+    # AI_VIDEO_MENU — под-режимы (динамические экраны Seedance), НЕ строки меню.
+    menu_modes = [SourceMode.AUTO, SourceMode.MANUAL, SourceMode.UPLOAD,
+                  SourceMode.HF_ONLY, SourceMode.AUTO_HF, SourceMode.AI_VIDEO]
+    for mode in menu_modes:
         _assert(any(f"b2src:{mode}:" in c for c in cbs),
                 f"есть кнопка режима {mode}", errors)
+    _assert(not any(f"b2src:{SourceMode.AI_VIDEO_GO}:" in c for c in cbs)
+            and not any(f"b2src:{SourceMode.AI_VIDEO_MENU}:" in c for c in cbs),
+            "под-режимы ai_video_go/ai_video_menu НЕ в меню (по дизайну)", errors)
     _assert(all(did in c for c in cbs if c.startswith("b2src:")),
             "каждый callback несёт draft_id (stale-guard)", errors)
     _assert("мин" in texts.lower(), "time-labels присутствуют (минуты)", errors)
