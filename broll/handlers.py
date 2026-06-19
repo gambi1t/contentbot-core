@@ -66,6 +66,8 @@ _EDIT_SCRIPT_STATE = "broll2_edit_script"
 # Инкремент 4: гейт обложки (пост-сборка). Состояния: ввод текста / приём фото.
 _COVER_TEXT_STATE = "broll2_cover_text"
 _COVER_UPLOAD_STATE = "broll2_cover_upload"
+# Инкремент 5: название/хук поста (генератор хуков + свой текст).
+_TITLE_TEXT_STATE = "broll2_title_text"
 
 
 def _broll_final_path(uid: int) -> Path:
@@ -1646,6 +1648,8 @@ async def assemble_broll_from_draft(
             draft["stage"] = "assembled"
             action_rows.append([InlineKeyboardButton(
                 "🖼 Сделать обложку", callback_data=f"b2cov:start:{cover_draft_id}")])
+            action_rows.append([InlineKeyboardButton(
+                "✍️ Название/хук", callback_data=f"b2title:start:{cover_draft_id}")])
         action_rows.append([InlineKeyboardButton("🔄 Ещё B-roll ролик", callback_data="broll_regen")])
         if notion_url:
             action_rows.append([InlineKeyboardButton("📋 К карточке", url=notion_url)])
@@ -1824,6 +1828,109 @@ async def cancel_broll_script_edit(update, context, draft_id: str) -> None:
     await _send_script_gate(context, draft)
 
 
+# ── Инкремент 5: название/хук поста (пост-сборка) ─────────────────────────
+
+def _title_pick_keyboard(draft_id: str, hooks: list) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton((h[:60] + "…") if len(h) > 60 else h,
+                                  callback_data=f"b2title:pick:{draft_id}:{i}")]
+            for i, h in enumerate(hooks)]
+    rows.append([InlineKeyboardButton("🔄 Ещё варианты", callback_data=f"b2title:more:{draft_id}")])
+    rows.append([InlineKeyboardButton("✏️ Свой текстом", callback_data=f"b2title:own:{draft_id}")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _title_validate(draft, draft_id: str) -> bool:
+    return bool(draft) and draft.get("draft_id") == draft_id and bool(draft.get("script"))
+
+
+async def _apply_broll_title(context, draft, title: str, chat_id, notion_title_fn) -> None:
+    draft["title"] = title
+    page_id = draft.get("notion_page_id")
+    if page_id and notion_title_fn:
+        try:
+            await asyncio.to_thread(notion_title_fn, page_id, title)
+        except Exception as e:
+            logger.warning(f"[broll] заголовок Notion не обновлён (non-fatal): {e}")
+    await context.bot.send_message(
+        chat_id=chat_id, text=f"✅ Название: <b>{html_mod.escape(title)}</b>",
+        parse_mode="HTML")
+
+
+async def start_broll_title_pick(update, context, draft_id: str, *, hook_fn, chat_id=None) -> None:
+    """b2title:start — сгенерить 5 хуков из сценария (реюз движка) и показать выбор."""
+    draft = context.user_data.get("broll_draft")
+    if chat_id is None:
+        chat_id = (draft or {}).get("chat_id") or update.effective_chat.id
+    if not _title_validate(draft, draft_id):
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Это от прошлого ролика — собери заново.")
+        return
+    shown = draft.get("title_shown") or []
+    hooks = await asyncio.to_thread(hook_fn, draft["script"], shown, 5)
+    if not hooks:
+        uid = _uid_from_update(update)
+        _bot_pending[uid] = {"state": _TITLE_TEXT_STATE, "title_draft_id": draft_id}
+        _bot_save_pending(_bot_pending)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="✍️ Не получилось сгенерировать варианты — пришли свой заголовок сообщением.")
+        return
+    draft["title_options"] = hooks
+    draft["title_shown"] = shown + hooks
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="✍️ <b>Название / хук для поста</b>\n\nВыбери вариант, «🔄 Ещё» или «✏️ Свой».",
+        parse_mode="HTML", reply_markup=_title_pick_keyboard(draft_id, hooks))
+
+
+async def handle_broll_title_cb(update, context, action: str, draft_id: str, arg=None, *,
+                                hook_fn, notion_title_fn, chat_id=None) -> None:
+    """b2title:* — pick (выбрать хук → сохранить + Notion) · more (ещё) · own (свой текст)."""
+    draft = context.user_data.get("broll_draft")
+    if chat_id is None:
+        chat_id = (draft or {}).get("chat_id") or update.effective_chat.id
+    if not _title_validate(draft, draft_id):
+        await context.bot.send_message(chat_id=chat_id, text="⚠️ Это от прошлого ролика — собери заново.")
+        return
+
+    if action == "more":
+        await start_broll_title_pick(update, context, draft_id, hook_fn=hook_fn, chat_id=chat_id)
+        return
+    if action == "own":
+        uid = _uid_from_update(update)
+        _bot_pending[uid] = {"state": _TITLE_TEXT_STATE, "title_draft_id": draft_id}
+        _bot_save_pending(_bot_pending)
+        await context.bot.send_message(chat_id=chat_id, text="✏️ Пришли свой заголовок одним сообщением.")
+        return
+    if action == "pick":
+        opts = draft.get("title_options") or []
+        try:
+            idx = int(arg)
+        except (TypeError, ValueError):
+            idx = -1
+        if not (0 <= idx < len(opts)):
+            await context.bot.send_message(chat_id=chat_id, text="⚠️ Вариант устарел — нажми «🔄 Ещё варианты».")
+            return
+        await _apply_broll_title(context, draft, opts[idx], chat_id, notion_title_fn)
+        return
+
+
+async def handle_broll_title_text_message(update, context, *, notion_title_fn) -> bool:
+    """Приём своего заголовка (state broll2_title_text). Контракт -> bool."""
+    uid = _uid_from_update(update)
+    st = _bot_pending.get(uid)
+    if not st or st.get("state") != _TITLE_TEXT_STATE:
+        return False
+    title = (getattr(update.message, "text", "") or "").strip()
+    if not title:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Пришли текст заголовка сообщением.")
+        return True
+    _bot_pending.pop(uid, None); _bot_save_pending(_bot_pending)
+    draft = context.user_data.get("broll_draft") or {}
+    await _apply_broll_title(context, draft, title, update.effective_chat.id, notion_title_fn)
+    return True
+
+
 __all__ = [
     "generate_broll_preview",
     "handle_broll_source",
@@ -1847,4 +1954,7 @@ __all__ = [
     "handle_broll_cover_cb",
     "handle_broll_cover_text_message",
     "handle_broll_cover_photo",
+    "start_broll_title_pick",
+    "handle_broll_title_cb",
+    "handle_broll_title_text_message",
 ]
