@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Контент-бот Максима — гайд для SMM</title>
+<style>
+  :root{
+    --bg:#f5f7fb; --card:#ffffff; --ink:#1a2030; --muted:#4c5468;
+    --accent:#3858e9; --accent-soft:#eaeefc; --line:#e6e9f2; --neutral:#f7f8fb;
+    --ok:#1f9d57; --warn:#c8881a; --no:#c2384a;
+    --radius:16px; --shadow:0 2px 14px rgba(26,32,48,.06);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:840px;margin:0 auto;padding:0 18px 60px}
+  header.hero{background:linear-gradient(135deg,#3858e9,#6b46e5);color:#fff;
+    padding:48px 18px 42px;text-align:center}
+  header.hero .inner{max-width:840px;margin:0 auto}
+  header.hero h1{margin:0 0 8px;font-size:31px;letter-spacing:-.02em}
+  header.hero p{margin:0;opacity:.94;font-size:16px}
+  header.hero .meta{margin-top:14px;font-size:13.5px;opacity:.9}
+  .lead{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);
+    padding:20px 24px;margin:-22px 0 18px;font-size:15.5px;color:var(--muted)}
+  .lead b{color:var(--ink)}
+  h2{font-size:22px;margin:32px 0 14px;letter-spacing:-.01em}
+  h2 .num{font-size:.66em;font-weight:700;color:var(--accent);opacity:.85;margin-right:7px;
+    vertical-align:middle}
+  h3{font-size:19px;font-weight:700;margin:0 0 11px;letter-spacing:-.01em;
+    color:var(--ink);position:relative;padding-left:14px}
+  h3::before{content:"";position:absolute;left:0;top:5px;width:6px;height:18px;
+    border-radius:3px;background:var(--accent)}
+  p{max-width:70ch}
+  .section-label{font-size:12.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--accent);margin:40px 0 4px}
+  .card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);
+    padding:22px 24px;margin:0 0 18px;border:1px solid var(--line)}
+  .pill{display:inline-block;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;
+    vertical-align:middle;margin-left:8px}
+  .pill.ok{background:#e7f6ee;color:var(--ok)} .pill.warn{background:#fbf1de;color:var(--warn)}
+  .pill.no{background:#fbe7ea;color:var(--no)}
+  .terms{display:grid;grid-template-columns:1fr;gap:10px}
+  .term{background:var(--neutral);border-radius:12px;padding:13px 16px;font-size:15px;
+    border:1px solid var(--line)}
+  .term b{color:var(--accent)}
+  .money{background:#fbf7ec;border:1px solid #f0e3c4;border-left:5px solid var(--warn);
+    border-radius:12px;padding:16px 18px;margin:0 0 18px;font-size:15px}
+  .money b{color:#9a6a10}
+  ol.steps{margin:12px 0 0;padding:0;counter-reset:s;list-style:none}
+  ol.steps li{position:relative;padding:9px 0 9px 40px;border-top:1px solid var(--line)}
+  ol.steps li:first-child{border-top:0}
+  ol.steps li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:8px;
+    width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;
+    font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .out{margin-top:12px;font-size:14px;color:var(--ink);background:var(--neutral);
+    border-radius:10px;padding:10px 14px;border:1px solid var(--line)}
+  .out b{color:var(--accent)}
+  .muted{color:var(--muted);font-size:14.5px}
+  .when{font-size:14px;color:var(--accent);font-weight:600;margin:2px 0 6px}
+  .toc{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);
+    padding:16px 22px;border:1px solid var(--line);margin-bottom:24px}
+  .toc a{display:block;color:var(--ink);text-decoration:none;padding:4px 0;font-size:15px}
+  .toc a:hover{color:var(--accent)}
+  .note{border-left:4px solid var(--accent);background:var(--accent-soft);
+    padding:12px 16px;border-radius:0 10px 10px 0;margin:14px 0;font-size:14.5px}
+  .honesty{border-left:4px solid var(--warn);background:#fbf1de}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+  .tag{display:inline-block;background:var(--neutral);color:var(--ink);border:1px solid var(--line);
+    font-size:12.5px;font-weight:600;border-radius:7px;padding:4px 9px;margin:0}
+  .tag.pay{background:#fbf1de;color:var(--warn);border-color:#f0e3c4}
+  .price{font-weight:600;color:var(--warn)}
+  .tablewrap{border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:12px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:10px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#eef1f8;color:var(--ink);font-weight:700;border-bottom:2px solid var(--line)}
+  tbody tr:nth-child(even){background:#fafbfe}
+  tbody tr:last-child td{border-bottom:0}
+  .foot-note{font-size:12.5px;color:#7a8294;margin:8px 0 0}
+  footer{text-align:center;color:var(--muted);font-size:13.5px;margin-top:42px;
+    padding-top:22px;border-top:1px solid var(--line)}
+  footer a{color:var(--accent);text-decoration:none}
+  @page{size:A4;margin:16mm 14mm}
+  @media print{
+    body{background:#fff}
+    .wrap{padding:0 0 0;max-width:none}
+    .card,.toc,.lead,.money,.tablewrap{box-shadow:none;break-inside:avoid}
+    h2,h3,.section-label{break-after:avoid}
+    header.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact;margin:-16mm -14mm 0}
+  }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="inner">
+    <h1>Контент-бот Максима</h1>
+    <p>Гайд для SMM — что бот умеет и как им пользоваться</p>
+    <div class="meta">Бот: @yumsunov_content_bot · обновлено 20 июня 2026</div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="lead">
+    Бот превращает идею, селфи или голосовое в готовый контент: ролик с субтитрами, видео с
+    AI-аватаром, нарезку под закадровый голос, карусель для Instagram или текстовый пост.
+    Ты выбираешь способ кнопкой — дальше бот делает всё по шагам, ты только подтверждаешь и при
+    желании меняешь выбор. Ниже сначала все рабочие способы по шагам, потом справочник по
+    возможностям, и в конце честно — чего пока нет.
+  </div>
+
+  <h2>Сначала договоримся о словах</h2>
+  <div class="card">
+    <div class="terms">
+      <div class="term"><b>Пайплайн</b> — маршрут «идея → готовый контент», его выбираешь кнопкой. Рабочих пять: Селфи, AI-аватар, B-roll-монтаж, Карусель, TG-пост.</div>
+      <div class="term"><b>B-roll (перебивки)</b> — короткие вставки поверх голоса или лица: показывают то, о чём речь. Бывают трёх видов — реальные кадры, анимированная графика и AI-видео.</div>
+      <div class="term"><b>Хук</b> — цепляющий заголовок, который заставляет досмотреть ролик. Бот предлагает их на выбор.</div>
+      <div class="term"><b>Notion</b> — онлайн-доска, где видно все идеи и на каком они шаге. Кнопку-ссылку даёт сам бот, отдельно логиниться обычно не нужно.</div>
+    </div>
+  </div>
+
+  <div class="money">
+    <b>Про деньги — чтобы не бояться нажимать.</b> Почти всё в боте бесплатно. Отдельно платны только
+    два пункта: <b>озвучка голосом-клоном</b> (ИИ-голос Максима) и <b>AI-видео</b> (<span class="price">≈ $0,11 за секунду</span>).
+    Перед запуском платного шага бот всегда показывает цену и ждёт твоего подтверждения — случайно
+    деньги не спишутся. Нет оплаты или не хочешь тратить — выбирай «свой голос» и обычный B-roll, всё соберётся.
+  </div>
+
+  <div class="toc">
+    <strong>Содержание</strong>
+    <a href="#selfie">1 · Селфи — ролик из своего видео</a>
+    <a href="#avatar">2 · AI-аватар — видео без съёмки</a>
+    <a href="#broll">3 · B-roll-монтаж — закадровый голос + видеоряд</a>
+    <a href="#carousel">4 · Карусель для Instagram</a>
+    <a href="#tgpost">5 · TG-пост — текст в канал</a>
+    <a href="#ideas">6 · Банк идей</a>
+    <a href="#caps">7 · Справочник: B-roll · музыка · обложка · голос · монтаж · публикация</a>
+    <a href="#notion">8 · Notion — пульт всех идей</a>
+    <a href="#none">9 · Чего пока нет (честно)</a>
+  </div>
+
+  <div class="section-label">Часть 1 · Рабочие пайплайны</div>
+
+  <!-- 1 SELFIE -->
+  <h2 id="selfie"><span class="num">1</span>🎥 Селфи <span class="pill ok">работает</span></h2>
+  <div class="card">
+    <div class="when">Когда: есть живое видео с телефона и хочется быстро оформить его в ролик.</div>
+    <p class="muted">Это один режим с развилкой: можно собрать только с субтитрами, а можно добавить B-roll-вставки. Не два разных пайплайна — один, просто на шаге 5 выбираешь.</p>
+    <ol class="steps">
+      <li>Жмёшь «🎥 Селфи» и присылаешь видео, снятое на телефон.</li>
+      <li>Бот распознаёт речь и показывает текст — можно поправить орфографию отдельных слов (добавлять/убирать слова нельзя, текст идёт в субтитры) или оставить как есть.</li>
+      <li>Выбираешь: с динамичным монтажом (крупность меняется по ходу речи, «эффект интервью») или без.</li>
+      <li>Бот накладывает субтитры в стиле CapCut — словами, автоматически.</li>
+      <li>Развилка B-roll: «Добавить B-roll» или «Без B-roll». Если добавляешь — выбираешь источник вставок и формат монтажа (что это — в справочнике, раздел 7).</li>
+      <li>Выбираешь музыку (5 настроений, можно прослушать; голос всегда громче) или без музыки.</li>
+      <li>Выбираешь обложку: кадр из видео, своё фото или из библиотеки портретов.</li>
+      <li>Утверждаешь название — бот предлагает 5 вариантов-хуков (можно положить хук на обложку).</li>
+    </ol>
+    <div class="out"><b>На выходе:</b> готовый ролик приходит в чат и ложится карточкой в Notion. Дальше жмёшь кнопку площадки (Telegram / Instagram / YouTube) — бот выкладывает сам, либо скачиваешь файл и выкладываешь руками. Как по площадкам — раздел 7.</div>
+  </div>
+
+  <!-- 2 AVATAR -->
+  <h2 id="avatar"><span class="num">2</span>🤖 AI-аватар <span class="pill ok">работает</span></h2>
+  <div class="card">
+    <div class="when">Когда: нужен ролик с «говорящим» Максимом, но снимать некогда.</div>
+    <ol class="steps">
+      <li>«✍️ Моя идея» (надиктовать/написать) или идея из Банка → выбрать «🤖 AI-аватар».</li>
+      <li>Бот пишет сценарий по фактам Максима и Life Drive.</li>
+      <li>Голос: ИИ-клон Максима (платно) или записать свой.</li>
+      <li>Версия аватара: Avatar 3 (дешевле в разы, повторяет жесты из лука — дефолт) или Avatar IV (дороже примерно втрое, сам придумывает жесты и мимику).</li>
+      <li>Сервис рендерит говорящего аватара (~1–2 минуты).</li>
+      <li>Опционально — B-roll и формат монтажа (6 вариантов).</li>
+      <li>Обложка → музыка → карточка в Notion.</li>
+    </ol>
+    <div class="note">6 форматов монтажа (общие с Селфи+B-roll): <b>не вникай в названия — жми «Про-монтаж», он универсальный.</b> Что значит каждый — в справочнике (раздел 7).
+      <div class="chips"><span class="tag">Сплит</span><span class="tag">Динамический</span><span class="tag">Про-монтаж</span><span class="tag">ИИ-монтаж</span><span class="tag">Смарт-микс</span><span class="tag">Full-screen</span></div>
+    </div>
+    <div class="out"><b>На выходе:</b> ролик в чат + карточка в Notion → публикация кнопкой площадки (раздел 7).</div>
+  </div>
+
+  <!-- 3 BROLL -->
+  <h2 id="broll"><span class="num">3</span>🎞 B-roll-монтаж <span class="pill ok">работает</span></h2>
+  <div class="card">
+    <div class="when">Когда: нужен ролик с закадровым голосом и видеорядом — без лица в кадре.</div>
+    <p class="muted">Самый пошаговый режим: 6 этапов, на каждом подтверждаешь или меняешь. Тяжёлые шаги (озвучка, монтаж) запускаются только после подтверждения.</p>
+    <ol class="steps">
+      <li><b>Сценарий.</b> Бот пишет закадровый текст — «Утвердить» или «Править» (заменить целиком). Карточка в Notion создаётся сразу.</li>
+      <li><b>Превью озвучки.</b> ИИ-клон озвучивает один раз, присылает аудио — «Озвучка ок» / «Перегенерировать» / «Записать свой голос».</li>
+      <li><b>Источник видеоряда</b> (6 вариантов; что выбрать — в разделе 7):
+        <div class="chips"><span class="tag">Авто из библиотеки</span><span class="tag">Выбрать вручную</span><span class="tag">Загрузить своё</span><span class="tag">Только графика</span><span class="tag">Авто + графика</span><span class="tag pay">AI-видео · платно</span></div>
+      </li>
+      <li><b>Музыка</b> (5 категорий, прослушка, можно без музыки).</li>
+      <li><b>Обложка</b> (кадр / загрузить / из библиотеки) + выбор «С текстом / Без текста».</li>
+      <li><b>Название/хук</b> — 5 вариантов от ИИ или свой текстом.</li>
+      <li><b>Публикация:</b> описание для Reels/Shorts, TG-пост по сценарию, кросс-постинг.</li>
+    </ol>
+    <div class="out"><b>На выходе:</b> готовый ролик в чат + карточка уезжает в «Готово к публикации». «Только графика» и «Авто + графика» — без съёмки, но дольше (10–25 мин).</div>
+  </div>
+
+  <!-- 4 CAROUSEL -->
+  <h2 id="carousel"><span class="num">4</span>🎨 Карусель для Instagram <span class="pill ok">работает</span></h2>
+  <div class="card">
+    <div class="when">Когда: нужен пост-карусель из нескольких слайдов-картинок.</div>
+    <ol class="steps">
+      <li>Жмёшь «🎨 Карусель», задаёшь тему текстом или голосом.</li>
+      <li>Выбираешь шаблон: «Кольца/декор» (анонсы, события, новости) или «Racing-tape» (гайды, топ-N, обучающие — по умолчанию).</li>
+      <li>Бот пишет слайды и показывает текстовое превью — «Точечная правка» (меняет только указанное) или «Переписать полностью».</li>
+      <li>Рендер картинок. Число слайдов подбирается под тему (обычно 7, диапазон 3–10).</li>
+    </ol>
+    <div class="out"><b>На выходе:</b> «Опубликовать карусель в Instagram» (если аккаунт подключён) или скачать картинки и выложить вручную.</div>
+  </div>
+
+  <!-- 5 TGPOST -->
+  <h2 id="tgpost"><span class="num">5</span>📝 TG-пост <span class="pill ok">работает</span></h2>
+  <div class="card">
+    <div class="when">Когда: нужен текстовый пост в Telegram-канал.</div>
+    <ol class="steps">
+      <li>Жмёшь «📝 TG-пост», выбираешь формат: Разбор-эссе (длинный), Тезисный список (нумерованный, 7–10 пунктов) или Короткий тезис (одно наблюдение).</li>
+      <li>Надиктовываешь или пишешь фактуру.</li>
+      <li>Бот пишет пост.</li>
+    </ol>
+    <div class="out"><b>На выходе:</b> «Опубликовать в канал» (бот выложит сам), «Перегенерировать», «Правки» (голосом/текстом) или «Сохранить в Notion».</div>
+  </div>
+
+  <!-- 6 IDEAS -->
+  <h2 id="ideas"><span class="num">6</span>🎰 Банк идей <span class="pill ok">работает</span></h2>
+  <div class="card">
+    <div class="when">Когда: не знаешь, о чём снять — пусть бот подскажет.</div>
+    <ol class="steps">
+      <li>Жмёшь «🎰 Банк идей» — бот предлагает 5 свежих идей с учётом того, что уже есть в Notion (без повторов).</li>
+      <li>У каждой идеи 5 кнопок-пайплайнов:
+        <div class="chips"><span class="tag">TG-пост</span><span class="tag">Селфи</span><span class="tag">AI-аватар</span><span class="tag">Карусель</span><span class="tag">B-roll</span></div>
+      </li>
+      <li>Жмёшь нужный — запускается этот пайплайн уже с выбранной идеей. Или «Ещё 5 идей».</li>
+    </ol>
+  </div>
+
+  <div class="section-label">Часть 2 · Справочник</div>
+
+  <!-- 7 CAPABILITIES -->
+  <h2 id="caps"><span class="num">7</span>🛠 Кирпичики, из которых собирается ролик</h2>
+  <div class="note">Это не для чтения насквозь — заглядывай сюда, когда бот спросил про источник, музыку, обложку или формат, а ты не уверена, что выбрать.</div>
+
+  <div class="card">
+    <h3>B-roll (перебивки) — три вида</h3>
+    <ul class="muted" style="margin:8px 0 0;padding-left:20px">
+      <li><b>Реальные кадры</b> — то, что реально снято: фото и клипы из библиотеки Максима, или загрузить своё фото/видео прямо в чат. Самый достоверный источник. Бесплатно.</li>
+      <li><b>Анимированная графика</b> — движущийся текст, цифры, фигуры (не съёмка). Для иллюстрации мысли, когда живого кадра нет. Бесплатно.</li>
+      <li><b>AI-видео по сценарию</b> — реальные на вид кадры по теме, как будто снято камерой (картинг → реальные карты). Бот сам пишет промпты из текста. <span class="price">Платно: ≈ $0,11 за секунду</span> — цену покажет заранее.</li>
+    </ul>
+    <div class="note">Правило: есть реальный кадр → библиотека или загрузка. Нет кадра, нужен «нарисованный» вид → графика. Нет кадра, нужно «как снято камерой» → AI-видео (за деньги).</div>
+    <p class="foot-note">Под капотом графику делают движки Remotion и HyperFrames, AI-видео — Kling 3.0. Тебе это знать не нужно, бот сам. Если на кнопке AI-видео увидишь старую подпись «Seedance» — не пугайся, это то же самое (надпись скоро поправим).</p>
+  </div>
+
+  <div class="card">
+    <h3>Музыка</h3>
+    <p class="muted">5 категорий настроения:</p>
+    <div class="chips"><span class="tag">Спокойный</span><span class="tag">Драйв / Энергия</span><span class="tag">Деловой</span><span class="tag">Кинематограф</span><span class="tag">Вдохновляющий</span></div>
+    <p class="muted" style="margin-top:10px">Внутри категории бот присылает несколько треков на прослушку прямо в чат — слушаешь и выбираешь, либо «Другой трек». Есть «Без музыки». Музыка всегда автоматически притихает под речь — голос громче.</p>
+  </div>
+
+  <div class="card">
+    <h3>Обложка</h3>
+    <p class="muted">Источники: кадр из видео (Начало / Середина / Финал), загрузить своё фото, из библиотеки готовых портретов Максима (есть «Ещё»), или пропустить (возьмёт первый кадр). Перед фиксацией бот показывает обложку на подтверждение. В Селфи на обложку можно положить заголовок-хук; в B-roll-монтаже есть выбор «С текстом / Без текста».</p>
+  </div>
+
+  <div class="card">
+    <h3>Голос</h3>
+    <p class="muted">Там, где бот сам озвучивает (AI-аватар и B-roll-монтаж) — выбор: ИИ-клон Максима или свой голос (присылаешь голосовое). В Селфи выбора нет — там твой живой голос с видео.</p>
+    <div class="note honesty">ИИ-клон голоса платный (нужен оплаченный баланс). Нет оплаты — бери «свой голос», ролик соберётся так же.</div>
+  </div>
+
+  <div class="card">
+    <h3>Субтитры</h3>
+    <p class="muted">Анимированные титры словами (по одному слову, заглавными, белый текст с чёрной обводкой — стиль трендовых Reels/Shorts). В Селфи наносятся всегда. В сборке аватара/монтажа можно выбрать вариант с субтитрами или без.</p>
+  </div>
+
+  <div class="card">
+    <h3>Форматы монтажа (6 — в Селфи+B-roll и Аватаре)</h3>
+    <ul class="muted" style="margin:8px 0 0;padding-left:20px">
+      <li><b>Сплит</b> — экран пополам: сверху B-roll, снизу человек.</li>
+      <li><b>Динамический</b> — человек и B-roll сменяют друг друга на весь экран.</li>
+      <li><b>Про-монтаж</b> — готовый шаблон: хук-человек → 50/50 → призыв. Дефолт.</li>
+      <li><b>ИИ-монтаж</b> — бот сам решает раскладку по сценарию (умнее, чуть дороже).</li>
+      <li><b>Смарт-микс</b> — видео на весь экран, фото в сплит.</li>
+      <li><b>Full-screen</b> — B-roll на весь экран, человек только в начале и конце.</li>
+    </ul>
+    <div class="note">Не знаешь, что выбрать → <b>Про-монтаж</b> (универсальный).</div>
+  </div>
+
+  <div class="card">
+    <h3>Публикация и площадки</h3>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Площадка</th><th>Как сейчас</th></tr></thead>
+      <tbody>
+      <tr><td>Telegram-канал</td><td>Работает всегда, без авторизации — самая надёжная</td></tr>
+      <tr><td>Instagram (Reels + карусель)</td><td>Публикует, если аккаунт подключён (зелёный кружок в меню)</td></tr>
+      <tr><td>YouTube Shorts</td><td>Загрузка с обложкой; нужна разовая авторизация</td></tr>
+      <tr><td>VK Клипы</td><td>Интеграция есть, зависит от авторизации — проверить</td></tr>
+      <tr><td>TikTok</td><td>Автопубликации нет — бот даёт пакет для ручной загрузки</td></tr>
+      </tbody>
+    </table></div>
+    <div class="note">Перед публикацией бот показывает чек-лист (видео, сценарий, описание, обложка) и площадки с галочками. Зелёный кружок = подключена, красный = нужна авторизация.</div>
+  </div>
+
+  <div class="card">
+    <h3>Библиотека B-roll — как пополнять</h3>
+    <ul class="muted" style="margin:8px 0 0;padding-left:20px">
+      <li><b>Загрузить</b> — добавить свои клипы/фото в категорию (картинг, глэмпинг, природа, команда…). Категорию выбираешь вручную — авто-распознавания содержимого нет.</li>
+      <li><b>Удалить</b> — убрать неактуальные (можно все показанные разом).</li>
+    </ul>
+    <div class="note">Зачем: режим «Авто» берёт клипы именно отсюда. Чем больше хороших клипов в библиотеке — тем точнее бот подбирает видеоряд сам.</div>
+  </div>
+
+  <div class="section-label">Часть 3 · Пульт и честные границы</div>
+
+  <!-- 8 NOTION -->
+  <h2 id="notion"><span class="num">8</span>📚 Notion — пульт всех идей <span class="pill ok">работает</span></h2>
+  <div class="card">
+    <p>Notion — это доска контента. Почти каждый режим складывает туда карточку, и она движется слева направо: от «Идеи» до «Опубликовано». По колонке видно, на каком шаге каждый ролик и где он застрял.</p>
+    <div class="note">Тебе не нужно туда отдельно заходить или что-то настраивать — кнопки «Карточки» и «Открыть Notion» в боте показывают, что в работе. После публикации бот сам отмечает, на каких площадках вышло и когда. Банк идей сверяется с доской и не предлагает уже сделанное.</div>
+  </div>
+
+  <!-- 9 NONE -->
+  <h2 id="none"><span class="num">9</span>Чего пока нет (чтобы не обещать лишнего)</h2>
+  <div class="card">
+    <div class="tablewrap"><table>
+      <thead><tr><th>Что</th><th>Статус</th></tr></thead>
+      <tbody>
+      <tr><td><b>Статистика подписчиков / дашборд</b> — для Максима отключена: ввод замеров и отчёт роста заблокированы, автосохранения в Notion нет</td><td><span class="pill no">не готово</span></td></tr>
+      <tr><td><b>Реакция на новость</b> (авто-дайджест тем) — выключено для Максима, источники не под картинг/глэмпинг</td><td><span class="pill warn">выключено</span></td></tr>
+      <tr><td><b>Ролики из отзывов клиентов</b> (2GIS / Яндекс) — в коде нет</td><td><span class="pill no">нет</span></td></tr>
+      <tr><td><b>Планировщик публикаций в календаре</b> — есть только журнал «что уже вышло», без плана наперёд</td><td><span class="pill warn">только факты</span></td></tr>
+      <tr><td><b>Аватар-«кружочек» поверх B-roll</b> — такого формата нет (есть 6 других)</td><td><span class="pill no">нет</span></td></tr>
+      <tr><td><b>Автопубликация в TikTok</b> — только пакет для ручной загрузки</td><td><span class="pill warn">вручную</span></td></tr>
+      </tbody>
+    </table></div>
+    <div class="note honesty">Если что-то из этого понадобится в работе (например, статистика) — скажи Максиму, доделаем. Этот список честный на 20 июня 2026.</div>
+  </div>
+
+  <footer>
+    Сделано <a href="https://postulataistudio.ru/">студией Postulat</a> ·
+    <a href="https://t.me/postulataistudio">@postulataistudio</a><br>
+    Внутренний гайд для команды Life Drive · вопросы по боту — в студию.
+  </footer>
+</div>
+</body>
+</html>
