@@ -106,5 +106,25 @@ def test_plan_clips_default_persona_is_maksim():
     assert "Максим" in sent and "Life Drive" in sent
 
 
+# ── Kling API: всегда generate_audio=false (звук монтаж выкидывает + дешевле) ──
+def test_kling_requests_audio_off(monkeypatch, tmp_path):
+    import fal_media
+    captured = {}
+
+    fake_fal = types.SimpleNamespace(
+        subscribe=lambda endpoint, **kw: (captured.update(kw.get("arguments", {})),
+                                          {"video": {"url": "http://x/v.mp4"}})[1]
+    )
+    monkeypatch.setitem(sys.modules, "fal_client", fake_fal)
+    monkeypatch.setattr(fal_media, "_is_configured", lambda: True)
+    monkeypatch.setattr(fal_media, "_download_timeout",
+                        lambda url, part: Path(part).write_bytes(b"x" * 60000))
+
+    out = fal_media.generate_kling_video("p", tmp_path / "c.mp4", duration=5)
+    assert out is not None
+    assert captured.get("generate_audio") is False
+    assert captured.get("prompt") == "p"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -377,8 +377,11 @@ def generate_kling_video(
     generic road cars; Kling motorsport fidelity far higher). Returns path str or
     None on any failure (callers must handle None — see module docstring).
 
-    Pricing: flat $0.112/sec (audio off), resolution-independent (we send no
-    resolution param → Kling native ~1080p). See ai_video_broll.KLING_PRICE_PER_SEC_USD.
+    Pricing: flat $0.112/sec at generate_audio=false (audio ON would be $0.168/sec).
+    We ALWAYS request generate_audio=false: (1) the montage strips clip audio anyway
+    (assembler `-an`) and lays our voiceover+music on top, so native audio is wasted,
+    (2) it's 33% cheaper. Resolution-independent (no resolution param → Kling native).
+    See ai_video_broll.KLING_PRICE_PER_SEC_USD.
     """
     if not _is_configured():
         logger.warning("fal_media.generate_kling_video: FAL_KEY missing, skipping")
@@ -410,6 +413,7 @@ def generate_kling_video(
                 "prompt": prompt,
                 "duration": str(duration),
                 "aspect_ratio": aspect,
+                "generate_audio": False,   # звук монтаж выкидывает + audio off дешевле ($0.112 vs $0.168/с)
             },
             with_logs=False,
             start_timeout=SEEDANCE_TIMEOUT_S,
