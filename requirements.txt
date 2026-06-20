@@ -23,3 +23,7 @@ httpx==0.28.1
 
 # Face detection for auto avatar head-framing in 50/50 montage (video_assembler)
 opencv-python-headless
+# Telethon uploader (>20MB Telegram-видео в канал через Saved Messages) —
+# telethon_uploader.py-демон; не было в requirements ядра → contentbot-core-telethon
+# падал на импорте (порт, паритет с legacy content-bot).
+telethon==1.42.0

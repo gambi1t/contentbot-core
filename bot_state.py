@@ -37,11 +37,20 @@ def project_dir(data: dict) -> Path | None:
 
     Вынесено из bot.py чтобы carousel/handlers.py не делал `import bot` —
     та же причина что для pending (см. шапку модуля).
+
+    Fallback на `notion_edit_card`/`notion_edit_title` (поля режима
+    редактирования карточки): без них «Скачать материалы» в edit-режиме
+    резолвил None и отдавал только обложку, хотя проект существует
+    (порт B2 из legacy, грабли content-bot 18 июня).
     """
-    notion_id = data.get("notion_page_id")
+    notion_id = data.get("notion_page_id") or data.get("notion_edit_card")
     if not notion_id:
         return None
-    title = (data.get("card_data") or {}).get("title", "untitled")
+    title = (
+        (data.get("card_data") or {}).get("title")
+        or data.get("notion_edit_title")
+        or "untitled"
+    )
     safe_title = re.sub(r'[<>:"/\\|?*]', '', title)[:60].strip()
     folder_name = f"{notion_id[:8]}_{safe_title}"
     d = PROJECTS_DIR / folder_name

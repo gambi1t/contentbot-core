@@ -1741,18 +1741,17 @@ def assemble_auto_montage(
                 "или фото (photos/ или photo_*.*) в папке проекта."
             )
         broll_paths = list(video_paths) + photo_clips
-        # Per-photo split anchor. For the shoes brand the default is 0.75
-        # (lower three-quarters of the photo — empirical balance for lifestyle
-        # shots where the model sits and shoes sit around 60-80% of the frame,
-        # not glued to the very bottom). Was 1.0 — too aggressive: product
-        # lifestyle photos have floor/background at the bottom, which was
-        # hogging the slot. Each photo can override via filename suffix
-        # (_top / _center / _bottom) or a <photo>.anchor.txt sidecar — see
-        # _resolve_photo_anchor.
-        # Other brands keep the old centre-crop behaviour (anchor 0.5).
+        # Per-photo split anchor. Shoes brand default = 1.0 (нижняя половина фото).
+        # Порт M4: 7 июня 2026 выверено геометрически (_split_visible_photo_band):
+        # обувь на lifestyle-фото лежит в нижних [0.60, 0.95]; 0.75/0.62 СРЕЗАЛИ её
+        # снизу на кадрах Ken Burns (zoom 1.0→1.06). 1.0 = обувь целиком + минимум
+        # пола. Заменяет прежний core-выбор 0.75 («1.0 too aggressive») — он
+        # предшествовал 7-июньскому замеру; подтверждено Артёмом. Per-photo override
+        # через суффикс (_top/_center/_bottom) или <photo>.anchor.txt — см.
+        # _resolve_photo_anchor. Другие бренды — центр-кроп (anchor 0.5).
         smart_anchor_offsets: dict[int, float] = {}
         if brand_name == "shoes" and project_photos and photo_clips:
-            brand_default_anchor = 0.75
+            brand_default_anchor = 1.0
             for local_i, photo_path in enumerate(project_photos):
                 global_i = len(video_paths) + local_i
                 # Guard: project_photos and photo_clips are 1:1 by index,

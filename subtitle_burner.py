@@ -432,6 +432,34 @@ def generate_ass(
 
 # ── Burn onto video ───────────────────────────────────────────────────────────
 
+# veryfast/crf20: визуально прозрачно (SSIM 0.989, замер 18 июня) и укладывается
+# в timeout на минутном 1080p/60-ролике. НЕ менять на medium/crf15 — это давало
+# ~12× realtime (20-сек ролик = 259 сек) и минутный ролик падал по timeout.
+# Замок: tests/test_subtitle_burn_params.py. (Порт M1 из legacy content-bot.)
+BURN_PRESET = "veryfast"
+BURN_CRF = "20"
+BURN_TIMEOUT = 900
+
+
+def build_burn_cmd(video_path, vf: str, output_path) -> list[str]:
+    """Construct the ffmpeg subtitle-burn command (pure, unit-tested).
+
+    *vf* is the already-assembled video filter string (e.g. ``ass='subs.ass'``).
+    Uses :data:`BURN_PRESET`/:data:`BURN_CRF` — see the module note and
+    tests/test_subtitle_burn_params.py for why this must stay veryfast/crf20.
+    """
+    return [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", BURN_PRESET, "-crf", BURN_CRF,
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+
 def burn_subtitles(
     video_path: str | Path,
     ass_path: str | Path,
@@ -455,19 +483,10 @@ def burn_subtitles(
     else:
         vf = f"ass='{ass_esc}'"
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(video_path),
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        str(output_path),
-    ]
+    cmd = build_burn_cmd(video_path, vf, output_path)
 
     logger.info(f"Burning subtitles: {video_path.name} → {output_path.name}")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=BURN_TIMEOUT)
     if result.returncode != 0:
         raise RuntimeError(
             f"ffmpeg subtitle burn failed:\n{result.stderr[-600:]}"

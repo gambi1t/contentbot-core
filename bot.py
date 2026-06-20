@@ -502,41 +502,8 @@ BRANDS = {
         # AI-экспертный бренд (провокация, неудобная правда, шок-цифры), что
         # для женской обувной рекламы не работает — выдаёт штампы типа
         # «такую не найдёшь». Здесь — aspirational / чувственный / премиум-тон.
-        "cover_prompt_override": """Ты — редактор обложек для Instagram Reels / TikTok обувного бренда «Обувка86».
-
-Аудитория — женщины 25–45, ищут редкую нестандартную обувь под свой размер и стиль. Тон — взрослый, уверенный, чувственный, премиальный. Никакой инфоцыганщины, никакой провокации ради провокации, никаких «шок-цифр».
-
-ЗАДАЧА:
-По сценарию ролика придумать короткий текст для обложки — 3–8 слов, до 40 символов. Обложка должна вызывать желание рассмотреть пару — не интригу через шок, а притяжение через образ.
-
-РАЗРЕШЁННЫЕ ОПОРНЫЕ ТЕМЫ (из FACTS обувного бренда):
-— Итальянские комплектующие
-— Пошив под размер клиента
-— Коллекция весна-лето 2026
-— Редкие формы и цвета, не массовый ретейл
-— Индивидуальность, «не повторят»
-
-ТОНЫ, КОТОРЫЕ РАБОТАЮТ (обувная/fashion реклама):
-1. Парадокс-интрига: «Её ещё не сшили», «Пара, которой нет»
-2. Кастом + география: «Италия под твой размер», «Флоренция на каждый день»
-3. Контраст с массмаркетом: «Не из ТЦ», «Обувь против тиража»
-4. Чувственный образ: «Та самая пара», «Кожа, ты, утро»
-5. Уверенное утверждение: «Под заказ. Под тебя.»
-
-ЗАПРЕЩЕНО:
-— Штампы продавца: «такую не найдёшь», «коллекция, которой нет в магазинах», «обувь, которую не повторят»
-— Пересказ сценария в лоб (если в сценарии «в ТЦ такую не найдёшь» — этот текст на обложку НЕ берём, это уже в ролике)
-— Любые выдуманные цифры (количество пар, %, годы на рынке и т.п.)
-— «Единственная в своём роде», «мини-серия» — без подтверждения фактом
-— Сленг и англицизмы
-— Эмодзи, многоточия, восклицательные знаки
-— Провокация и кликбейт как для AI-роликов — тон совсем другой
-
-ПРОЦЕСС:
-1. Прочитай сценарий.
-2. Мысленно придумай 15 вариантов — разных тонов (парадокс, кастом, география, чувство).
-3. Для каждого проверь: звучит ли это как fashion-слоган, а не штамп продавца?
-4. Выбери 5 лучших — каждый на новой строке, без нумерации и кавычек.""",
+        "cover_prompt_override": None,
+        "cover_prompt_file": "cover_prompt_shoes.txt",
         # Brand-specific system prompt for scripts. Replaces the default
         # (which is written for Artem's personal AI-expert brand and is
         # completely wrong for a women's shoe store). Includes a FACTS block
@@ -19984,15 +19951,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.warning(f"download_project: cover send failed: {e}")
 
-            # 3. Project dir files, sorted with light files first
+            # 3. Project dir files (РЕКУРСИВНО — заходим в photos/ и пр. подпапки),
+            # лёгкие первыми. Раньше iterdir() видел только корень → фото из photos/
+            # терялись на больших проектах (порт M8 из legacy; служебные папки пропускаем).
             if proj_dir and proj_dir.exists():
-                all_files = [f for f in sorted(proj_dir.iterdir()) if f.is_file()]
+                _skip_dirs = {"_tmp_montage", "_raw_uploads", "__pycache__"}
+                all_files = [
+                    f for f in sorted(proj_dir.rglob("*"))
+                    if f.is_file()
+                    and not any(p in _skip_dirs for p in f.relative_to(proj_dir).parts)
+                ]
                 for f in all_files:
                     size = f.stat().st_size
                     size_mb = size / (1024 * 1024)
+                    rel = str(f.relative_to(proj_dir)).replace("\\", "/")
                     if size > MAX_BOT_UPLOAD:
-                        skipped_big.append((f.name, round(size_mb, 1)))
-                        logger.info(f"download_project: skip big file {f.name} ({size_mb:.1f}MB)")
+                        skipped_big.append((rel, round(size_mb, 1)))
+                        logger.info(f"download_project: skip big file {rel} ({size_mb:.1f}MB)")
                         continue
                     try:
                         with open(f, "rb") as fh:
@@ -20000,11 +19975,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 chat_id=chat_id,
                                 document=fh,
                                 filename=f.name,
-                                caption=f"📎 {f.name} ({size_mb:.1f} МБ)",
+                                caption=f"📎 {rel} ({size_mb:.1f} МБ)",
                             )
                         sent_count += 1
                     except Exception as fe:
-                        logger.warning(f"download_project: skip {f.name}: {fe}")
+                        logger.warning(f"download_project: skip {rel}: {fe}")
 
             logger.info(f"download_project: sent {sent_count} files, skipped {len(skipped_big)} big")
 
@@ -22304,7 +22279,10 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, process_voice))
     # Photo handler — only active inside «📥 Готовые материалы» flow (state
     # broll_ready_material). Outside that state photos are ignored silently.
-    app.add_handler(MessageHandler(filters.PHOTO, process_photo))
+    # filters.Document.IMAGE — ловим фото, присланные ФАЙЛОМ (PNG/JPG без сжатия:
+    # аватар-исходник / готовые материалы), иначе они проходят мимо process_photo
+    # (порт M6 из legacy). Сжатые filters.PHOTO работали и так.
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, process_photo))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_error_handler(error_handler)
 
