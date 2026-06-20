@@ -360,3 +360,85 @@ def generate_seedance_video(
 
     logger.info(f"fal_media: seedance ready in {time.time()-t0:.1f}s → {dest}")
     return str(dest)
+
+
+def generate_kling_video(
+    prompt: str,
+    dest: "str | Path",
+    duration: Duration = 5,
+    aspect: Aspect = "9:16",
+) -> Optional[str]:
+    """Generate one cinematic clip via Kling 3.0 Pro (text-to-video).
+
+    Same caller contract as generate_seedance_video (caller passes `dest`), so
+    the AI-video engine can swap engines without changing its loop. Kling is the
+    stronger model (1080p native, better for fast action) — replaced the weak
+    Seedance v1 Pro Fast for B-roll on 2026-06-20 (verified: Seedance rendered
+    generic road cars; Kling motorsport fidelity far higher). Returns path str or
+    None on any failure (callers must handle None — see module docstring).
+
+    Pricing: flat $0.112/sec (audio off), resolution-independent (we send no
+    resolution param → Kling native ~1080p). See ai_video_broll.KLING_PRICE_PER_SEC_USD.
+    """
+    if not _is_configured():
+        logger.warning("fal_media.generate_kling_video: FAL_KEY missing, skipping")
+        return None
+    if duration not in SUPPORTED_DURATIONS:
+        logger.error(f"fal_media.generate_kling_video: bad duration {duration!r} (supported: {SUPPORTED_DURATIONS})")
+        return None
+    if aspect not in SUPPORTED_ASPECTS:
+        logger.error(f"fal_media.generate_kling_video: bad aspect {aspect!r}")
+        return None
+
+    try:
+        import fal_client
+    except ImportError:
+        logger.error("fal_media.generate_kling_video: fal-client not installed")
+        return None
+
+    dest = Path(dest)
+    t0 = time.time()
+    logger.info(
+        f"fal_media: kling {duration}s {aspect} prompt={prompt[:80]!r} "
+        f"key={_safe_key_preview()}"
+    )
+
+    try:
+        result = fal_client.subscribe(
+            VIDEO_T2V_ENDPOINT,
+            arguments={
+                "prompt": prompt,
+                "duration": str(duration),
+                "aspect_ratio": aspect,
+            },
+            with_logs=False,
+            start_timeout=SEEDANCE_TIMEOUT_S,
+            client_timeout=SEEDANCE_TIMEOUT_S,
+        )
+    except Exception as e:
+        logger.error(f"fal_media.generate_kling_video: API error: {type(e).__name__}: {str(e)[:200]}")
+        return None
+
+    video = result.get("video") or {}
+    url = video.get("url") if isinstance(video, dict) else None
+    if not url:
+        logger.error(f"fal_media.generate_kling_video: no video.url in result: {result!r}")
+        return None
+
+    # Atomic + validated: download to .part, reject tiny/broken, then rename.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        _download_timeout(url, part)
+    except Exception as e:
+        logger.error(f"fal_media.generate_kling_video: download failed: {e}")
+        part.unlink(missing_ok=True)
+        return None
+    if part.stat().st_size < SEEDANCE_MIN_BYTES:
+        logger.error(f"fal_media.generate_kling_video: download too small ({part.stat().st_size}B) — likely broken")
+        part.unlink(missing_ok=True)
+        return None
+    part.replace(dest)
+
+    logger.info(f"fal_media: kling ready in {time.time()-t0:.1f}s → {dest}")
+    return str(dest)

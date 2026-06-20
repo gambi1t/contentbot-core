@@ -12,11 +12,20 @@ pick the engine:
 plan_clips is the LLM "director" (script -> 2-4 prompts); the Seedance call
 lives in fal_media.generate_seedance_video; generate_ai_broll wires them together.
 
-Invariants baked into the director prompt (approved 2026-06-17):
-  - house tone: energetic-entrepreneurial cinematic
-  - LLM auto-chooses the shots from the script (like HyperFrames storyboard)
-  - NO recognizable people / close-up faces, NO on-screen text
-  - prompts in English (Seedance understands it best), multi-shot form
+Engine: Kling 3.0 Pro (fal `kling-video/v3/pro/text-to-video`, ~1080p, $0.112/sec).
+Replaced Seedance v1 Pro Fast on 2026-06-20 — Seedance rendered generic road cars
+for a karting script; Kling has far higher motorsport/action fidelity (verified by
+render test) and supports negative prompts / per-shot timing / character persistence.
+
+Director invariants (prompt is a tweakable string constant, contract pinned by tests):
+  - house tone = brand STYLE only (energetic-entrepreneurial cinematic, premium
+    light, dynamic camera). The SUBJECT always comes from the script, never forced.
+  - business_context (who the author is) grounds the subject — but the author's
+    business is NOT imposed when the script is about something else (lifestyle,
+    mindset, money, city, relationships). Author content is mostly lifestyle/path.
+  - people allowed in action (from behind / in motion / gear), avoid large
+    recognizable celebrity-style portrait faces; NO on-screen text (we overlay subtitles)
+  - prompts in English (the model understands it best), multi-shot form
 """
 from __future__ import annotations
 
@@ -44,34 +53,46 @@ _DIRECTOR_MODEL = "claude-opus-4-8"   # creative planning; subscription is flat-
 _DIRECTOR_ATTEMPTS = 2                 # one retry on malformed/insufficient output
 _DIRECTOR_MAX_TOKENS = 2000
 
-# Approved director prompt. Script is appended after the trailing "Сценарий:".
-_DIRECTOR_PROMPT = """Ты — режиссёр-постановщик коротких вертикальных видео для предпринимателя.
-На входе — текст закадрового сценария (озвучка ~30с). Разбей его на 2-4
-визуальных бита и на каждый напиши ОДИН промпт для AI-видеогенератора
-Seedance — кинематографичную перебивку под этот фрагмент.
+# Контекст автора по умолчанию (грунтит предмет, НЕ навязывает тему бизнеса).
+# В реале должен приходить из tenant-конфига; пока дефолт под Максима (этот бот).
+# TODO(tenant): прокинуть business_context из tenant.py через handlers.
+_DEFAULT_PERSONA = (
+    "Максим — предприниматель из Тюмени, владелец картинг-центра и глэмпинга "
+    "«Life Drive». Его контент — про предпринимательский путь, мышление, дисциплину, "
+    "образ жизни; ИНОГДА про его бизнесы (картинг, глэмпинг)."
+)
 
-Сам реши, сколько битов (2-4) и какие образы сильнее всего раскрывают
-смысл, — как арт-директор ищи лучшее визуальное решение, не иллюстрируй
-буквально.
+# Director prompt (generalized). Контекст автора + сценарий дописываются в plan_clips.
+# Доказано (diag v3, 2026-06-20): на картинг-сценарии даёт картинг, на лайфстайл-
+# сценарии — лайфстайл, БЕЗ насильного картинга. Предмет всегда из текста.
+_DIRECTOR_PROMPT = """Ты — режиссёр-постановщик и аналитик сценария для коротких вертикальных видео.
+Задача: глубоко разобрать сценарий и под каждый смысловой бит написать ОДИН
+насыщенный английский промпт для AI-видеогенератора — кинематографичную перебивку.
 
-ФИРМЕННЫЙ СТИЛЬ (всегда): энергично-предпринимательский кинематограф —
-динамичная камера (проезды, разгон, ручная съёмка), премиальный свет,
-контраст, ритм, ощущение драйва и движения вперёд; лайфстайл/бизнес-
-фактура (город, скорость, рабочие моменты, фактуры успеха).
+ШАГ 1 — РАЗБОР: пойми, о чём КОНКРЕТНО этот сценарий и какие реальные визуальные
+образы его раскрывают. Предмет бери ИЗ ТЕКСТА сценария (что в нём реально
+обсуждается). НЕ навязывай тематику бизнеса автора, если сценарий о другом — у
+автора разный контент. Если сценарий буквально про его бизнес — показывай это;
+если про мышление/дисциплину/деньги/путь/город/отношения — показывай именно это.
 
-ЖЁСТКИЕ ПРАВИЛА:
-- НИКАКИХ узнаваемых людей и лиц крупным планом. Люди — только силуэты /
-  со спины / части тела в движении / издалека.
-- НИКАКОГО текста, надписей, логотипов в кадре.
-- Каждый промпт — на АНГЛИЙСКОМ (Seedance лучше понимает английский).
-- Форма мульти-шот: начни с "Multiple shots.", затем 2-3 плана подряд
-  с ракурсом в скобках ([wide shot], [close-up], [tracking shot]) и
-  движением камеры словами. Вертикаль 9:16. ~40-80 слов.
+ШАГ 2 — под каждый бит напиши конкретный визуальный промпт ИМЕННО про предмет
+этого бита. Описывай КОНКРЕТНЫЕ объекты/место/действие (не общими словами),
+чтобы видеогенератор не уходил в generic.
+
+ТОН (бренд, всегда — только стиль, НЕ предмет): энергичный предпринимательский
+кинематограф, премиальный свет, контраст, динамичная камера, ощущение движения
+вперёд. Предмет — всегда из сценария, тон — этот.
+
+ПРАВИЛА:
+- Люди разрешены в действии (со спины, в движении, руки, фигуры, экипировка).
+  Избегай крупных узнаваемых лиц-портретов знаменитостей.
+- НИКАКОГО текста, надписей, логотипов в кадре (свои субтитры кладём отдельно).
+- Каждый промпт — на АНГЛИЙСКОМ.
+- Мульти-шот: начни с "Multiple shots.", 2-3 плана с ракурсом в скобках
+  ([wide shot], [close-up], [tracking shot]) и движением камеры. Вертикаль 9:16. ~40-80 слов.
 
 Верни СТРОГО JSON без markdown:
-{"clips":[{"beat":"<смысл фрагмента, рус>","prompt":"Multiple shots. ..."}]}
-
-Сценарий:"""
+{"clips":[{"beat":"<смысл фрагмента, рус>","prompt":"Multiple shots. ..."}]}"""
 
 
 def _strip_fences(text: str) -> str:
@@ -125,7 +146,8 @@ def _release_director_lock(handle) -> None:
 
 
 def plan_clips(script_text: str, claude, max_clips: int = MAX_CLIPS,
-               target_clips: int | None = None) -> list[dict]:
+               target_clips: int | None = None,
+               business_context: str | None = None) -> list[dict]:
     """Turn a voiceover script into Seedance prompts via the LLM director.
 
     Phase 1 (cutaways): `target_clips=None` → "2-4 бита, сам реши" (unchanged).
@@ -143,7 +165,12 @@ def plan_clips(script_text: str, claude, max_clips: int = MAX_CLIPS,
     else:
         min_clips = min(MIN_CLIPS, max_clips)
         count_note = ""
-    base = f"{_DIRECTOR_PROMPT}{count_note}\n{script_text}"
+    persona = (business_context or _DEFAULT_PERSONA).strip()
+    base = (
+        f"{_DIRECTOR_PROMPT}\n\n"
+        f"КОНТЕКСТ АВТОРА: {persona}{count_note}\n\n"
+        f"Сценарий:\n{script_text}"
+    )
     last_err: Exception | None = None
     flock = _acquire_director_lock()
     try:
@@ -172,9 +199,13 @@ def plan_clips(script_text: str, claude, max_clips: int = MAX_CLIPS,
 
 # --- Engine ---------------------------------------------------------------
 
-# fal.ai price for Seedance Pro Fast, per 5s, at SEEDANCE_RESOLUTION (720p).
-# Token-priced (∝ pixels): 1080p≈$0.245 (verified live), 720p = ×(720·1280)/(1080·1920)=×4/9≈$0.11.
-# fal returns no per-call cost → engine estimates from this; себестоимость-фаза reuses it.
+# Active engine pricing: Kling 3.0 Pro — flat $0.112/sec (audio off), resolution-
+# independent (verified on fal 2026-06-20). fal returns no per-call cost → engine
+# estimates from this. Fullscreen reel cost ≈ voiceover_sec × this (видеоряд обязан
+# покрыть всю озвучку → есть пол по цене). себестоимость-фаза reuses it.
+KLING_PRICE_PER_SEC_USD = 0.112
+
+# Legacy Seedance v1 Pro Fast price (kept for reference; engine switched to Kling 2026-06-20).
 SEEDANCE_PRICE_PER_5S_USD = 0.11
 
 CLIPS_SUBDIR = "aivideo"   # own namespace, parallel to Remotion (autobroll/) & HF (hyperframes/)
@@ -186,7 +217,7 @@ def estimate_cost_range(duration: int) -> "tuple[float, float]":
     Shown in the UI before a paid run so the user isn't surprised by the bill.
     Estimate only — fal returns no per-call cost (see SEEDANCE_PRICE_PER_5S_USD).
     """
-    per_clip = (duration / 5.0) * SEEDANCE_PRICE_PER_5S_USD
+    per_clip = duration * KLING_PRICE_PER_SEC_USD
     return MIN_CLIPS * per_clip, MAX_CLIPS * per_clip
 
 
@@ -202,9 +233,11 @@ def estimate_voiceover_sec(script_text: str) -> float:
     return words / WORDS_PER_MIN * 60.0
 
 
-def clips_needed(est_sec: float, clip_len: float, buffer: int = 1) -> int:
-    """Сколько клипов сгенерить, чтобы покрыть est_sec при длине clip_len, +запас.
-    Чуть с перебором — ассемблер подрежет последний под реальную озвучку (без кругов)."""
+def clips_needed(est_sec: float, clip_len: float, buffer: int = 0) -> int:
+    """Сколько клипов сгенерить, чтобы покрыть est_sec при длине clip_len.
+    БЕЗ overshoot-буфера (2026-06-20): на Kling каждый лишний клип = реальные деньги
+    ($0.112/сек), а ассемблер и так подрежет последний клип под реальную озвучку.
+    ±5с не критично (Артём). buffer оставлен параметром на случай явной нужды."""
     n = math.ceil(est_sec / clip_len) + buffer if est_sec > 0 else MIN_CLIPS
     return max(MIN_CLIPS, n)
 
@@ -217,7 +250,7 @@ def fullscreen_plan(script_text: str, clip_len: int = FULLSCREEN_CLIP_LEN) -> di
     озвучки (оценка) + стоимость. Возвращает {n_clips, est_sec, clip_len, cost}."""
     est = estimate_voiceover_sec(script_text)
     n = clips_needed(est, clip_len)
-    cost = n * (clip_len / 5.0) * SEEDANCE_PRICE_PER_5S_USD
+    cost = n * clip_len * KLING_PRICE_PER_SEC_USD
     return {"n_clips": n, "est_sec": est, "clip_len": clip_len, "cost": cost}
 
 
@@ -245,39 +278,42 @@ def _default_claude():
 
 
 def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb=None,
-                      max_clips=MAX_CLIPS, target_clips=None):
-    """Script -> cinematic Seedance clips. Returns (list[Path], cost_usd).
+                      max_clips=MAX_CLIPS, target_clips=None, business_context=None):
+    """Script -> cinematic Kling 3.0 Pro clips. Returns (list[Path], cost_usd).
 
     Same contract as generate_hyperframes_broll / generate_auto_broll. Clips land
     in out_dir/aivideo/ai_NN.mp4. `duration` is the user-chosen 5 or 10. `max_clips`
     caps the director so we never PLAN/PAY for more clips than the caller can use.
     `claude` is optional — self-constructed when omitted, so callers mirror auto_broll.
+    `business_context` grounds the director's subject (defaults to the author persona).
+    Engine: Kling 3.0 Pro (2026-06-20, was Seedance v1 Pro Fast — generic, weak).
     Tolerates per-clip failures (returns the successful ones); raises AiVideoError
-    if Seedance is unconfigured or nothing was produced.
+    if the video backend is unconfigured or nothing was produced.
     """
-    ok, reason = fal_media.seedance_ready()      # preflight BEFORE the paid Claude director
+    ok, reason = fal_media.seedance_ready()      # preflight (same FAL_KEY gates Kling too)
     if not ok:
-        raise AiVideoError(f"Seedance недоступен: {reason}")
+        raise AiVideoError(f"Видео-движок недоступен: {reason}")
     if claude is None:
         claude = _default_claude()
     clips_dir = Path(out_dir) / CLIPS_SUBDIR
 
     _notify(progress_cb, "🎬 Режиссёр придумывает раскадровку…")
-    plans = plan_clips(script_text, claude, max_clips=max_clips, target_clips=target_clips)
+    plans = plan_clips(script_text, claude, max_clips=max_clips, target_clips=target_clips,
+                       business_context=business_context)
 
-    _notify(progress_cb, f"🎥 Генерю {len(plans)} кинематографичных клипа (Seedance, ~{duration}с)…")
+    _notify(progress_cb, f"🎥 Генерю {len(plans)} кинематографичных клипа (Kling 3.0 Pro, ~{duration}с)…")
     paths: list[Path] = []
     for i, clip in enumerate(plans, start=1):
         dest = clips_dir / f"ai_{i:02d}.mp4"
-        res = fal_media.generate_seedance_video(clip["prompt"], dest, duration=duration)
+        res = fal_media.generate_kling_video(clip["prompt"], dest, duration=duration)
         if res:
             paths.append(Path(res))
         else:
             logger.warning(f"ai_video: clip {i}/{len(plans)} failed, skipping")
 
     if not paths:
-        raise AiVideoError("all Seedance clips failed")
+        raise AiVideoError("all Kling clips failed")
 
-    cost = len(paths) * (duration / 5.0) * SEEDANCE_PRICE_PER_5S_USD
+    cost = len(paths) * duration * KLING_PRICE_PER_SEC_USD
     logger.info(f"ai_video: {len(paths)}/{len(plans)} clips ready, est cost ${cost:.2f}")
     return paths, cost
