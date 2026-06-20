@@ -26,6 +26,8 @@ from pathlib import Path
 # Import alias чтобы тесты могли mock'ать через 'selfie.transcribe._transcribe_words'
 from subtitle_burner import transcribe_words as _transcribe_words
 
+import tenant  # per-tenant Whisper-промпт (M2): active_tenant_id() без импорта bot.py
+
 
 # Курированный список ключевых терминов для Whisper hint.
 # Структура: бренд Максима + бизнес-сферы + ядро AI-tools (что он реально
@@ -49,6 +51,13 @@ _CURATED_BRANDS_FOR_PROMPT: list[str] = (
     _MAKSIM_BRANDS + _MAKSIM_BUSINESS_TERMS + _CORE_AI_TOOLS
 )
 
+# AI-инструменты Артёма (panferov) для Whisper-hint — его контент про нейросети
+# (порт M2). БЕЗ бизнес-терминов Максима (картинг/глэмпинг/Юмсунов).
+_PANFEROV_AI_TOOLS: list[str] = [
+    "ChatGPT", "Claude", "Cursor", "Gemini", "Midjourney", "GPT-5", "Opus",
+    "Sonnet", "Grok", "Sora", "HeyGen", "Notion", "ElevenLabs",
+]
+
 
 def build_whisper_prompt() -> str:
     """Собрать natural-language hint для faster-whisper.
@@ -62,6 +71,12 @@ def build_whisper_prompt() -> str:
         Faster-Whisper использует этот prompt как контекст и лучше распознаёт
         перечисленные термины.
     """
+    # panferov (Артём) — контент про AI-инструменты, БЕЗ бизнес-терминов Максима
+    # (порт M2). Иначе Whisper-hint смещал бы распознавание к чужой лексике.
+    if tenant.active_tenant_id() == "panferov":
+        tools = ", ".join(_PANFEROV_AI_TOOLS)
+        return f"Запись Артёма Панфёрова об AI-инструментах и нейросетях: {tools}."
+    # maksim/default — текущее поведение (backward-compat).
     brand = ", ".join(_MAKSIM_BRANDS + _MAKSIM_BUSINESS_TERMS)
     tools = ", ".join(_CORE_AI_TOOLS)
     return (

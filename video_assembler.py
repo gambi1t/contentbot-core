@@ -313,6 +313,44 @@ def _find_project_photos(project_dir: Path) -> list[Path]:
     return sorted(set(photos))
 
 
+# Дефолтный split-anchor бренда shoes. Геометрически выверен (см.
+# _split_visible_photo_band + tests/test_split_anchor): обувь на lifestyle-фото
+# лежит в нижних [0.60, 0.95] высоты; чтобы попадать в split-слот ЦЕЛИКОМ на всех
+# кадрах Ken Burns (zoom 1.0→1.06), anchor должен быть высоким (низ фото).
+# 0.75/0.62 срезали обувь снизу → 1.0 (нижняя половина: обувь целиком + минимум
+# пола). Порт M4-замок из legacy content-bot (7 июня).
+SHOES_SPLIT_ANCHOR = 1.0
+
+
+def _split_visible_photo_band(anchor: float, zoom: float = 1.0) -> tuple[float, float]:
+    """Вертикальная зона исходного фото (доли 0..1), реально видимая в split-слоте
+    1080×960 после Ken Burns (центр-зум ``zoom``) + split-crop с данным ``anchor``.
+
+    Ken Burns output = зона фото [0.5-0.5/zoom, 0.5+0.5/zoom] (центрированный зум);
+    split-crop берёт полосу с верхним краем на anchor → в долях фото:
+    [zone_top + anchor*0.5*zone_h, zone_top + (anchor*0.5+0.5)*zone_h].
+    Возвращает (top_frac, bot_frac)."""
+    zoom = max(zoom, 1.0)
+    zone_top = 0.5 - 0.5 / zoom
+    zone_h = 1.0 / zoom
+    band_top = zone_top + (anchor * 0.5) * zone_h
+    band_bot = zone_top + (anchor * 0.5 + 0.5) * zone_h
+    return (band_top, band_bot)
+
+
+def _shoe_anchor_keeps_shoe_visible(
+    shoe_top: float, shoe_bot: float, anchor: float, zooms=(1.0, 1.06)
+) -> bool:
+    """True если зона обуви [shoe_top, shoe_bot] (доли высоты фото) полностью
+    попадает в split-слот на ВСЕХ кадрах Ken Burns (zoom от 1.0 до 1.06).
+    Используется в проде (валидация) и в TDD (замок против отката к 0.75)."""
+    for z in zooms:
+        bt, bb = _split_visible_photo_band(anchor, z)
+        if not (bt <= shoe_top + 1e-9 and bb >= shoe_bot - 1e-9):
+            return False
+    return True
+
+
 def _resolve_photo_anchor(photo_path: Path, brand_default: float) -> float:
     """Resolve the split-crop anchor for a single photo.
 
@@ -1751,7 +1789,7 @@ def assemble_auto_montage(
         # _resolve_photo_anchor. Другие бренды — центр-кроп (anchor 0.5).
         smart_anchor_offsets: dict[int, float] = {}
         if brand_name == "shoes" and project_photos and photo_clips:
-            brand_default_anchor = 1.0
+            brand_default_anchor = SHOES_SPLIT_ANCHOR
             for local_i, photo_path in enumerate(project_photos):
                 global_i = len(video_paths) + local_i
                 # Guard: project_photos and photo_clips are 1:1 by index,

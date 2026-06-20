@@ -271,6 +271,24 @@ def config_doctor(
     return problems
 
 
+def active_tenant_id() -> str:
+    """ID активного тенанта процесса — для низкоуровневых модулей
+    (subtitle_burner / selfie.transcribe), которым нужно выбрать per-tenant
+    поведение БЕЗ импорта bot.py (циркуляр + тяжесть).
+
+    Источник: env ``TENANT_ID_EXPECTED`` (выставляется per-deployment, см.
+    bot.py), иначе ``tenant.json``, иначе ``"default"``. Не кэшируется —
+    вызывается редко (раз на транскрипцию), чтение env/файла дёшево, а
+    отсутствие кэша исключает stale-состояние в тестах."""
+    env = os.getenv("TENANT_ID_EXPECTED")
+    if env:
+        return env
+    try:
+        return load_tenant().get("tenant_id") or "default"
+    except TenantConfigError:
+        return "default"
+
+
 def _cli() -> int:
     """CLI-доктор для runbook (CTO-ревью N1): проверка tenant.json ДО
     `systemctl start` в Phase 3-cutover. НЕ импортирует bot.py (иначе занял бы

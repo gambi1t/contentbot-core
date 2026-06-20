@@ -18,6 +18,8 @@ import logging
 import subprocess
 from pathlib import Path
 
+import tenant  # per-tenant brand-лексикон (M2): active_tenant_id() без импорта bot.py
+
 logger = logging.getLogger("subtitle_burner")
 
 # ── Style defaults (CapCut-inspired) ──────────────────────────────────────────
@@ -127,6 +129,50 @@ _BRAND_CANONICAL: dict[str, str] = {
     "lifedrive":        "Life Drive",
 }
 
+# Полный AI-лексикон Артёма (порт M2 из legacy content-bot). В core эти записи
+# были выброшены при переписи под Максима → субтитры Артёма показывали
+# «Кьюрсор»/«Опус». Возвращаем как общую базу (безопасно и для Максима).
+_AI_EXTRAS_CANONICAL: dict[str, str] = {
+    "gpt5": "GPT-5", "гпт5": "GPT-5", "джипити5": "GPT-5",
+    "opus": "Opus", "опус": "Opus",
+    "sonnet": "Sonnet", "соннет": "Sonnet",
+    "haiku": "Haiku", "хайку": "Haiku",
+    "anthropic": "Anthropic", "антропик": "Anthropic",
+    "openai": "OpenAI", "опенай": "OpenAI", "опенэйай": "OpenAI",
+    "cursor": "Cursor", "курсор": "Cursor", "кьюрсор": "Cursor", "кёрсор": "Cursor",
+    "lovable": "Lovable", "лавабл": "Lovable", "ловабл": "Lovable",
+    "bolt": "Bolt", "болт": "Bolt",
+    "windsurf": "Windsurf", "виндсёрф": "Windsurf", "виндсерф": "Windsurf",
+    "cline": "Cline", "клайн": "Cline",
+    "deepseek": "DeepSeek", "дипсик": "DeepSeek",
+    "perplexity": "Perplexity", "перплексити": "Perplexity",
+    "veo": "Veo", "вео": "Veo",
+    "whisper": "Whisper", "виспер": "Whisper",
+    "elevenlabs": "ElevenLabs", "элевенлабс": "ElevenLabs", "илевенлабс": "ElevenLabs",
+    "grok": "Grok", "грок": "Grok",
+    "notion": "Notion", "ноушн": "Notion", "ноушен": "Notion",
+}
+
+# Бизнес-термины Максима — применяются для maksim/default, НЕ для panferov
+# (в контенте Артёма про AI «моржа→маржа»/«глэмпинг»/«Life Drive» ложно
+# срабатывали бы). Ключи — нормализованные формы из _BRAND_CANONICAL.
+_MAKSIM_BUSINESS_KEYS: frozenset[str] = frozenset({
+    "моржа", "моржу", "морже", "моржой", "моржинальность", "маржа",
+    "себестоимость", "кэшфлоу", "кешфлоу", "кэшфло", "кешфло",
+    "глэмпинг", "глемпинг", "глампинг", "лайфдрайв", "lifedrive",
+})
+
+
+def _active_canonical() -> dict[str, str]:
+    """Словарь канонизации для активного тенанта (порт M2, per-tenant).
+
+    panferov (Артём) → AI-лексикон (полный, без бизнес-терминов Максима).
+    maksim/default → AI + бизнес (текущее поведение, backward-compat)."""
+    base = {**_BRAND_CANONICAL, **_AI_EXTRAS_CANONICAL}
+    if tenant.active_tenant_id() == "panferov":
+        return {k: v for k, v in base.items() if k not in _MAKSIM_BUSINESS_KEYS}
+    return base
+
 # Maximum number of adjacent tokens to try combining when looking for a brand.
 # Covers cases like "V" + "8" + "." + "1" → "V8.1" (4 tokens).
 _BRAND_MAX_WINDOW = 4
@@ -169,6 +215,7 @@ def fix_brand_names(words: list[dict]) -> list[dict]:
     if not words:
         return []
 
+    canonical = _active_canonical()
     out: list[dict] = []
     i = 0
     n = len(words)
@@ -189,9 +236,9 @@ def fix_brand_names(words: list[dict]) -> list[dict]:
             combined = "".join(
                 _normalize_for_brand_lookup(w["word"]) for w in window
             )
-            if combined and combined in _BRAND_CANONICAL:
+            if combined and combined in canonical:
                 out.append({
-                    "word":  _BRAND_CANONICAL[combined],
+                    "word":  canonical[combined],
                     "start": window[0]["start"],
                     "end":   window[-1]["end"],
                 })
@@ -211,8 +258,8 @@ def fix_brand_names(words: list[dict]) -> list[dict]:
             stripped = stripped[:-1]
         key = _normalize_for_brand_lookup(stripped)
         new_w = dict(w)
-        if key and key in _BRAND_CANONICAL:
-            new_w["word"] = _BRAND_CANONICAL[key] + tail
+        if key and key in canonical:
+            new_w["word"] = canonical[key] + tail
         out.append(new_w)
         i += 1
 
