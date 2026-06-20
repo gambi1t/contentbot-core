@@ -39,7 +39,10 @@ from .draft import (
 )
 from .materialize import materialize_items, validate_upload_media
 from .source_menu import source_menu_keyboard, hf_fallback_action
-from bot_state import pending as _bot_pending, save_pending as _bot_save_pending
+from bot_state import (
+    pending as _bot_pending, save_pending as _bot_save_pending,
+    project_dir as _bot_project_dir,
+)
 from music_mixer import list_categories, pick_random_track
 from selfie.cover import (
     extract_frame, get_frame_timestamps, probe_video_duration,
@@ -164,6 +167,99 @@ def _broll_card_data(theme: str) -> dict:
         "format": ["Short video"],
         "cta": "",
     }
+
+
+# ── Гейт 6: публикация (мост в карточный публикатор) ──────────────────
+# Дизайн A (CTO-ревью + верификация кода): НЕ строим второй публикатор, а делаем
+# B-roll-финал видимым для эталонного (карточко-центричного) движка и
+# переиспользуем его callbacks gen_description / tgpost_from_script / crosspost:
+# as-is. Pipeline 2 — всегда standalone (card_broll уходит в legacy), папки
+# проекта ещё нет → создаём её сами и контролируем заголовок.
+
+def _publication_title(theme: str) -> str:
+    """Канонический заголовок карточки — ЕДИНЫЙ источник (тот же, что при
+    создании карточки), чтобы persist и seed дали одну папку проекта
+    projects/{nid[:8]}_{title}; иначе _find_video_for_card смотрит в пустую."""
+    return _broll_card_data(theme)["title"]
+
+
+def _publish_action_buttons(nid: str) -> list:
+    """3 кнопки публикации финал-экрана — реюз СУЩЕСТВУЮЩИХ callbacks эталона
+    (ноль новых веток bot.py). nid[:20] — как у карточного «Продолжить: публикация»."""
+    return [
+        [InlineKeyboardButton("📝 Описание", callback_data="gen_description")],
+        [InlineKeyboardButton("📰 TG-пост", callback_data="tgpost_from_script")],
+        [InlineKeyboardButton("📢 Кросс-постинг", callback_data=f"crosspost:{nid[:20]}")],
+    ]
+
+
+async def bridge_broll_to_publication(draft: dict, *, uid: int, tg_post_fn=None) -> bool:
+    """Сделать готовый B-roll видимым для карточного публикатора. Возвращает
+    True, если мост построен (publish-кнопки можно показывать). Никогда не
+    бросает — сбой моста не должен ломать доставку уже собранного ролика.
+
+    1. atomic-копия финала → proj/final_video.mp4 (+ script.txt) — _find_video_for_card подхватит;
+    2. стилизованный TG-пост (DI tg_post_fn=rewrite_for_telegram) → pending['selfie_tg_post'];
+    3. merge-seed pending[uid] (setdefault().update — не затирая живой state) + brand/pipeline.
+    Обложку НЕ копируем: если гейт обложки прошёл, _find_thumbnail_for_card возьмёт
+    cover из Notion-карточки (фолбэк эталона)."""
+    nid = draft.get("notion_page_id")
+    final = draft.get("final_path")
+    if not nid or not final:
+        return False
+    title = _publication_title(draft.get("theme", ""))
+    try:
+        proj = _bot_project_dir({"notion_page_id": nid, "card_data": {"title": title}})
+        if not proj:
+            return False
+        dst = proj / "final_video.mp4"
+        tmp = dst.with_suffix(".mp4.part")
+        await asyncio.to_thread(shutil.copy2, str(final), str(tmp))
+        tmp.replace(dst)
+        (proj / "script.txt").write_text(draft.get("script", ""), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"[broll.pub] persist в папку проекта не удался: {e}")
+        return False
+    # Стилизованный TG-пост (Артём: «нормальный пост везде», не сырой транскрипт).
+    tg_post = None
+    if tg_post_fn:
+        try:
+            tg_post = await tg_post_fn(draft.get("script", ""), "", title)
+        except Exception as e:
+            logger.warning(f"[broll.pub] генерация TG-поста не удалась (не критично): {e}")
+    # merge-seed pending — НЕ слепое присваивание (CTO-ревью): сохраняем живой state.
+    state = _bot_pending.setdefault(uid, {})
+    state.update({
+        "notion_page_id": nid,
+        "card_data": {"title": title},
+        "script": draft.get("script", ""),
+        "crosspost_card_id": nid[:20],
+        "brand": "maksim",
+        "pipeline": "broll",
+    })
+    if tg_post:
+        state["selfie_tg_post"] = tg_post
+    _bot_save_pending(_bot_pending)
+    logger.info(
+        f"[broll.pub] мост готов nid={nid[:8]} proj={getattr(proj, 'name', '?')} "
+        f"tg_post={'yes' if tg_post else 'no'}")
+    return True
+
+
+async def _charge_broll_publication(uid, nid, title, *, register_fn=None, charge_fn=None) -> None:
+    """Биллинг-паритет (Артём: «платный»): register_video → charge(download_final),
+    идемпотентно по notion_page_id (с кросспостом не задвоится — дедуп по
+    videos.charged). register ДО charge, иначе charge_video вернёт video_not_found.
+    Никогда не ломает поток (биллинг — best-effort)."""
+    if not nid:
+        return
+    try:
+        if register_fn:
+            await register_fn(uid, nid, title)
+        if charge_fn:
+            await charge_fn(uid, nid, "download_final")
+    except Exception as e:
+        logger.warning(f"[broll.pub] биллинг не выполнен (поток не прерываем): {e}")
 
 
 async def generate_broll_preview(
@@ -733,6 +829,9 @@ async def accept_broll_voiceover(
     chat_id: int | None = None,
     status_fn=None,
     deliver_fn=None,
+    register_fn=None,
+    charge_fn=None,
+    tg_post_fn=None,
 ) -> None:
     """b2vop:accept → озвучка принята: собрать ролик, ПЕРЕИСПОЛЬЗУЯ уже
     сгенерённый mp3 через voiceover_fn-шим (copyfile) — как own-voice. assemble
@@ -753,7 +852,8 @@ async def accept_broll_voiceover(
 
     await assemble_broll_from_draft(
         update, context, _reuse_voiceover, chat_id=chat_id, status_fn=status_fn,
-        deliver_fn=deliver_fn)
+        deliver_fn=deliver_fn, register_fn=register_fn, charge_fn=charge_fn,
+        tg_post_fn=tg_post_fn)
 
 
 async def regen_broll_voiceover(
@@ -1499,6 +1599,9 @@ async def assemble_broll_from_draft(
     chat_id: int | None = None,
     status_fn=None,
     deliver_fn=None,
+    register_fn=None,
+    charge_fn=None,
+    tg_post_fn=None,
 ) -> None:
     """Фаза 2: озвучка → ffmpeg-монтаж → субтитры → отправка MP4.
 
@@ -1640,6 +1743,20 @@ async def assemble_broll_from_draft(
             except Exception as e:
                 logger.warning(f"[broll] статус карточки не обновлён: {e}")
 
+        # Гейт 6: публикация. Биллинг-паритет (платный) при доставке + мост в
+        # карточный публикатор (финал в папку проекта + сид pending) — после чего
+        # на финал-экране работают эталонные gen_description/tgpost/crosspost.
+        pub_ready = False
+        if notion_page_id:
+            _uid = _uid_from_update(update)
+            draft["final_path"] = cover_final or str(final_path)
+            if delivered:
+                await _charge_broll_publication(
+                    _uid, notion_page_id, _publication_title(draft.get("theme", "")),
+                    register_fn=register_fn, charge_fn=charge_fn)
+            pub_ready = await bridge_broll_to_publication(
+                draft, uid=_uid, tg_post_fn=tg_post_fn)
+
         action_rows = []
         # Инкремент 4: обложка — первый пост-сборочный шаг (если монтаж сохранён).
         if cover_final and cover_draft_id:
@@ -1650,6 +1767,9 @@ async def assemble_broll_from_draft(
                 "🖼 Сделать обложку", callback_data=f"b2cov:start:{cover_draft_id}")])
             action_rows.append([InlineKeyboardButton(
                 "✍️ Название/хук", callback_data=f"b2title:start:{cover_draft_id}")])
+        # Гейт 6: кнопки публикации (если мост построен) — реюз эталонных callbacks.
+        if pub_ready:
+            action_rows.extend(_publish_action_buttons(notion_page_id))
         action_rows.append([InlineKeyboardButton("🔄 Ещё B-roll ролик", callback_data="broll_regen")])
         if notion_url:
             action_rows.append([InlineKeyboardButton("📋 К карточке", url=notion_url)])

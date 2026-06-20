@@ -3995,6 +3995,35 @@ async def _broll_deliver(tg_bot, chat_id: int, path: str, caption: str):
         return None
 
 
+# --- Гейт 6 (публикация) DI-хелперы для B-roll Pipeline 2 ---
+# Передаются в assemble_broll_from_draft, чтобы broll/handlers.py не делал
+# циклический import bot (как deliver_fn/status_fn). Реюз эталонных движков.
+
+async def _broll_register_video(user_id: int, notion_page_id: str, title: str) -> None:
+    """Привязка B-roll-ролика к клиенту для биллинга (паритет с селфи). Mirror
+    register-паттерна script-approve. Админы/BILLING_ENABLED=0 пропускаются; не
+    бросает — биллинг не ломает поток."""
+    if _billing_is_bypassed(user_id):
+        return
+    try:
+        client = await asyncio.to_thread(billing_api.get_client, user_id)
+        mode = (client.mode_default if client else "self")
+        await asyncio.to_thread(
+            billing_api.register_video, notion_page_id, user_id, mode, title or "")
+        logger.info(
+            f"[billing] broll video registered: {notion_page_id[:12]}... mode={mode}")
+    except Exception as e:
+        logger.error(f"[billing] broll register_video failed: {e}", exc_info=True)
+
+
+async def _broll_tg_post(script: str, description: str, topic: str) -> str:
+    """Стилизованный TG-пост для B-roll — тот же движок, что у кнопки 📰
+    (rewrite_for_telegram + claude). Чтобы кросспост в TG-канал постил нормальный
+    пост, а не сырой транскрипт (Артём: «нормальный пост везде»)."""
+    return await asyncio.to_thread(
+        tg_post_writer.rewrite_for_telegram, script, description, topic, claude)
+
+
 # --- Notion helpers ---
 def create_notion_card(card_data: dict, script_text: str, cover_url: str = None,
                        source_urls: list = None, youtube_urls: list = None) -> tuple[str, str]:
@@ -9756,7 +9785,9 @@ async def _consume_broll_ownvoice(update: Update, context: ContextTypes.DEFAULT_
     from broll.handlers import assemble_broll_from_draft
     await assemble_broll_from_draft(
         update, context, _own_voiceover, chat_id=update.effective_chat.id,
-        status_fn=update_notion_status, deliver_fn=_bdeliver)
+        status_fn=update_notion_status, deliver_fn=_bdeliver,
+        register_fn=_broll_register_video, charge_fn=_billing_charge_if_needed,
+        tg_post_fn=_broll_tg_post)
 
 
 async def _consume_selfvoice_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -13029,7 +13060,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from broll.handlers import accept_broll_voiceover
         await accept_broll_voiceover(
             update, context, chat_id=query.message.chat_id,
-            status_fn=update_notion_status, deliver_fn=_bdeliver)
+            status_fn=update_notion_status, deliver_fn=_bdeliver,
+            register_fn=_broll_register_video, charge_fn=_billing_charge_if_needed,
+            tg_post_fn=_broll_tg_post)
         return
 
     if query.data == "b2vop:regen":
