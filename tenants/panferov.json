@@ -1,0 +1,22 @@
+{
+  "tenant_id": "panferov",
+  "features": {
+    "tg_post": true,
+    "carousel": false,
+    "idea_bank": false,
+    "launch_monitor": true,
+    "youtube_broll": true,
+    "hyperframes": false,
+    "remotion": false,
+    "ai_video": false,
+    "broll_pipeline": false,
+    "image_gen": true,
+    "video_gen": true,
+    "instagram_dm": true,
+    "billing": false,
+    "subscriber_stats": true
+  },
+  "brands": {
+    "allowed": ["default", "shoes"]
+  }
+}
