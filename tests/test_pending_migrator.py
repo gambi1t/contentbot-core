@@ -90,6 +90,45 @@ def test_int_and_str_keys():
     _assert(384671843 in migrated, "int-ключ юзера сохранён")
 
 
+def test_drops_new_seedance_pipeline2_cover_fields():
+    """I6 (ChatGPT-ревью cutover): новые state-поля, появившиеся ПОСЛЕ написания
+    allowlist (Seedance/ai_video, Pipeline-2 broll2_*, cover-gate, narrative,
+    draft_id'ы) — ЭФЕМЕРНЫЕ, должны отбрасываться (whitelist), персистентные
+    указатели карточки — сохраняться. Замок: если кто-то по ошибке внесёт
+    активный draft_id/state в allowlist — этот тест упадёт.
+    """
+    print("\n-- I6: новые Seedance/Pipeline-2/cover поля отбрасываются --")
+    raw = {"384671843": {
+        # персистентное — должно остаться
+        "notion_page_id": "keep-x", "card_data": {"title": "Тест"}, "card_brand": "shoes",
+        "script": "сценарий", "idea": "идея",
+        # новые эфемерные (Seedance / Pipeline-2 / cover-gate / narrative) — должны уйти
+        "state": "broll2_uploading",
+        "ai_video": True, "narrative": True,
+        "broll2_draft_id": "d1", "broll2_title_text": "хук", "broll2_ownvoice": True,
+        "broll2_cover_text": "t", "broll2_manual": {}, "broll2_edit_script": "s",
+        "broll_draft_id": "d2", "broll_clips": ["c1"], "broll_lib_category": "apps",
+        "draft_id": "d3", "cover_draft_id": "c", "cover_path": "C:/Temp/cov.jpg",
+        "cover_options": [1], "cover_text": "txt", "description_draft": "dd",
+        "carousel_seed": 7, "ideas_batch": [1, 2],
+    }}
+    migrated, dropped = pm.migrate_pending(raw)
+    u = migrated["384671843"]
+    # персистентное осталось
+    _assert(u.get("notion_page_id") == "keep-x", "notion_page_id остался")
+    _assert(u.get("card_data", {}).get("title") == "Тест", "card_data остался")
+    _assert(u.get("script") == "сценарий" and u.get("idea") == "идея", "script/idea остались")
+    # все новые эфемерные ушли
+    for k in ("state", "ai_video", "narrative", "broll2_draft_id", "broll2_title_text",
+              "broll2_ownvoice", "broll2_cover_text", "broll2_manual", "broll2_edit_script",
+              "broll_draft_id", "broll_clips", "broll_lib_category", "draft_id",
+              "cover_draft_id", "cover_path", "cover_options", "cover_text",
+              "description_draft", "carousel_seed", "ideas_batch"):
+        _assert(k not in u, f"{k} отброшен (эфемерное, не просочилось на ядро)")
+    # абсолютный путь cover (C:/Temp на чужом хосте) точно в diff
+    _assert("cover_path" in dropped.get("384671843", []), "cover_path (C:/Temp) попал в diff")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"\n{'='*60}\nRunning {len(tests)} pending_migrator tests\n{'='*60}")

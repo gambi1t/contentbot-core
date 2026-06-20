@@ -16,9 +16,14 @@ from __future__ import annotations
 import sys
 
 # Только эти ключи переносятся (персистентные указатели карточки + сценарий).
-# Всё остальное (state, selfie_tmp_dir/source/subtitled/cover/final, selfie_music_*,
-# selfie_cover_*, stats_draft, voice_parts, shotlist, search_queries/videos,
-# cover_pool_*) — эфемерное состояние сессии, на новом хосте бесполезно/вредно.
+# Всё остальное — эфемерное состояние сессии, на новом хосте бесполезно/вредно:
+#   - selfie: state, selfie_tmp_dir/source/subtitled/cover/final, selfie_music_*, selfie_cover_*
+#   - Pipeline-2 (I6): broll2_* (draft_id/uploading/title_text/ownvoice/cover_*/edit_script/manual),
+#     broll_draft_id/broll_clips/broll_lib_category, draft_id, narrative, ai_video
+#   - cover-gate (I6): cover_* (draft_id/path/options/text/pool_*), description_draft
+#   - прочее: stats_draft, voice_parts, shotlist, search_queries/videos, carousel_seed, ideas_batch
+# Активный draft_id НЕ переносим намеренно (broll_drafts/ — активная незавершённая
+# сборка с TTL, как и активный state: на ядре после простоя зависнет/битый путь).
 ALLOWED_PENDING_KEYS = frozenset({
     "notion_page_id",
     "notion_edit_card",
