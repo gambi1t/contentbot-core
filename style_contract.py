@@ -26,14 +26,33 @@ _DEFAULT_PATH = (
 )
 
 
+def _active_contract_path() -> Path:
+    """Путь к style-контракту активного тенанта (per-tenant, HF срез C).
+
+    Generic: `style_contract.<tenant_id>.json` если есть, иначе дефолт
+    (`style_contract.json`). `tenant_id` — из `tenant.active_tenant_id()`
+    (lazy import, чтобы style_contract оставался импортируемым standalone).
+    panferov → style_contract.panferov.json (Nox Dark); maksim/default → дефолт.
+    """
+    try:
+        import tenant
+        tid = tenant.active_tenant_id()
+    except Exception:
+        return _DEFAULT_PATH
+    cand = _DEFAULT_PATH.parent / f"style_contract.{tid}.json"
+    return cand if cand.exists() else _DEFAULT_PATH
+
+
 # ── загрузка ─────────────────────────────────────────────────────────────
 def load_style_contract(path: Path | str | None = None) -> dict[str, Any]:
-    """Читает JSON-контракт. По умолчанию `hyperframes_assets/style_contract.json`.
+    """Читает JSON-контракт. Без `path` — контракт активного тенанта
+    (`_active_contract_path()`: panferov → style_contract.panferov.json,
+    иначе style_contract.json).
 
     Не используем кэширование — файл маленький (~1KB), читается раз на старт
     оркестратора, при тестах удобно перечитывать.
     """
-    p = Path(path) if path else _DEFAULT_PATH
+    p = Path(path) if path else _active_contract_path()
     if not p.exists():
         raise FileNotFoundError(
             f"style_contract.json не найден по пути {p}. Это критичный артефакт "
