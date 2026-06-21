@@ -64,8 +64,9 @@ def test_fullscreen_plan_cost_kling_and_no_overshoot():
 def test_generate_ai_broll_calls_kling(monkeypatch, tmp_path):
     calls = {"kling": 0, "seedance": 0}
 
-    def fake_kling(prompt, dest, duration=5, aspect="9:16"):
+    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
         calls["kling"] += 1
+        calls["neg"] = negative_prompt
         return str(dest)
 
     def fake_seedance(*a, **k):
@@ -76,15 +77,16 @@ def test_generate_ai_broll_calls_kling(monkeypatch, tmp_path):
     monkeypatch.setattr(A.fal_media, "generate_kling_video", fake_kling)
     monkeypatch.setattr(A.fal_media, "generate_seedance_video", fake_seedance)
     monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [
-        {"beat": "x", "prompt": "Multiple shots. p1"},
-        {"beat": "y", "prompt": "Multiple shots. p2"},
-        {"beat": "z", "prompt": "Multiple shots. p3"},
+        {"beat": "x", "prompt": "Multiple shots. p1", "negative_prompt": "text, logo"},
+        {"beat": "y", "prompt": "Multiple shots. p2", "negative_prompt": "text, logo"},
+        {"beat": "z", "prompt": "Multiple shots. p3", "negative_prompt": "text, logo"},
     ])
 
     paths, cost = A.generate_ai_broll("сценарий", tmp_path, claude=object(),
                                       duration=10, target_clips=3)
     assert calls["kling"] == 3
     assert calls["seedance"] == 0
+    assert calls["neg"] == "text, logo"        # negative_prompt проброшен в fal-вызов
     assert len(paths) == 3
     assert abs(cost - 3 * 10 * A.KLING_PRICE_PER_SEC_USD) < 1e-9   # $3.36
 
@@ -124,6 +126,25 @@ def test_kling_requests_audio_off(monkeypatch, tmp_path):
     assert out is not None
     assert captured.get("generate_audio") is False
     assert captured.get("prompt") == "p"
+
+
+def test_kling_passes_negative_prompt(monkeypatch, tmp_path):
+    """negative_prompt доходит до fal-аргументов (поле существует в схеме v3/pro)."""
+    import fal_media
+    captured = {}
+    fake_fal = types.SimpleNamespace(
+        subscribe=lambda endpoint, **kw: (captured.update(kw.get("arguments", {})),
+                                          {"video": {"url": "http://x/v.mp4"}})[1]
+    )
+    monkeypatch.setitem(sys.modules, "fal_client", fake_fal)
+    monkeypatch.setattr(fal_media, "_is_configured", lambda: True)
+    monkeypatch.setattr(fal_media, "_download_timeout",
+                        lambda url, part: Path(part).write_bytes(b"x" * 60000))
+
+    out = fal_media.generate_kling_video("p", tmp_path / "c.mp4", duration=5,
+                                         negative_prompt="text, logo, deformed hands")
+    assert out is not None
+    assert captured.get("negative_prompt") == "text, logo, deformed hands"
 
 
 if __name__ == "__main__":

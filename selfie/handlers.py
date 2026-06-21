@@ -1420,7 +1420,7 @@ async def handle_broll_callback(
         data["selfie_aivid_job_id"] = {"id": job_id, "ts": now}
         max_clips = min(free, ai_video_broll.MAX_CLIPS)   # never plan/pay for more than fits
         await query.edit_message_text(
-            f"🎬 Генерю AI-видео из текста (Seedance, ~{duration}с/клип)…\n"
+            f"🎬 Генерю AI-видео из текста (Kling 3.0, ~{duration}с/клип)…\n"
             "Несколько минут — рендер в облаке. Дождись, пришлю результат."
         )
         clips: list = []

@@ -162,45 +162,47 @@ def test_engine_preflight_fails_before_claude(monkeypatch, tmp_path):
     assert spy.create_calls == 0                 # director never invoked when FAL unready
 
 
-def test_engine_threads_max_clips_and_caps_seedance_calls(monkeypatch, tmp_path):
+def test_engine_threads_max_clips_and_caps_kling_calls(monkeypatch, tmp_path):
     import ai_video_broll
     monkeypatch.setattr(ai_video_broll.fal_media, "seedance_ready", lambda: (True, ""))
     seen = {}
 
-    def director_spy(script, claude, max_clips=ai_video_broll.MAX_CLIPS, target_clips=None):
+    def director_spy(script, claude, max_clips=ai_video_broll.MAX_CLIPS, target_clips=None,
+                     business_context=None):
         seen["max_clips"] = max_clips
         return [{"prompt": f"p{i}", "beat": "b"} for i in range(max_clips)]
 
     monkeypatch.setattr(ai_video_broll, "plan_clips", director_spy)
     calls = {"n": 0}
 
-    def seedance(prompt, dest, duration=5, aspect="9:16"):
+    def kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
         calls["n"] += 1
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
         Path(dest).write_bytes(b"x")
         return str(dest)
 
-    monkeypatch.setattr(ai_video_broll.fal_media, "generate_seedance_video", seedance)
+    monkeypatch.setattr(ai_video_broll.fal_media, "generate_kling_video", kling)
     ai_video_broll.generate_ai_broll("s", tmp_path, claude=object(), duration=5, max_clips=2)
     assert seen["max_clips"] == 2
     assert calls["n"] == 2                       # never pay for more than max_clips
 
 
-def test_engine_forwards_prompt_and_duration_to_seedance(monkeypatch, tmp_path):
+def test_engine_forwards_prompt_and_duration_to_kling(monkeypatch, tmp_path):
     import ai_video_broll
     monkeypatch.setattr(ai_video_broll.fal_media, "seedance_ready", lambda: (True, ""))
     monkeypatch.setattr(ai_video_broll, "plan_clips",
-                        lambda script, claude, max_clips=4, target_clips=None: [{"prompt": "PROMPT_X", "beat": "b"}])
+                        lambda script, claude, max_clips=4, target_clips=None,
+                        business_context=None: [{"prompt": "PROMPT_X", "beat": "b"}])
     captured = {}
 
-    def seedance(prompt, dest, duration=5, aspect="9:16"):
+    def kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
         captured["prompt"] = prompt
         captured["duration"] = duration
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
         Path(dest).write_bytes(b"x")
         return str(dest)
 
-    monkeypatch.setattr(ai_video_broll.fal_media, "generate_seedance_video", seedance)
+    monkeypatch.setattr(ai_video_broll.fal_media, "generate_kling_video", kling)
     ai_video_broll.generate_ai_broll("s", tmp_path, claude=object(), duration=10, max_clips=4)
     assert captured["prompt"] == "PROMPT_X"
     assert captured["duration"] == 10

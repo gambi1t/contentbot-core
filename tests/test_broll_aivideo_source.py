@@ -16,10 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 def test_fullscreen_plan_count_and_cost():
     import ai_video_broll as av
     p = av.fullscreen_plan(" ".join(["w"] * 90), clip_len=10)   # 90 words ≈ 36s
-    assert p["n_clips"] == 5                                    # ceil(36/10)+1 buffer
+    assert p["n_clips"] == 4                                    # ceil(36/10), без +1 буфера (kling-switch 20.06)
     assert p["clip_len"] == 10
     assert p["est_sec"] == pytest.approx(36.0)
-    assert p["cost"] == pytest.approx(5 * (10 / 5) * 0.11)      # 5 clips × 10s @ 720p
+    assert p["cost"] == pytest.approx(4 * 10 * av.KLING_PRICE_PER_SEC_USD)   # 4 клипа × 10с × Kling $0.112/с
 
 
 pytest.importorskip("telegram")

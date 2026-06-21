@@ -367,6 +367,7 @@ def generate_kling_video(
     dest: "str | Path",
     duration: Duration = 5,
     aspect: Aspect = "9:16",
+    negative_prompt: "str | None" = None,
 ) -> Optional[str]:
     """Generate one cinematic clip via Kling 3.0 Pro (text-to-video).
 
@@ -402,8 +403,8 @@ def generate_kling_video(
     dest = Path(dest)
     t0 = time.time()
     logger.info(
-        f"fal_media: kling {duration}s {aspect} prompt={prompt[:80]!r} "
-        f"key={_safe_key_preview()}"
+        f"fal_media: kling {duration}s {aspect} prompt={prompt[:160]!r} "
+        f"neg={(negative_prompt or '')[:80]!r} key={_safe_key_preview()}"
     )
 
     try:
@@ -414,6 +415,9 @@ def generate_kling_video(
                 "duration": str(duration),
                 "aspect_ratio": aspect,
                 "generate_audio": False,   # звук монтаж выкидывает + audio off дешевле ($0.112 vs $0.168/с)
+                # negative_prompt: жёстко гасит текст/UI/артефакты рук/лиц (схема fal v3/pro
+                # принимает поле; дефолт fal — "blur, distort, low quality"). Шлём только если задан.
+                **({"negative_prompt": negative_prompt} if negative_prompt else {}),
             },
             with_logs=False,
             start_timeout=SEEDANCE_TIMEOUT_S,

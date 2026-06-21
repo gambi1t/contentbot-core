@@ -13876,10 +13876,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        _av_header = f"🎬 AI-видео (Seedance) для «{card['title']}»"
+        _av_header = f"🎬 AI-видео (Kling 3.0) для «{card['title']}»"
         await query.edit_message_text(
             f"{_av_header}\n\n"
-            f"Режиссёр раскадровывает сценарий, Seedance рендерит клипы в облаке. "
+            f"Режиссёр раскадровывает сценарий, Kling рендерит клипы в облаке. "
             f"Несколько минут — буду присылать прогресс."
         )
 
@@ -13929,8 +13929,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         _on_sub = bool(os.getenv("CLAUDE_CODE_OAUTH_TOKEN"))
         await query.edit_message_text(
-            f"✅ AI-видео (Seedance) готово: {len(clips)} клипов для «{card['title']}».\n"
-            f"💵 Seedance: ~${cost_usd:.2f}\n\n"
+            f"✅ AI-видео (Kling 3.0) готово: {len(clips)} клипов для «{card['title']}».\n"
+            f"💵 Kling: ~${cost_usd:.2f}\n\n"
             f"Дальше — собери ролик в Про-монтаже (хук-аватар → 50/50 → CTA).",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🎬 Собрать ролик", callback_data=f"card_assemble:{full_id[:20]}")],
@@ -14820,7 +14820,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"card_hfbroll:{full_id[:20]}",
             )])
             buttons.append([InlineKeyboardButton(
-                "🎬 AI-видео из сценария (Seedance)",
+                "🎬 AI-видео из сценария (Kling 3.0)",
                 callback_data=f"card_aivideo:{full_id[:20]}",
             )])
             if NOTION_GUIDES_DB:

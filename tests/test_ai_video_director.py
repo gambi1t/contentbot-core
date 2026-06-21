@@ -55,6 +55,29 @@ def test_director_returns_clip_plans():
     assert all(c.get("beat") for c in clips)
 
 
+def test_director_clips_carry_negative_prompt():
+    """Контракт v2: каждый клип несёт negative_prompt; если режиссёр его не дал —
+    подставляется HOUSE_NEGATIVE (жёсткий запрет текста/артефактов в кадре)."""
+    import ai_video_broll
+    claude = _FakeClaude([_plan_json(3)])   # _plan_json НЕ кладёт negative_prompt
+    clips = ai_video_broll.plan_clips("сценарий", claude)
+    assert all(c.get("negative_prompt") for c in clips)                 # не пусто
+    assert all(c["negative_prompt"] == ai_video_broll.HOUSE_NEGATIVE for c in clips)
+    assert "text" in ai_video_broll.HOUSE_NEGATIVE                      # главный запрет — текст
+
+
+def test_director_preserves_clip_negative_prompt():
+    """Если режиссёр дал свой negative_prompt — он сохраняется, не затирается."""
+    import ai_video_broll
+    raw = json.dumps({"clips": [
+        {"beat": f"b{i}", "prompt": f"Multiple shots. p{i}",
+         "negative_prompt": "text, logo, custom-neg"} for i in range(2)
+    ]})
+    claude = _FakeClaude([raw])
+    clips = ai_video_broll.plan_clips("s", claude)
+    assert clips[0]["negative_prompt"] == "text, logo, custom-neg"
+
+
 def test_director_passes_script_into_prompt():
     import ai_video_broll
     claude = _FakeClaude([_plan_json(2)])

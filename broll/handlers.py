@@ -532,7 +532,7 @@ async def handle_broll_source(
         import ai_video_broll
         plan = ai_video_broll.fullscreen_plan(draft.script_text)
         await q.edit_message_text(
-            f"🎬 AI-видео по сценарию (Seedance)\n\n"
+            f"🎬 AI-видео по сценарию (Kling 3.0)\n\n"
             f"Сценарий ~{plan['est_sec']:.0f}с → сгенерирую {plan['n_clips']} клипов "
             f"по {plan['clip_len']}с (~${plan['cost']:.2f}).\n"
             f"Голос (свой/AI) + субтитры + музыка — как обычно.\n\n"
@@ -569,7 +569,7 @@ async def handle_broll_source(
         draft.touch(time.time())
         save_draft(draft, DRAFTS_DIR)
         status = await context.bot.send_message(
-            chat_id, f"🎬 Генерирую AI-видео (Seedance): {plan['n_clips']} клипов по "
+            chat_id, f"🎬 Генерирую AI-видео (Kling 3.0): {plan['n_clips']} клипов по "
                      f"{plan['clip_len']}с… Несколько минут.")
         try:
             clips, _cost = await asyncio.to_thread(
