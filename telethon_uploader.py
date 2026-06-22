@@ -102,10 +102,23 @@ def _clear_upload_state(user_id: str):
 
 
 # ── selfie path B (большой оригинал >20МБ) ────────────────────────────────
-def _find_active_selfie(pending: dict) -> "tuple[str, dict] | None":
-    """Юзер, ждущий большое selfie-видео (path B): первый в state
-    'selfie_waiting_video', иначе None. Отдельно от _find_active_upload
-    (#crosspost/upload_final_video), чтобы потоки не перехватывали файлы."""
+# id владельца аккаунта (Saved Messages — его), ставится в main() после get_me().
+OWNER_ID: "int | None" = None
+
+
+def _find_active_selfie(pending: dict, owner_id: "int | None" = None) -> "tuple[str, dict] | None":
+    """Юзер, ждущий большое selfie-видео (path B), в state 'selfie_waiting_video'.
+
+    Saved Messages принадлежат ВЛАДЕЛЬЦУ (telethon залогинен его аккаунтом) →
+    #selfie-загрузка ВСЕГДА от него. Матчим именно его uid (owner_id), а НЕ
+    «первого ждущего» — иначе чужое/устаревшее selfie_waiting_video (напр.
+    тест-аккаунт) перехватит файл. Без owner_id — фолбэк на первого (тесты).
+    Отдельно от _find_active_upload (#crosspost), чтобы потоки не пересекались."""
+    if owner_id is not None:
+        d = pending.get(str(owner_id))
+        if d and d.get("state") == "selfie_waiting_video":
+            return str(owner_id), d
+        return None
     for uid, data in pending.items():
         if data.get("state") == "selfie_waiting_video":
             return uid, data
@@ -205,7 +218,7 @@ async def handle_saved(event):
             logger.error(f"#selfie: failed to read pending.json: {e}")
             await event.reply("❌ Не удалось прочитать состояние бота. Попробуй ещё раз.")
             return
-        active = _find_active_selfie(pending)
+        active = _find_active_selfie(pending, OWNER_ID)
         if not active:
             await event.reply(
                 "⚠️ Бот сейчас не ждёт selfie-видео.\n\n"
@@ -319,7 +332,9 @@ async def main():
     logger.info("Starting Telethon uploader...")
     await client.start()
     me = await client.get_me()
-    logger.info(f"Logged in as {me.first_name} (@{me.username}) id={me.id}")
+    global OWNER_ID
+    OWNER_ID = me.id
+    logger.info(f"Logged in as {me.first_name} (@{me.username}) id={me.id} (owner for #selfie)")
     logger.info(f"Listening on Saved Messages for videos with {TRIGGER_TAG} / #lib / {SELFIE_TAG} tags")
     await client.run_until_disconnected()
 

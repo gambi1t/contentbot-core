@@ -345,6 +345,22 @@ async def handle_intake_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     await query.answer()
     user_id = query.from_user.id
+    # telethon (ОТДЕЛЬНЫЙ процесс) пишет selfie_source/selfie_video_ready в
+    # pending.json — in-memory pending бота это НЕ видит. Перечитываем файл для
+    # этого юзера и мёржим в память (ключи в файле строковые, в памяти int).
+    try:
+        import json as _json
+        from bot_state import PENDING_FILE as _PF
+        if _PF.exists():
+            _e = (_json.loads(_PF.read_text(encoding="utf-8")) or {}).get(str(user_id)) or {}
+            if _e.get("selfie_video_ready") and _e.get("selfie_source"):
+                _cur = _PENDING.setdefault(user_id, {})
+                _cur["selfie_source"] = _e["selfie_source"]
+                _cur["selfie_video_ready"] = True
+                _cur.setdefault("state", "selfie_waiting_video")
+    except Exception as e:
+        _LOGGER.warning(f"[selfie] intake: reload pending failed: {e}")
+
     data = _PENDING.get(user_id) or {}
     source = data.get("selfie_source")
     if not data.get("selfie_video_ready") or not source or not Path(source).exists():

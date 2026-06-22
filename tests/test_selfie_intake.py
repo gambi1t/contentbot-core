@@ -75,6 +75,30 @@ def test_find_missing_state_key(errors):
     _assert(r is not None and r[0] == "2", "skips malformed, finds waiter", errors)
 
 
+def test_find_owner_match(errors):
+    print("\n-- find: owner_id matches owner's waiting entry --")
+    r = tu._find_active_selfie({"384671843": {"state": "selfie_waiting_video"}}, owner_id=384671843)
+    _assert(r is not None and r[0] == "384671843", "owner matched", errors)
+
+
+def test_find_owner_ignores_stranger(errors):
+    print("\n-- find: owner_id ignores OTHER waiter (тест-аккаунт pollution) --")
+    # Критичный кейс бага: тест-аккаунт 6730055130 завис в selfie_waiting_video,
+    # владелец 384671843 НЕ ждёт → должен вернуть None, а НЕ перехватить чужого.
+    r = tu._find_active_selfie(
+        {"6730055130": {"state": "selfie_waiting_video"},
+         "384671843": {"state": "idle"}}, owner_id=384671843)
+    _assert(r is None, "stranger not picked when owner not waiting", errors)
+
+
+def test_find_owner_among_many(errors):
+    print("\n-- find: owner picked even if stranger also waiting --")
+    r = tu._find_active_selfie(
+        {"6730055130": {"state": "selfie_waiting_video"},
+         "384671843": {"state": "selfie_waiting_video"}}, owner_id=384671843)
+    _assert(r is not None and r[0] == "384671843", "owner over stranger", errors)
+
+
 def test_selfie_tag_value(errors):
     print("\n-- tag: SELFIE_TAG == '#selfie' --")
     _assert(tu.SELFIE_TAG == "#selfie", f"got {tu.SELFIE_TAG!r}", errors)
@@ -104,6 +128,7 @@ def main() -> int:
     errors: list[str] = []
     for fn in (test_find_basic, test_find_none_other_state, test_find_not_crosspost,
                test_find_picks_right_among_many, test_find_empty, test_find_missing_state_key,
+               test_find_owner_match, test_find_owner_ignores_stranger, test_find_owner_among_many,
                test_selfie_tag_value, test_selfie_tag_distinct,
                test_target_path_stable, test_target_part_sibling):
         fn(errors)
