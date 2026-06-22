@@ -771,6 +771,12 @@ _CALLBACK_FEATURE_MAP = {
     # чтобы Seedance в Pipeline-2 гейтился по ai_video (money-leak: платный fal.ai),
     # даже когда broll_pipeline включён (callback_feature_blocked проверяет ВСЕ).
     "selfie_broll:aivid": "ai_video",   # ловит selfie_broll:aivideo и :aivid:<5|10>
+    # Генеративные B-roll в селфи — гейтим как card_* (раньше не гейтились →
+    # на тенанте без движка кнопка крутила «Генерю…» и падала в тупик через
+    # минуты вместо честного «не подключено»). Remotion (gen) у panferov не
+    # провижинен; HyperFrames (hf) у panferov включён → флаг его не тронет.
+    "selfie_broll:gen": "remotion",     # «🎨 Сгенерировать графику (AI)» = Remotion
+    "selfie_broll:hf": "hyperframes",   # «🎞 Графика HyperFrames»
     "b2src:ai_video": "ai_video",       # ловит ai_video / _go / _menu внутри Pipeline-2
     # Pipeline 2 (broll_pipeline) — все b2*-callbacks (вход тоже гейтится отдельно
     # в idea→broll ветке).

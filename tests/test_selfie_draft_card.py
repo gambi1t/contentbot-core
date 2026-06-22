@@ -150,6 +150,14 @@ def test_create_draft_best_effort(errors):
     bot.pending.pop(uid, None)
 
 
+def test_generate_buttons_feature_gated(errors):
+    print("\n-- Fix C: gen→remotion, hf→hyperframes в _CALLBACK_FEATURE_MAP --")
+    m = bot._CALLBACK_FEATURE_MAP
+    _assert(m.get("selfie_broll:gen") == "remotion", "gen гейтится remotion", errors)
+    _assert(m.get("selfie_broll:hf") == "hyperframes", "hf гейтится hyperframes", errors)
+    _assert(m.get("selfie_broll:aivid") == "ai_video", "aivid остался ai_video", errors)
+
+
 def main() -> int:
     print("=" * 60 + "\nselfie draft card (раннее сохранение + update-not-duplicate)\n" + "=" * 60)
     errors: list = []
@@ -157,7 +165,7 @@ def main() -> int:
                test_make_draft_creates_and_sets_status,
                test_persist_updates_existing_draft, test_persist_creates_when_no_draft,
                test_create_draft_idempotent, test_create_draft_stores_ids,
-               test_create_draft_best_effort):
+               test_create_draft_best_effort, test_generate_buttons_feature_gated):
         fn(errors)
     print("\n" + "=" * 60)
     print(f"FAIL ({len(errors)})" if errors else "OK all selfie-draft-card tests passed")

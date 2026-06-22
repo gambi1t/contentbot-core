@@ -1672,8 +1672,14 @@ async def handle_broll_callback(
         kind = "image" if action == "lib_photo" else "video"
         cats = await asyncio.to_thread(selfie_broll.list_library_categories, kind)
         if not cats:
+            # Пусто → НЕ затираем клавиатуру в тупик: возвращаем пикер с пометкой,
+            # чтобы можно было загрузить своё / выбрать другой источник / отмена.
+            items = _items_from_pending(data)
+            label = "Фото" if kind == "image" else "Клипы"
             await query.edit_message_text(
-                "⚠️ Библиотека пуста — добавь файлы или загрузи своё."
+                f"⚠️ {label}: библиотека пуста — загрузи своё или выбери другой источник.\n\n"
+                + selfie_broll.build_picker_message(items),
+                reply_markup=selfie_broll.build_picker_keyboard(items),
             )
             return True
         if len(cats) == 1:

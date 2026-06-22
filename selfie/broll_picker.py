@@ -25,6 +25,7 @@ from typing import Literal
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import paths
+import tenant  # per-tenant библиотека (Fix B): у каждого тенанта своя папка
 
 MAX_BROLL_ITEMS = 7  # лимит на ролик 30–50 сек (5–7 вставок по ~3 сек).
 
@@ -214,14 +215,23 @@ def _kind_root(kind: str) -> Path | None:
 
 
 def _brand_base(kind: str) -> Path | None:
-    """Папка, под которой лежат категории: ``<root>/<brand>/<cat>``.
+    """Папка с категориями: ``<root>/<tenant>/<cat>`` — per-tenant (Fix B).
 
-    В maksim-bot бренд-папка = ``maksim``. Если её нет — корень (плоская
-    структура), тогда категорий не будет.
+    У каждого тенанта своя библиотека (panferov НЕ должен видеть картинг maksim).
+    Тенант берём из tenant.active_tenant_id(). Для явного тенанта — СТРОГО его
+    папка (без фолбэка на чужой бренд): нет папки → несуществующий путь → scan
+    вернёт [] → пикер не застрянет (Fix A). Для dev/default — историческая папка
+    ``maksim`` (фикстуры репо), иначе плоский корень.
     """
     root = _kind_root(kind)
     if not root:
         return None
+    try:
+        tid = (tenant.active_tenant_id() or "").strip()
+    except Exception:
+        tid = ""
+    if tid and tid not in ("default", ""):
+        return root / tid  # строго папка тенанта (может не существовать)
     cand = root / "maksim"
     return cand if cand.exists() else root
 
