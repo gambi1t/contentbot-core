@@ -1272,6 +1272,17 @@ def _aivid_done_text(added: int, generated: int) -> str:
     return txt + " Добавь ещё B-roll или жми «Готово»."
 
 
+def _broll_source_transcript(data: dict) -> str:
+    """Текст сценария для B-roll «из текста» (gen / hf / aivideo).
+
+    Источник — selfie_transcript: правка текста его обновляет (см. ~542), burn
+    кладёт актуальный (см. ~695). НЕ использовать selfie_edited — это BOOL-флаг
+    «правил ли юзер» (~696), не текст. Раньше тут было `selfie_edited or
+    selfie_transcript` → после правки текста True.strip() → AttributeError, и
+    кнопки графики/HyperFrames/AI-видео молча падали (Артём 22.06)."""
+    return (data.get("selfie_transcript") or "").strip()
+
+
 async def handle_broll_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> bool:
@@ -1325,7 +1336,7 @@ async def handle_broll_callback(
     # Claude Code по подписке, свой _GEN_LOCK). Клипы кладём как обычные
     # video-B-roll items → дальше тот же assemble_auto_montage (broll_mode=real).
     if action == "gen":
-        transcript = (data.get("selfie_edited") or data.get("selfie_transcript") or "").strip()
+        transcript = _broll_source_transcript(data)
         items = _items_from_pending(data)
         free = selfie_broll.MAX_BROLL_ITEMS - len(items)
         chat_id = query.message.chat_id
@@ -1429,7 +1440,7 @@ async def handle_broll_callback(
     if action == "hf":
         import hyperframes_broll
         import uuid
-        transcript = (data.get("selfie_edited") or data.get("selfie_transcript") or "").strip()
+        transcript = _broll_source_transcript(data)
         items = _items_from_pending(data)
         free = selfie_broll.MAX_BROLL_ITEMS - len(items)
         chat_id = query.message.chat_id
@@ -1549,7 +1560,7 @@ async def handle_broll_callback(
         import ai_video_broll
         import uuid
         duration = 10 if (len(parts) > 2 and parts[2] == "10") else 5
-        transcript = (data.get("selfie_edited") or data.get("selfie_transcript") or "").strip()
+        transcript = _broll_source_transcript(data)
         items = _items_from_pending(data)
         free = selfie_broll.MAX_BROLL_ITEMS - len(items)
         chat_id = query.message.chat_id
