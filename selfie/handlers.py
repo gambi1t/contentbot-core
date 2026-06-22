@@ -268,6 +268,26 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _process_local_source(user_id, source_path, selfie_tmp, msg)
 
 
+# CTO-ревью P0 #4: единый источник правды по ключам, которые НЕ должны теряться
+# при полной перезаписи _PENDING[uid] = {...} между этапами selfie. Потеря любого
+# → регрессия: дубль Notion-карточки (notion_page_id), потеря слов субтитров
+# (selfie_words → ре-транскрибация), флага готового ролика (selfie_finished).
+PERSISTENT_SELFIE_KEYS = (
+    "notion_page_id", "notion_url", "card_data", "selfie_draft_card",
+    "selfie_finished", "selfie_words",
+)
+
+
+def carry_session_keys(prev: dict, new: dict) -> dict:
+    """Пронести PERSISTENT_SELFIE_KEYS из старого pending-состояния в новое при
+    полной перезаписи. Мутирует и возвращает new. Единственное место, где
+    задаётся набор «выживающих» ключей — чтобы новый этап не уронил их молча."""
+    for k in PERSISTENT_SELFIE_KEYS:
+        if (prev or {}).get(k) is not None:
+            new[k] = prev[k]
+    return new
+
+
 def build_finished_pending(selfie_tmp, source_path, words, transcript: str) -> dict:
     """Pending-состояние для ГОТОВОГО ролика (/ready).
 
@@ -706,13 +726,9 @@ async def _burn_and_request_title(query, context, user_id: int, edited: bool) ->
             "selfie_broll_items": [],                  # будем накапливать в picker
             "selfie_broll_shown_ids": {},              # reroll: ключи "<src>:<cat>"
         }
-        # U3/U8: пронести ключи, которые НЕ должны теряться при перезаписи pending:
-        # черновик Notion (иначе finalize создаст ДУБЛЬ карточки), слова субтитров
-        # (иначе words.json не сохранится → ре-транскрибация), флаг готового ролика.
-        for _k in ("notion_page_id", "notion_url", "card_data", "selfie_draft_card",
-                   "selfie_finished", "selfie_words"):
-            if _prev.get(_k) is not None:
-                _PENDING[user_id][_k] = _prev[_k]
+        # U3/U8 (P0 #4): пронести persistent-ключи (черновик Notion → без дубля,
+        # слова субтитров, флаг готового). Единый набор — PERSISTENT_SELFIE_KEYS.
+        carry_session_keys(_prev, _PENDING[user_id])
         _SAVE_PENDING(_PENDING)
 
         edit_note = " ✏️ (после правки)" if edited else ""
@@ -2102,6 +2118,15 @@ async def _run_broll_assembly_and_proceed(
             broll_mode="real",
             brand_name="maksim",
         )
+        # P0 #6: валидация выхода — ffmpeg мог завершиться rc=0, но отдать
+        # пустой/битый файл. Лучше явно упасть (→ ретрай с сохранёнными клипами,
+        # U1), чем показать «Монтаж готов» с нулевым видео.
+        if (not final_auto or not Path(final_auto).exists()
+                or Path(final_auto).stat().st_size < 100_000):
+            raise RuntimeError(f"сборка дала пустой/битый файл ({final_auto})")
+        _dur = await asyncio.to_thread(_probe_duration, final_auto)
+        if _dur < 1.0:
+            raise RuntimeError(f"сборка дала видео длительностью {_dur:.1f}с")
         _LOGGER.info(
             f"[selfie] B-roll assembly ({layout_code}/{layout}) done: "
             f"{final_auto.stat().st_size / 1024 / 1024:.1f} MB"
@@ -2533,14 +2558,9 @@ async def _finalize_with_cover(
         "selfie_picked_music": data.get("selfie_picked_music"),
         "selfie_cover_note": cover_note,
     }
-    # U4/U9: пронести ключи, которые НЕ должны теряться при перезаписи pending:
-    # черновик Notion (иначе finalize создаст ДУБЛЬ карточки), слова субтитров
-    # (иначе words.json не сохранится), флаг готового ролика (durable-маркер +
-    # trim-guard кросспоста). Раньше терялись здесь.
-    for _k in ("notion_page_id", "notion_url", "card_data", "selfie_draft_card",
-               "selfie_finished", "selfie_words"):
-        if data.get(_k) is not None:
-            _PENDING[user_id][_k] = data[_k]
+    # U4/U9 (P0 #4): пронести persistent-ключи (черновик Notion → без дубля, слова,
+    # флаг готового). Единый набор — PERSISTENT_SELFIE_KEYS.
+    carry_session_keys(data, _PENDING[user_id])
     _SAVE_PENDING(_PENDING)
 
     # Шаг «текст на обложку?» (С текстом/Без) — если хост предоставил. Он сам

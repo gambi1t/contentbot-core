@@ -104,11 +104,13 @@ def save_pending(data: dict | None = None) -> None:
     """
     payload = data if data is not None else pending
     tmp_path = PENDING_FILE.with_suffix(PENDING_FILE.suffix + _TMP_SUFFIX)
-    tmp_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    # os.replace атомарен на всех платформах (overwrite OK).
+    # P0 #3: durable atomic — пишем во временный, flush+fsync (данные на диске),
+    # затем os.replace (атомарен на всех ОС). Рестарт в момент записи больше не
+    # оставит битый pending.json (CTO-ревью).
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(str(tmp_path), str(PENDING_FILE))
 
 
