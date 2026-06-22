@@ -274,7 +274,10 @@ def render_punch_in(source: Path, segments: list[dict], output: Path) -> Path:
         "ffmpeg", "-y", "-i", str(source),
         "-filter_complex", filter_complex,
         "-map", "[outv]", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+        # U6: было preset=medium/crf15/timeout600 — на CPU сервера 52с-клип
+        # ~12x realtime, до прожига субтитров мог стоять у таймаута. veryfast +
+        # 900с — как в montage/burn (тот же лок проекта на быстрый пресет).
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
         str(output),
     ]
@@ -282,7 +285,7 @@ def render_punch_in(source: Path, segments: list[dict], output: Path) -> Path:
         f"[punch_in] rendering {len(segments)} segments "
         f"(W×H={W}×{H}, head_frac={frac:.2f})"
     )
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if result.returncode != 0 or not output.exists():
         raise RuntimeError(
             f"punch_in ffmpeg failed (rc={result.returncode}): "

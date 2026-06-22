@@ -170,7 +170,7 @@ def _probe_duration(video_path: Path) -> float:
             "-of", "json",
             str(video_path),
         ],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=30,  # U7: битый клип не должен вешать сборку
     )
     if result.returncode != 0:
         raise AssemblyError(f"ffprobe failed for {video_path}: {result.stderr[-400:]}")

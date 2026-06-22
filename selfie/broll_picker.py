@@ -84,6 +84,10 @@ def prepare_broll_in_project(items: list[BrollItem], project_dir: Path) -> None:
     photo_idx = 0
 
     for item in items:
+        # U2: пропавший источник (напр. почищенный gen-dir) НЕ должен ронять весь
+        # монтаж — пропускаем такой клип, остальные собираются.
+        if not Path(item.source).exists():
+            continue
         if item.kind == "video":
             video_idx += 1
             dest = project_dir / f"broll_{video_idx:03d}.mp4"

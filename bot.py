@@ -6838,10 +6838,27 @@ async def _maksim_selfie_cover_text_step(
     )
 
 
+def _sweep_stale_selfie_tmp(max_age_h: float = 6.0) -> None:
+    """U11: подмести брошенные /tmp/selfie_*/broll_prev_* старше N часов — за часы
+    тестов они копятся и забивают диск. Активные сессии не трогаем (они моложе).
+    Best-effort, вызывается при старте нового /selfie и /ready."""
+    import time as _t, glob as _g, tempfile as _tf, shutil as _sh
+    cutoff = _t.time() - max_age_h * 3600
+    tmp = _tf.gettempdir()
+    for pat in ("selfie_*", "selfie_hf_*", "selfie_gen_*", "selfie_aivid_*", "broll_prev_*"):
+        for p in _g.glob(os.path.join(tmp, pat)):
+            try:
+                if os.path.isdir(p) and os.path.getmtime(p) < cutoff:
+                    _sh.rmtree(p, ignore_errors=True)
+            except OSError:
+                pass
+
+
 async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Live video pipeline — user films on phone, bot adds subtitles."""
     user_id = update.effective_user.id
     logger.info(f"[user:{user_id}] /selfie")
+    _sweep_stale_selfie_tmp()
     if user_id in pending:
         pending.pop(user_id, None)
     pending[user_id] = {"state": "selfie_waiting_video"}
@@ -6868,6 +6885,7 @@ async def ready_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     selfie_finished, по которому _process_local_source ветвится сразу к обложке."""
     user_id = update.effective_user.id
     logger.info(f"[user:{user_id}] /ready")
+    _sweep_stale_selfie_tmp()
     if user_id in pending:
         pending.pop(user_id, None)
     pending[user_id] = {"state": "selfie_waiting_video", "selfie_finished": True}
@@ -7501,15 +7519,25 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
         # Черновик создан на «ОК» (раннее сохранение) → ОБНОВЛЯЕМ его (название +
         # обложка), иначе (напр. /ready без «ОК») — создаём. Без дублей карточек.
         # card_data (с brand-aware CTA в «Призыв») собирается внутри.
-        notion_url, notion_page_id, card_data = await asyncio.to_thread(
-            _selfie_persist_card, data, title, transcript, cover_url,
-        )
-
-        # Move to "Готово к публикации" since video is already done
+        # U5: запись карточки в СВОЁМ try — если Notion упал, НЕ теряем доставку
+        # готового видео (юзер проделал всю работу); видео уйдёт ниже из
+        # selfie_subtitled независимо от карточки.
+        card_failed = False
         try:
-            await asyncio.to_thread(update_notion_status, notion_page_id, "Готово к публикации")
-        except Exception:
-            logger.warning("[selfie] Failed to update Notion status")
+            notion_url, notion_page_id, card_data = await asyncio.to_thread(
+                _selfie_persist_card, data, title, transcript, cover_url,
+            )
+            # Move to "Готово к публикации" since video is already done
+            try:
+                await asyncio.to_thread(update_notion_status, notion_page_id, "Готово к публикации")
+            except Exception:
+                logger.warning("[selfie] Failed to update Notion status")
+        except Exception as e:
+            logger.error(f"[selfie] card persist failed (видео всё равно отдам): {e}", exc_info=True)
+            card_failed = True
+            notion_url = data.get("notion_url")
+            notion_page_id = data.get("notion_page_id")
+            card_data = data.get("card_data") or {"title": title}
 
         # Update pending with Notion data so _project_dir works
         data["card_data"] = card_data
@@ -7624,12 +7652,17 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
             text=(
                 f"✅ Живое видео готово!\n\n"
                 f"📋 {title}\n"
-                f"🔗 {notion_url}\n"
-                f"📊 Статус: Готово к публикации\n\n"
-                f"Дальше по желанию:\n"
-                f"• «📝 Описание» — подпись для Reels/Shorts/TikTok\n"
-                f"• «📰 TG-пост» — длинный пост в канал\n"
-                f"• «📢 Кросс-постинг» — публикация на площадках"
+                + (f"🔗 {notion_url}\n" if notion_url else "")
+                + (
+                    "⚠️ Карточку Notion сейчас сохранить не удалось — само видео "
+                    "готово (выше). Повтори позже через /selfie.\n\n"
+                    if card_failed else
+                    "📊 Статус: Готово к публикации\n\n"
+                )
+                + "Дальше по желанию:\n"
+                "• «📝 Описание» — подпись для Reels/Shorts/TikTok\n"
+                "• «📰 TG-пост» — длинный пост в канал\n"
+                "• «📢 Кросс-постинг» — публикация на площадках"
             ),
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -11573,12 +11606,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        if data:
-            data["selfie_cover_wants_text"] = (query.data == "selfie_ct:on")
-            data["state"] = "selfie_waiting_title"
-            _save_pending(pending)
-        transcript = (data or {}).get("selfie_transcript", "")
-        first = (data or {}).get("selfie_auto_title", "")
+        # U8: сессия устарела/очищена → НЕ дёргаем Opus на пустом тексте (мёртвая
+        # кнопка + лишний вызов). Честно говорим начать заново.
+        if not data:
+            await query.edit_message_text("⚠️ Данные устарели. Начни заново через /selfie.")
+            return
+        data["selfie_cover_wants_text"] = (query.data == "selfie_ct:on")
+        data["state"] = "selfie_waiting_title"
+        _save_pending(pending)
+        transcript = data.get("selfie_transcript", "")
+        first = data.get("selfie_auto_title", "")
         await _maksim_selfie_title_picker(query.message, context, user_id, transcript, first)
         return
 

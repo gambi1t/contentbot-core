@@ -307,12 +307,17 @@ async def _process_local_source(user_id, source_path, selfie_tmp, status_msg) ->
 
         # Extract audio
         audio_tmp = selfie_tmp / "_tmp_audio.wav"
-        subprocess.run(
+        _ff = subprocess.run(
             ["ffmpeg", "-y", "-i", str(source_path),
              "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
              str(audio_tmp)],
             capture_output=True, text=True, timeout=120,
         )
+        # U10: не глотаем сбой извлечения аудио (битое видео / без звуковой
+        # дорожки) — иначе transcribe падает с непонятной ошибкой.
+        if _ff.returncode != 0 or not audio_tmp.exists():
+            raise RuntimeError(
+                "не удалось извлечь аудио из видео: " + (_ff.stderr or "")[-300:])
 
         # Transcribe with brand biasing (selfie.transcribe)
         words = await asyncio.to_thread(transcribe, str(audio_tmp), language="ru")
@@ -689,6 +694,7 @@ async def _burn_and_request_title(query, context, user_id: int, edited: bool) ->
         # selfie_final — то, что пойдёт в bot.py финализер (по умолчанию subtitled,
         # после assemble_auto_montage перепишется на final_auto.mp4, после mix
         # ещё раз — на final_with_music.mp4)
+        _prev = _PENDING.get(user_id) or {}
         _PENDING[user_id] = {
             "state": "selfie_broll_offer",
             "selfie_tmp_dir": str(selfie_tmp),
@@ -700,6 +706,13 @@ async def _burn_and_request_title(query, context, user_id: int, edited: bool) ->
             "selfie_broll_items": [],                  # будем накапливать в picker
             "selfie_broll_shown_ids": {},              # reroll: ключи "<src>:<cat>"
         }
+        # U3/U8: пронести ключи, которые НЕ должны теряться при перезаписи pending:
+        # черновик Notion (иначе finalize создаст ДУБЛЬ карточки), слова субтитров
+        # (иначе words.json не сохранится → ре-транскрибация), флаг готового ролика.
+        for _k in ("notion_page_id", "notion_url", "card_data", "selfie_draft_card",
+                   "selfie_finished", "selfie_words"):
+            if _prev.get(_k) is not None:
+                _PENDING[user_id][_k] = _prev[_k]
         _SAVE_PENDING(_PENDING)
 
         edit_note = " ✏️ (после правки)" if edited else ""
@@ -2036,11 +2049,15 @@ async def _run_broll_assembly_and_proceed(
         # (раньше брали subtitled.mp4, субтитры ехали вместе с аватаром).
         clean_selfie = Path(data.get("selfie_source") or subtitled)
         project_dir = selfie_tmp / "assembly"
+        # U9: чистим dir сборки между попытками — иначе стейл broll_*/photos с
+        # прошлой (неудачной) попытки попадут в монтаж.
+        shutil.rmtree(project_dir, ignore_errors=True)
         project_dir.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(selfie_broll.place_selfie_as_avatar, clean_selfie, project_dir)
         await asyncio.to_thread(selfie_broll.prepare_broll_in_project, items, project_dir)
-        # Клипы скопированы в project_dir → tmp AI-генерации больше не нужен.
-        _cleanup_selfie_gen_dirs(data)
+        # U1: tmp AI/HF-генерации НЕ чистим здесь — только после УСПЕШНОЙ сборки
+        # (ниже). Иначе провал монтажа удаляет клипы → ретрай «Готово» падает
+        # FileNotFoundError и зацикливается (Артём 22.06).
 
         from video_assembler import (
             assemble_auto_montage, build_bookend_montage_plan, _probe_duration,
@@ -2097,6 +2114,10 @@ async def _run_broll_assembly_and_proceed(
         data["selfie_montage_format"] = layout_code
         data["state"] = "selfie_music_picking"
         _SAVE_PENDING(_PENDING)
+        # U1: сборка УСПЕШНА (клипы уже в project_dir) → теперь безопасно удалить
+        # tmp AI/HF-генерации. На провале (except ниже) НЕ выполнится → клипы
+        # переживут, ретрай «Готово» сможет пересобрать.
+        _cleanup_selfie_gen_dirs(data)
 
         await query.edit_message_text(
             f"✅ Монтаж готов ({fmt_name}, {len(items)} B-roll).\n\n"
@@ -2511,10 +2532,15 @@ async def _finalize_with_cover(
         "selfie_auto_title": first_sentence,
         "selfie_picked_music": data.get("selfie_picked_music"),
         "selfie_cover_note": cover_note,
-        # Готовый ролик (/ready): пронести флаг до _selfie_finalize (durable-маркер)
-        # и до кросспоста (trim-guard). Иначе rebuild здесь его терял.
-        "selfie_finished": data.get("selfie_finished"),
     }
+    # U4/U9: пронести ключи, которые НЕ должны теряться при перезаписи pending:
+    # черновик Notion (иначе finalize создаст ДУБЛЬ карточки), слова субтитров
+    # (иначе words.json не сохранится), флаг готового ролика (durable-маркер +
+    # trim-guard кросспоста). Раньше терялись здесь.
+    for _k in ("notion_page_id", "notion_url", "card_data", "selfie_draft_card",
+               "selfie_finished", "selfie_words"):
+        if data.get(_k) is not None:
+            _PENDING[user_id][_k] = data[_k]
     _SAVE_PENDING(_PENDING)
 
     # Шаг «текст на обложку?» (С текстом/Без) — если хост предоставил. Он сам
