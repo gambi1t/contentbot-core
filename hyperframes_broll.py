@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -547,6 +548,19 @@ def _extract_html(text: str) -> str:
     return t[start:end + len("</html>")]
 
 
+def _sanitize_scene_html(html: str) -> str:
+    """Чинит авто-исправимые нарушения детерминизма в готовом HTML сцены.
+
+    Реальный сбой 21 июня (panferov scene_06): модель периодически ставит
+    `repeat:-1` (бесконечный GSAP-цикл) на CTA-кнопке вопреки контракту, и
+    `_scene_valid_minimal` это РЕДЖЕКТИТ → сцена не собиралась за 3 попытки.
+    Frame-by-frame рендер требует КОНЕЧНОЙ анимации, поэтому `repeat:-1` /
+    `repeat: -1` → `repeat:0` (играется один раз, детерминированно).
+    Math.random/Date.now НЕ трогаем — их нельзя безопасно авто-заменить.
+    """
+    return re.sub(r"repeat\s*:\s*-1", "repeat:0", html)
+
+
 def _build_scene_singleshot_prompt(storyboard: dict, scene_id: str,
                                    prev_html: str | None = None,
                                    issues: str | None = None) -> str:
@@ -642,7 +656,7 @@ def _singleshot_generate_scene(storyboard: dict, scene_id: str,
         max_tokens=SINGLESHOT_MAX_TOKENS,
         messages=[{"role": "user", "content": prompt}],
     )
-    return _extract_html(resp.content[0].text)
+    return _sanitize_scene_html(_extract_html(resp.content[0].text))
 
 
 async def _run_build_phase_singleshot(storyboard: dict, job) -> float:
