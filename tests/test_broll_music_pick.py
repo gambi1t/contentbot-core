@@ -103,17 +103,37 @@ def _draft(chat=42, **extra):
 _DUMMY_MP3 = None
 
 
+_FAKE_TRACKS = {}
+
+
 def _install_music_fakes():
     """Фейки музыкальной библиотеки: реальный dummy-mp3 (хендлер открывает файл
-    для send_audio), без зависимости от диска сервера."""
-    global _DUMMY_MP3
+    для send_audio), без зависимости от диска сервера. 4 трека в chill — чтобы
+    reroll мог исключить показанные и дать новые."""
+    global _DUMMY_MP3, _FAKE_TRACKS
     if _DUMMY_MP3 is None:
         _DUMMY_MP3 = bh.DRAFTS_DIR / "dummy_track.mp3"
         _DUMMY_MP3.write_bytes(b"\x00" * 4096)
-    bh.list_categories = lambda: {"chill": {}, "energetic": {}, "cinematic": {}}
-    bh.pick_random_track = lambda category, exclude_id=None: {
-        "id": f"{category}_1", "file": str(_DUMMY_MP3), "duration": 90, "size_mb": 1.2,
+    _FAKE_TRACKS = {
+        "chill": [
+            {"id": f"chill_{i}", "file": str(_DUMMY_MP3), "duration": 90 - i, "size_mb": 1.2}
+            for i in range(1, 5)
+        ],
+        "energetic": [
+            {"id": f"energetic_{i}", "file": str(_DUMMY_MP3), "duration": 80, "size_mb": 1.0}
+            for i in range(1, 4)
+        ],
     }
+    bh.list_categories = lambda: {"chill": {}, "energetic": {}, "cinematic": {}}
+    bh.list_tracks = lambda category: list(_FAKE_TRACKS.get(category, []))
+
+    def _fake_pick_n(category, n=3, exclude_ids=None):
+        pool = [t for t in _FAKE_TRACKS.get(category, []) if t["id"] not in (exclude_ids or [])]
+        if not pool:
+            pool = list(_FAKE_TRACKS.get(category, []))
+        return pool[:n]
+
+    bh._pick_n_tracks = _fake_pick_n
 
 
 # ── Тесты ────────────────────────────────────────────────────────────
@@ -137,16 +157,54 @@ def test_picked_keyboard(errors):
     _assert("b2mus:skip" in cbs, "без музыки (b2mus:skip)", errors)
 
 
-def test_cat_previews_and_stores(errors):
-    print("\n[b2mus:cat — превью аудио трека + music_path в черновик]")
+def test_cat_previews_3_tracks(errors):
+    print("\n[b2mus:cat — 3 трека-превью + кнопки pick + футер reroll/back/skip]")
     _install_music_fakes()
     ctx = _ctx(_draft())
     asyncio.run(bh.handle_broll_music_cb(_update(), ctx, "cat", category="chill", chat_id=42))
-    _assert(len(ctx.bot.audios) == 1, "аудио-превью трека отправлено", errors)
+    _assert(len(ctx.bot.audios) == 3, f"отправлено 3 аудио-превью (было 1): {len(ctx.bot.audios)}", errors)
+    pick_cbs = [c for a in ctx.bot.audios for c in _cbs(a["reply_markup"])]
+    _assert(any(c and c.startswith("b2mus:pick:chill:") for c in pick_cbs),
+            f"под каждым аудио кнопка b2mus:pick:chill:<id>: {pick_cbs}", errors)
+    _assert(not ctx.user_data["broll_draft"].get("music_path"),
+            "до выбора конкретного трека music_path НЕ ставится", errors)
+    footer_cbs = [c for s in ctx.bot.sends for c in _cbs(s.get("reply_markup"))]
+    _assert("b2mus:reroll:chill" in footer_cbs and "b2mus:back" in footer_cbs and "b2mus:skip" in footer_cbs,
+            f"футер reroll/back/skip: {footer_cbs}", errors)
+    _assert(len(ctx.user_data["broll_draft"].get("music_shown_ids") or []) == 3,
+            f"3 показанных id запомнены для reroll: {ctx.user_data['broll_draft'].get('music_shown_ids')}", errors)
+
+
+def test_pick_stores_music_path(errors):
+    print("\n[b2mus:pick:chill:chill_2 — выбранный трек в music_path + клавиатура accept]")
+    _install_music_fakes()
+    ctx = _ctx(_draft())
+    asyncio.run(bh.handle_broll_music_cb(
+        _update(), ctx, "pick", category="chill", track_id="chill_2", chat_id=42))
     _assert(ctx.user_data["broll_draft"].get("music_path") == str(_DUMMY_MP3),
-            f"путь трека сохранён: {ctx.user_data['broll_draft'].get('music_path')}", errors)
-    cbs = _cbs(ctx.bot.audios[-1]["reply_markup"])
-    _assert("b2mus:accept" in cbs and "b2mus:reroll:chill" in cbs, f"клавиатура выбранного: {cbs}", errors)
+            f"music_path выбранного трека: {ctx.user_data['broll_draft'].get('music_path')}", errors)
+    all_cbs = [c for s in ctx.bot.sends for c in _cbs(s.get("reply_markup"))]
+    _assert("b2mus:accept" in all_cbs and "b2mus:reroll:chill" in all_cbs,
+            f"после выбора — accept/reroll/back/skip: {all_cbs}", errors)
+
+
+def test_reroll_excludes_shown(errors):
+    print("\n[b2mus:reroll — исключает уже показанные id (без повторов)]")
+    _install_music_fakes()
+    captured = {}
+    base = bh._pick_n_tracks
+
+    def _spy(category, n=3, exclude_ids=None):
+        captured["exclude_ids"] = list(exclude_ids or [])
+        return base(category, n=n, exclude_ids=exclude_ids)
+
+    bh._pick_n_tracks = _spy
+    ctx = _ctx(_draft())
+    asyncio.run(bh.handle_broll_music_cb(_update(), ctx, "cat", category="chill", chat_id=42))
+    first_shown = list(ctx.user_data["broll_draft"].get("music_shown_ids") or [])
+    asyncio.run(bh.handle_broll_music_cb(_update(), ctx, "reroll", category="chill", chat_id=42))
+    _assert(first_shown and set(first_shown).issubset(set(captured.get("exclude_ids", []))),
+            f"reroll исключил показанные {first_shown}: exclude={captured.get('exclude_ids')}", errors)
 
 
 def test_skip_clears_and_continues_to_voice(errors):
@@ -210,7 +268,9 @@ def main():
     bh.DRAFTS_DIR = Path(tempfile.mkdtemp(prefix="broll_drafts_test_"))
     test_category_keyboard(errors)
     test_picked_keyboard(errors)
-    test_cat_previews_and_stores(errors)
+    test_cat_previews_3_tracks(errors)
+    test_pick_stores_music_path(errors)
+    test_reroll_excludes_shown(errors)
     test_skip_clears_and_continues_to_voice(errors)
     test_accept_keeps_music_and_continues(errors)
     test_music_threaded_into_assemble(errors)

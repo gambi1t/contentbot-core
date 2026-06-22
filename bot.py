@@ -3927,12 +3927,19 @@ def save_media_permanent(source_path: str, prefix: str = "file") -> str:
 _BROLL_TG_DOC_LIMIT = 48 * 1024 * 1024  # запас под ~50МБ лимит Bot API (как MAX_BOT_UPLOAD)
 
 
-async def _broll_deliver(tg_bot, chat_id: int, path: str, caption: str):
-    """Безопасная финальная отдача B-roll-ролика (фикс 413-краша). Лесенка —
-    реюз карточного пути: ≤48 МБ → документом (макс. качество, Telegram НЕ
-    транскодит); >48 МБ или сбой send_document → nginx-ссылка (без пережатия);
-    полный сбой → None (вызывающий сообщит честно, файл уже в broll_finals).
-    Возвращает 'document' | 'link' | None."""
+async def _broll_deliver(tg_bot, chat_id: int, path: str, caption: str,
+                         *, reply_markup=None, filename: str | None = None,
+                         parse_mode: str | None = "HTML"):
+    """Безопасная финальная отдача ролика документом (фикс 413-краша). Канон
+    для ВСЕХ финалов (B-roll, аватар, свой-голос): ≤48 МБ → документом (макс.
+    качество, Telegram НЕ транскодит, mp4-документ играется в чате с превью);
+    >48 МБ или сбой send_document → nginx-ссылка (без пережатия); полный сбой →
+    None (вызывающий сообщит честно, файл уже в проекте).
+
+    reply_markup — кнопки «что дальше» под документом/ссылкой (аватар/свой-голос).
+    filename — имя для скачивания (по умолчанию имя файла). parse_mode — None для
+    plain-подписей (аватар/свой-голос), 'HTML' для B-roll. Возвращает
+    'document' | 'link' | None."""
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -3941,8 +3948,10 @@ async def _broll_deliver(tg_bot, chat_id: int, path: str, caption: str):
         try:
             with open(path, "rb") as f:
                 await tg_bot.send_document(
-                    chat_id=chat_id, document=f, filename=Path(path).name,
-                    caption=caption, parse_mode="HTML",
+                    chat_id=chat_id, document=f,
+                    filename=filename or Path(path).name,
+                    caption=caption, parse_mode=parse_mode,
+                    reply_markup=reply_markup,
                     read_timeout=300, write_timeout=300,
                 )
             return "document"
@@ -3954,7 +3963,7 @@ async def _broll_deliver(tg_bot, chat_id: int, path: str, caption: str):
         await tg_bot.send_message(
             chat_id=chat_id,
             text=f"{caption}\n\n📎 Файл крупный — без сжатия по ссылке:\n{link}",
-            parse_mode="HTML",
+            parse_mode=parse_mode, reply_markup=reply_markup,
         )
         return "link"
     except Exception as e:
@@ -9655,33 +9664,18 @@ async def _render_avatar_from_audio(context, chat_id, audio_path, look_id,
                 _video_caption = (
                     f"{cap}\n\n💰 Остаток HeyGen: {quota} кредитов\nЧто дальше?"
                 )
-                # 413-guard: >48 МБ → сжать (2-pass, сохраняя 1080p); не
-                # выйдет → ссылка. Avatar IV даёт ~167 МБ на 30с.
-                send_file = video_file
-                if video_file.stat().st_size > 48 * 1024 * 1024:
-                    cmp = ASSETS_DIR / f"heygen_{video_id[:8]}_tg.mp4"
-                    ok = await asyncio.to_thread(
-                        _compress_for_telegram, str(video_file), str(cmp), duration)
-                    if ok:
-                        send_file = cmp
-                try:
-                    with open(send_file, "rb") as vf:
-                        await context.bot.send_video(
-                            chat_id=chat_id, video=vf, caption=_video_caption,
-                            supports_streaming=True, reply_markup=_next_kb,
-                        )
-                except Exception as _se:
-                    logger.warning(f"[selfvoice] send_video: {_se}")
-                    link = None
-                    try:
-                        link = await asyncio.to_thread(
-                            save_media_permanent, str(video_file), "avatar_selfvoice")
-                    except Exception:
-                        pass
-                    tail = (f"\n⚠️ Крупный файл — ссылка:\n{link}" if link
-                            else "\n⚠️ Файл крупный, забери из «📥 Скачать материалы».")
+                # Финал — ДОКУМЕНТОМ через канон _broll_deliver (Артём 17 июня:
+                # без транскода Telegram). Раньше send_video + ad-hoc 2-pass
+                # compress для >48МБ; теперь ≤48МБ документом (HD), >48МБ → ссылка.
+                _delivered = await _broll_deliver(
+                    context.bot, chat_id, str(video_file), _video_caption,
+                    reply_markup=_next_kb, parse_mode=None)
+                if _delivered is None:
                     await context.bot.send_message(
-                        chat_id, _video_caption + tail, reply_markup=_next_kb)
+                        chat_id,
+                        _video_caption + "\n⚠️ Не удалось отправить — "
+                        "забери из «📥 Скачать материалы».",
+                        reply_markup=_next_kb)
                 # Статус НАВЕРХУ больше не несёт «что дальше» — гасим в галочку,
                 # вся навигация теперь под видео.
                 try:
@@ -12927,10 +12921,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data.startswith("b2mus:"):
         # Инкремент 3: выбор фоновой музыки до развилки голоса.
-        # b2mus:<action>[:<category>], action ∈ cat|reroll|back|skip|accept.
-        _parts = query.data.split(":", 2)
+        # b2mus:<action>[:<category>[:<track_id>]], action ∈ cat|reroll|pick|back|skip|accept.
+        _parts = query.data.split(":", 3)
         _action = _parts[1] if len(_parts) > 1 else ""
         _cat = _parts[2] if len(_parts) > 2 else None
+        _track_id = _parts[3] if len(_parts) > 3 else None
         try:
             await query.answer()
             await query.edit_message_reply_markup(reply_markup=None)
@@ -12938,7 +12933,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         from broll.handlers import handle_broll_music_cb
         await handle_broll_music_cb(
-            update, context, _action, category=_cat, chat_id=query.message.chat_id)
+            update, context, _action, category=_cat, track_id=_track_id,
+            chat_id=query.message.chat_id)
         return
 
     if query.data.startswith("b2cov:"):
@@ -19163,30 +19159,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception as e:
                             logger.warning(f"Failed to save avatar to Notion: {e}")
 
-                    # Telegram Bot API не принимает файл >50 МБ. Avatar IV
-                    # отдаёт видео с очень высоким битрейтом — ролик ~30с
-                    # весит ~90 МБ → send_video падал с 413. Крупный файл
-                    # шлём в Telegram сжатой копией; оригинал уже сохранён
-                    # в проект для монтажа, его не трогаем.
+                    # Финал — ДОКУМЕНТОМ (Артём 17 июня: без транскода Telegram,
+                    # mp4-документ играется в чате с превью). Раньше send_video
+                    # пережимал крупный файл ad-hoc 2-pass; теперь канон
+                    # _broll_deliver: ≤48МБ документом (HD), >48МБ → nginx-ссылка.
                     _avatar_caption = (
                         f"🤖 Аватар готов! ({look_name}, {ver_label}, {duration}с)"
                     )
-                    send_file = video_file
-                    _tg_compressed = None
-                    if video_file.stat().st_size > 48 * 1024 * 1024:
-                        _tg_compressed = ASSETS_DIR / f"heygen_{video_id[:8]}_tg.mp4"
-                        # 2-pass, сохраняя 1080p (раньше даунскейлили до 720p
-                        # → Avatar IV выглядел мыльно). Фолбэк на 720p внутри.
-                        ok = await asyncio.to_thread(
-                            _compress_for_telegram, str(video_file),
-                            str(_tg_compressed), duration)
-                        if ok:
-                            send_file = _tg_compressed
-                            logger.info(
-                                f"[avatar] сжал для Telegram: "
-                                f"{video_file.stat().st_size / 1048576:.0f}МБ → "
-                                f"{_tg_compressed.stat().st_size / 1048576:.0f}МБ"
-                            )
                     # Кнопки «что дальше» строим ДО отправки видео и прикрепляем
                     # под видео (reply_markup в send_video). Иначе они оказываются
                     # в «генерация…»-сообщении наверху, и пользователю приходится
@@ -19212,35 +19191,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Что дальше?"
                     )
 
-                    try:
-                        with open(send_file, "rb") as f:
-                            await context.bot.send_video(
-                                chat_id=query.message.chat_id,
-                                video=f,
-                                caption=_video_caption,
-                                supports_streaming=True,
-                                reply_markup=_next_step_kb,
-                            )
-                    except Exception as _se:
-                        # Не валим весь шаг — аватар уже сохранён в проект и
-                        # Notion. Шлём текст со ссылкой + те же кнопки.
-                        logger.warning(f"[avatar] send_video не прошёл: {_se}")
-                        _link = result.get("video_url") or ""
+                    # Канон-доставка: документ ≤48МБ (HD) / nginx-ссылка / None.
+                    # Оригинал video_file (без пережатия) — он уже в проекте.
+                    _delivered = await _broll_deliver(
+                        context.bot, query.message.chat_id, str(video_file),
+                        _video_caption, reply_markup=_next_step_kb, parse_mode=None)
+                    if _delivered is None:
+                        # Не валим шаг — аватар уже в проекте и Notion.
                         await context.bot.send_message(
                             chat_id=query.message.chat_id,
-                            text=(
-                                f"{_video_caption}\n\n"
-                                f"⚠️ Файл крупноват для Telegram — забери из "
-                                f"«📥 Скачать материалы»"
-                                + (f" или по ссылке:\n{_link}" if _link else ".")
-                            ),
+                            text=(f"{_video_caption}\n\n⚠️ Не удалось отправить — "
+                                  f"забери из «📥 Скачать материалы»."),
                             reply_markup=_next_step_kb,
                         )
-                    if _tg_compressed and _tg_compressed.exists():
-                        try:
-                            _tg_compressed.unlink()
-                        except Exception:
-                            pass
 
                     # Заменяем «генерация…»-сообщение на короткий статус —
                     # большое меню уже под видео ниже, дублировать не нужно.

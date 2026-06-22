@@ -54,16 +54,18 @@ class _FakeMsg:
 
 
 class _DeliverBot:
-    """Фейк bot для _broll_deliver: send_document может падать, send_message пишет."""
+    """Фейк bot для _broll_deliver: send_document может падать, send_message пишет.
+    Пишет последние kwargs (reply_markup/filename/parse_mode) для проверки проброса."""
     def __init__(self, doc_raises=False):
         self.doc_calls = 0; self.msg_calls = []; self._doc_raises = doc_raises
+        self.last_doc_kw = {}; self.last_msg_kw = {}
     async def send_document(self, chat_id, document=None, caption=None, **kw):
-        self.doc_calls += 1
+        self.doc_calls += 1; self.last_doc_kw = kw
         if self._doc_raises:
             raise Exception("Request Entity Too Large (413)")
         return SimpleNamespace(document=SimpleNamespace(file_id="doc1"))
     async def send_message(self, chat_id, text=None, **kw):
-        self.msg_calls.append(text); return _FakeMsg()
+        self.msg_calls.append(text); self.last_msg_kw = kw; return _FakeMsg()
 
 
 SMALL = 10 * 1024 * 1024     # 10 МБ ≤ 48
@@ -112,6 +114,39 @@ def test_deliver_total_fail_none(errors):
     fb = _DeliverBot(doc_raises=True)
     kind = asyncio.run(bot._broll_deliver(fb, 42, p, "cap"))
     _assert(kind is None, f"полный фейл → None (не падаем): {kind}", errors)
+
+
+# ── _broll_deliver: проброс reply_markup / filename (универсальный финал) ──
+
+def test_deliver_reply_markup_on_document(errors):
+    print("\n[_broll_deliver — reply_markup проброшен в send_document]")
+    tmp = Path(tempfile.mkdtemp()); p = _file(tmp / "v.mp4", SMALL)
+    bot.save_media_permanent = lambda path, prefix="file": "http://m/x.mp4"
+    fb = _DeliverBot()
+    KB = SimpleNamespace(inline_keyboard=[["btn"]])
+    kind = asyncio.run(bot._broll_deliver(fb, 42, p, "cap", reply_markup=KB))
+    _assert(kind == "document", f"документ: {kind}", errors)
+    _assert(fb.last_doc_kw.get("reply_markup") is KB, "кнопки «что дальше» под документом", errors)
+
+
+def test_deliver_reply_markup_on_link(errors):
+    print("\n[_broll_deliver — reply_markup проброшен в ссылку-сообщение (>48 МБ)]")
+    tmp = Path(tempfile.mkdtemp()); p = _file(tmp / "v.mp4", BIG)
+    bot.save_media_permanent = lambda path, prefix="file": "http://m/x.mp4"
+    fb = _DeliverBot()
+    KB = SimpleNamespace(inline_keyboard=[["btn"]])
+    kind = asyncio.run(bot._broll_deliver(fb, 42, p, "cap", reply_markup=KB))
+    _assert(kind == "link", f"ссылка: {kind}", errors)
+    _assert(fb.last_msg_kw.get("reply_markup") is KB, "кнопки под ссылкой-сообщением", errors)
+
+
+def test_deliver_custom_filename(errors):
+    print("\n[_broll_deliver — filename override (имя для скачивания)]")
+    tmp = Path(tempfile.mkdtemp()); p = _file(tmp / "v.mp4", SMALL)
+    bot.save_media_permanent = lambda path, prefix="file": "http://m/x.mp4"
+    fb = _DeliverBot()
+    asyncio.run(bot._broll_deliver(fb, 42, p, "cap", filename="Мой ролик.mp4"))
+    _assert(fb.last_doc_kw.get("filename") == "Мой ролик.mp4", "имя файла переопределено", errors)
 
 
 # ── assemble_broll_from_draft использует deliver_fn ──────────────────
@@ -202,6 +237,9 @@ def main():
     test_deliver_big_preflight_link(errors)
     test_deliver_413_fallback_link(errors)
     test_deliver_total_fail_none(errors)
+    test_deliver_reply_markup_on_document(errors)
+    test_deliver_reply_markup_on_link(errors)
+    test_deliver_custom_filename(errors)
     test_assemble_uses_deliver_fn_and_gates_notion(errors)
     test_assemble_legacy_default_no_crash(errors)
     test_bot_wiring_deliver(errors)

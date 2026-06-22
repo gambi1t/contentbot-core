@@ -43,11 +43,15 @@ from bot_state import (
     pending as _bot_pending, save_pending as _bot_save_pending,
     project_dir as _bot_project_dir,
 )
-from music_mixer import list_categories, pick_random_track
+from music_mixer import list_categories, list_tracks
 from selfie.cover import (
     extract_frame, get_frame_timestamps, probe_video_duration,
     list_library_sample, lookup_library_path,
 )
+# Паритет с селфи: тот же batch-пикер (3 трека на выбор). selfie.music уже
+# тонкая обёртка над music_mixer.list_tracks, поэтому это НЕ дубль логики и
+# B-roll уже зависит от selfie.cover — связь консистентна.
+from selfie.music import pick_n_tracks as _pick_n_tracks
 
 logger = logging.getLogger("broll.handlers")
 
@@ -627,13 +631,72 @@ def _music_category_keyboard() -> InlineKeyboardMarkup:
 
 
 def _music_picked_keyboard(category: str) -> InlineKeyboardMarkup:
-    """После превью трека: принять / другой трек / сменить категорию / без музыки."""
+    """После выбора конкретного трека: принять / другой трек / сменить категорию / без музыки."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Эта музыка — дальше", callback_data="b2mus:accept")],
-        [InlineKeyboardButton("🔄 Другой трек", callback_data=f"b2mus:reroll:{category}")],
+        [InlineKeyboardButton("🔄 Другие треки", callback_data=f"b2mus:reroll:{category}")],
         [InlineKeyboardButton("⬅️ Сменить категорию", callback_data="b2mus:back")],
         [InlineKeyboardButton("🚫 Без музыки", callback_data="b2mus:skip")],
     ])
+
+
+# Сколько треков показываем за раз (паритет с селфи: Артём — «три трека точно
+# лучше, по одному долго»). Селфи использует n=3 в проде → категории имеют ≥3.
+_MUSIC_PREVIEW_N = 3
+
+
+def _music_preview_footer_keyboard(category: str) -> InlineKeyboardMarkup:
+    """Под 3 аудио-превью: ещё треки / сменить категорию / без музыки. Кнопка
+    «принять» появляется ПОСЛЕ выбора конкретного трека (_music_picked_keyboard)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Ещё треки", callback_data=f"b2mus:reroll:{category}")],
+        [InlineKeyboardButton("⬅️ Сменить категорию", callback_data="b2mus:back")],
+        [InlineKeyboardButton("🚫 Без музыки", callback_data="b2mus:skip")],
+    ])
+
+
+async def _send_broll_music_previews(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                                     draft: dict, category: str | None) -> None:
+    """Прислать N треков категории как отдельные аудио с кнопкой «✅ Выбрать»
+    под каждым (паритет с селфи `_send_track_previews`). Юзер слушает в нативном
+    Telegram-плеере и жмёт под нужным. reroll исключает уже показанные id.
+    Состояние — в broll_draft (in-memory), без глобального pending."""
+    if not category:
+        await context.bot.send_message(
+            chat_id=chat_id, text="🎵 Выбери категорию музыки:",
+            reply_markup=_music_category_keyboard())
+        return
+    shown = draft.get("music_shown_ids") or []
+    tracks = _pick_n_tracks(category, n=_MUSIC_PREVIEW_N, exclude_ids=shown)
+    if not tracks:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🚫 В этой категории нет треков — выбери другую или «Без музыки».",
+            reply_markup=_music_category_keyboard())
+        return
+    # Запомнить показанные id (для reroll) + счётчик партий (инфо в футере).
+    draft["music_shown_ids"] = list({*shown, *(t["id"] for t in tracks)})
+    batch_n = (draft.get("music_batch_n") or 0) + 1
+    draft["music_batch_n"] = batch_n
+    cat_label = _MUSIC_CAT_LABELS.get(category, category)
+    for i, track in enumerate(tracks, 1):
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                f"✅ Выбрать этот ({track['id']})",
+                callback_data=f"b2mus:pick:{category}:{track['id']}")]])
+            with open(track["file"], "rb") as af:
+                await context.bot.send_audio(
+                    chat_id=chat_id, audio=af,
+                    title=f"{i}. {track['id']}", performer=str(cat_label),
+                    duration=int(track.get("duration", 0)), reply_markup=kb)
+        except Exception as e:
+            logger.error(f"[broll.music] send_audio failed for {track.get('id')}: {e}")
+    batch_suffix = "" if batch_n == 1 else f" (партия #{batch_n})"
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(f"☝️ Послушай {len(tracks)} трека выше и выбери «✅» под нужным{batch_suffix}.\n\n"
+              "Ни один не подошёл — «🔄 Ещё треки»."),
+        reply_markup=_music_preview_footer_keyboard(category))
 
 
 async def start_broll_music_pick(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -658,9 +721,11 @@ async def start_broll_music_pick(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handle_broll_music_cb(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                 action: str, category: str | None = None,
+                                track_id: str | None = None,
                                 chat_id: int | None = None) -> None:
-    """b2mus:* — cat/reroll (превью трека) · back (категории) · accept/skip
-    (дальше к голосу). Только ЗАХВАТ пути; микширование делает ассемблер."""
+    """b2mus:* — cat/reroll (3 трека-превью) · pick:<cat>:<id> (выбрать трек) ·
+    back (категории) · accept/skip (дальше к голосу). Только ЗАХВАТ пути;
+    микширование делает ассемблер."""
     draft = context.user_data.get("broll_draft")
     if chat_id is None:
         chat_id = (draft or {}).get("chat_id") or update.effective_chat.id
@@ -670,14 +735,16 @@ async def handle_broll_music_cb(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if action == "back":
-        draft.pop("music_path", None)
+        for k in ("music_path", "music_shown_ids", "music_batch_n"):
+            draft.pop(k, None)
         await context.bot.send_message(
             chat_id=chat_id, text="🎵 Выбери категорию музыки:",
             reply_markup=_music_category_keyboard())
         return
 
     if action == "skip":
-        draft.pop("music_path", None)
+        for k in ("music_path", "music_shown_ids", "music_batch_n"):
+            draft.pop(k, None)
         await prompt_voice_choice(update, context)
         return
 
@@ -685,23 +752,27 @@ async def handle_broll_music_cb(update: Update, context: ContextTypes.DEFAULT_TY
         await prompt_voice_choice(update, context)
         return
 
-    # cat / reroll — подобрать случайный трек категории и прислать превью.
-    track = pick_random_track(category)
-    if not track or not track.get("file"):
-        draft.pop("music_path", None)
+    if action == "pick":
+        # Юзер выбрал конкретный трек из превью → находим по id, кладём путь.
+        track = next(
+            (t for t in list_tracks(category or "") if t.get("id") == (track_id or "")),
+            None)
+        if not track or not track.get("file"):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Не нашёл этот трек — выбери другой или категорию заново.",
+                reply_markup=_music_category_keyboard())
+            return
+        draft["music_path"] = track["file"]
+        cat_label = _MUSIC_CAT_LABELS.get(category, category)
         await context.bot.send_message(
             chat_id=chat_id,
-            text="🚫 В этой категории нет треков — выбери другую или «Без музыки».",
-            reply_markup=_music_category_keyboard())
-        return
-    draft["music_path"] = track["file"]
-    cat_label = _MUSIC_CAT_LABELS.get(category, category)
-    with open(track["file"], "rb") as af:
-        await context.bot.send_audio(
-            chat_id=chat_id, audio=af,
-            title=f"Музыка — {cat_label}",
-            caption=f"🎧 {cat_label}. Подойдёт → «Эта музыка», иначе «Другой трек».",
+            text=f"🎵 Трек выбран ({cat_label}). Подойдёт → «Эта музыка», иначе «Другие треки».",
             reply_markup=_music_picked_keyboard(category))
+        return
+
+    # cat / reroll — показать N треков категории на выбор (паритет с селфи).
+    await _send_broll_music_previews(context, chat_id, draft, category)
 
 
 def _voice_choice_keyboard() -> InlineKeyboardMarkup:
