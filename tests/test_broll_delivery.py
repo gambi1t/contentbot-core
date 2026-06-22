@@ -231,6 +231,23 @@ def test_bot_wiring_deliver(errors):
     _assert(src.count("deliver_fn=") >= 2, "deliver_fn проброшен ≥2 раз (ИИ-голос + свой голос)", errors)
 
 
+def test_montage_uses_canon_deliver(errors):
+    print("\n[bot.py — монтаж (card_asm_go) отдаёт через канон _broll_deliver; "
+          "мёртвой ffmpeg-компрессии нет]")
+    src = (Path(__file__).parent.parent / "bot.py").read_text(encoding="utf-8")
+    # Мёртвый блок 413-компрессии монтажа удалён: ffmpeg жёг ~420с CPU, а
+    # результат (send_file/_tg_compressed) нигде не использовался (отдавался
+    # оригинал final_path). Канон _broll_deliver делает size-preflight сам.
+    _assert("final_auto_tg.mp4" not in src, "мёртвая ffmpeg-компрессия монтажа удалена (final_auto_tg.mp4)", errors)
+    _assert("_tg_compressed" not in src, "переменная _tg_compressed удалена", errors)
+    # Финал монтажа зовёт канон. Якорь — подпись авто-ролика.
+    anchor = src.find("✅ Авто-ролик готов")
+    _assert(anchor != -1, "блок финала монтажа найден (подпись авто-ролика)", errors)
+    if anchor != -1:
+        region = src[anchor:anchor + 1400]
+        _assert("_broll_deliver(" in region, "монтаж отдаёт через канон _broll_deliver", errors)
+
+
 def main():
     errors = []
     test_deliver_small_document(errors)
@@ -243,6 +260,7 @@ def main():
     test_assemble_uses_deliver_fn_and_gates_notion(errors)
     test_assemble_legacy_default_no_crash(errors)
     test_bot_wiring_deliver(errors)
+    test_montage_uses_canon_deliver(errors)
     print()
     if errors:
         print(f"❌ FAIL — {len(errors)}:")

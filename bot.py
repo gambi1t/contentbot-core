@@ -14469,76 +14469,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"или «🔄 Пересобрать» для другого формата."
             )
 
-            # 413-guard: бот Telegram отправляет максимум ~50 МБ. Tier 1 —
-            # пробуем сжать (ffmpeg CRF 26); Tier 2 — если и сжатый >48 МБ,
-            # шлём ссылку на nginx-media (бот её и так раздаёт). Оригинал
-            # final_video.mp4 в проекте не трогаем.
-            send_file = final_path
-            _tg_compressed = None
-            if size_mb > 48:
-                _tg_compressed = proj_dir / "final_auto_tg.mp4"
-                try:
-                    await asyncio.to_thread(
-                        subprocess.run,
-                        ["ffmpeg", "-y", "-i", str(final_path),
-                         "-c:v", "libx264", "-preset", "veryfast",
-                         "-crf", "26", "-c:a", "aac", "-b:a", "128k",
-                         "-movflags", "+faststart", str(_tg_compressed)],
-                        capture_output=True, timeout=420,
-                    )
-                    if _tg_compressed.exists() and _tg_compressed.stat().st_size > 0:
-                        _cmp_mb = _tg_compressed.stat().st_size / 1024 / 1024
-                        logger.info(
-                            f"[montage] сжал для Telegram: "
-                            f"{size_mb:.1f} МБ → {_cmp_mb:.1f} МБ"
-                        )
-                        if _cmp_mb <= 48:
-                            send_file = _tg_compressed
-                except Exception as _ce:
-                    logger.warning(f"[montage] компрессия не удалась: {_ce}")
-
-            # Отдаём ДОКУМЕНТОМ: Telegram не пережимает документы (send_video
-            # пережимал на отдаче) + лимит 2 ГБ вместо 48 МБ. mp4-документ
-            # играется в чате и с превью. Максимальное качество до зрителя
-            # (Артём 17 июня). Шлём ОРИГИНАЛ final_path (без 413-сжатия).
-            sent_ok = False
-            try:
-                with open(final_path, "rb") as f:
-                    await context.bot.send_document(
-                        chat_id=query.message.chat_id,
-                        document=f,
-                        caption=caption_text,
-                        reply_markup=InlineKeyboardMarkup(buttons),
-                    )
-                sent_ok = True
-            except Exception as _se:
-                logger.warning(f"[montage] send_document не прошёл: {_se}")
-
-            if not sent_ok:
-                # Tier 2 — публичная ссылка на nginx-media.
-                _link = None
-                try:
-                    _link = await asyncio.to_thread(
-                        save_media_permanent, str(final_path), "final_auto"
-                    )
-                except Exception as _le:
-                    logger.warning(f"[montage] save_media_permanent: {_le}")
-                tail = (
-                    f" — открыть в браузере:\n{_link}" if _link
-                    else " — забери из «📥 Скачать материалы»."
-                )
+            # Финал — ДОКУМЕНТОМ через канон _broll_deliver (Артём 17 июня:
+            # Telegram НЕ транскодит документы, mp4-документ играется в чате с
+            # превью, до зрителя идёт максимальное качество). Канон сам делает
+            # size-preflight: ≤48МБ → документ (HD), >48МБ → nginx-ссылка без
+            # пережатия. Оригинал final_video.mp4 в проекте не трогаем.
+            _delivered = await _broll_deliver(
+                context.bot, query.message.chat_id, str(final_path),
+                caption_text, reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=None)
+            if _delivered is None:
+                # Не валим шаг — ролик уже сохранён в проекте.
                 await query.message.reply_text(
-                    f"{caption_text}\n\n"
-                    f"⚠️ Файл крупный для Telegram (>{48} МБ){tail}",
+                    f"{caption_text}\n\n⚠️ Не удалось отправить — "
+                    f"забери из «📥 Скачать материалы».",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
-
-            # Чистим временную сжатую копию.
-            if _tg_compressed and _tg_compressed.exists():
-                try:
-                    _tg_compressed.unlink()
-                except Exception:
-                    pass
         except AssemblyError as e:
             logger.error(f"Auto-assemble failed: {e}")
             await query.edit_message_text(
