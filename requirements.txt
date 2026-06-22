@@ -27,3 +27,7 @@ opencv-python-headless
 # telethon_uploader.py-демон; не было в requirements ядра → contentbot-core-telethon
 # падал на импорте (порт, паритет с legacy content-bot).
 telethon==1.42.0
+# fal.ai SDK — движок ai_video (Kling 3.0 Pro) в fal_media.py. Без него
+# seedance_ready()=(False,'fal-client not installed') → ai_video падает «Видео-
+# движок недоступен», несмотря на FAL_KEY+флаг. Нужен при включении ai_video (срез C).
+fal-client>=1.0.0
