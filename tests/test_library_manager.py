@@ -37,6 +37,10 @@ def main():
     orig = dict(bp._LIBRARY_ROOTS)
     bp._LIBRARY_ROOTS["video"] = tmp
     bp._LIBRARY_ROOTS["image"] = tmp
+    # Фикстуры под <root>/maksim → пиним тенант (Fix B per-tenant), иначе на
+    # сервере (tenant=panferov) _brand_base уйдёт в root/panferov.
+    _orig_tid = bp.tenant.active_tenant_id
+    bp.tenant.active_tenant_id = lambda: "maksim"
     # исходник для загрузки
     src = tmp / "_src.mov"; src.write_bytes(b"x" * 100)
     try:
@@ -72,6 +76,7 @@ def main():
         _assert(lm._safe_name("") == "file", "пустое → file", errors)
     finally:
         bp._LIBRARY_ROOTS.clear(); bp._LIBRARY_ROOTS.update(orig)
+        bp.tenant.active_tenant_id = _orig_tid
 
     print()
     if errors:

@@ -50,6 +50,10 @@ def main():
     # monkeypatch image root → temp
     orig = dict(bp._LIBRARY_ROOTS)
     bp._LIBRARY_ROOTS["image"] = tmp
+    # Фикстуры под <root>/maksim → пиним тенант (Fix B per-tenant), иначе на
+    # сервере (tenant=panferov) _brand_base уйдёт в root/panferov и не найдёт их.
+    _orig_tid = bp.tenant.active_tenant_id
+    bp.tenant.active_tenant_id = lambda: "maksim"
     try:
         print("\n[list_library_categories — пустые скрыты]")
         cats = bp.list_library_categories("image")
@@ -105,6 +109,7 @@ def main():
     finally:
         bp._LIBRARY_ROOTS.clear()
         bp._LIBRARY_ROOTS.update(orig)
+        bp.tenant.active_tenant_id = _orig_tid
 
     print()
     if errors:
