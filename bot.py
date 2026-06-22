@@ -1535,6 +1535,7 @@ def _pick_random_avatar() -> str | None:
 # carousel/handlers.py не делал import bot для доступа). Здесь — тонкая
 # обёртка с тем же именем для сохранения обратной совместимости.
 from bot_state import project_dir as _project_dir  # noqa: E402, F401
+from bot_state import mark_finished as _mark_finished, is_finished_project as _is_finished_project  # noqa: E402, F401
 
 
 def _save_to_project(data: dict, filename: str, source_path: str):
@@ -6342,6 +6343,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "обложку → озвучку → аватар → монтаж → публикацию.\n\n"
             "*Команды:*\n"
             "• `/selfie` — живое видео с телефона: субтитры + Notion + TG-пост\n"
+            "• `/ready` — готовый ролик → сразу название/обложка/описание/кросспост\n"
             "• `/script` — вставить готовый сценарий (без переписывания)\n"
             "• `/notion` — закинуть идею в Notion без сценария\n"
             "• `/tgpost` — пост в твой канал @yumsunov\\_realbiz\n"
@@ -6369,6 +6371,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/script` — вставить готовый сценарий (без переписывания)\n"
             "• `/notion` — закинуть идею в Notion без сценария\n"
             "• `/selfie` — живое видео с телефона: субтитры + Notion\n"
+            "• `/ready` — готовый ролик → сразу название/обложка/описание/кросспост\n"
             "• `/image` — одно фото по описанию (Nano Banana Pro)\n"
             "• `/video` — одно короткое видео 5/10 сек (Kling 3.0 Pro)\n"
             "• `/heygen_test` — тест аватара: фото + аудио → видео\n"
@@ -6845,6 +6848,33 @@ async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎬 <b>Качественный/длинный</b> (больше 20 МБ) — открой «Избранное», "
         "пришли ролик <b>Файлом (документом)</b> с подписью <code>#selfie</code>, "
         "дождись «✅ Видео получено» и нажми «✅ Обработать видео» ниже.\n\n"
+        "⚠️ Не отправляй большой ролик «как видео» в чат — Telegram сожмёт качество.",
+        parse_mode="HTML",
+        reply_markup=selfie_handlers._intake_keyboard(),
+    )
+
+
+async def ready_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Готовый ролик (/ready): уже смонтирован, субтитры вшиты → сразу обложка,
+    название, описание, кросспостинг. Пропускает продакшн selfie (правка текста,
+    монтаж, прожиг, музыка, b-roll). Переиспользует тот же intake, что /selfie
+    (маленький — в чат, большой — Файлом в «Избранное» #selfie), но ставит флаг
+    selfie_finished, по которому _process_local_source ветвится сразу к обложке."""
+    user_id = update.effective_user.id
+    logger.info(f"[user:{user_id}] /ready")
+    if user_id in pending:
+        pending.pop(user_id, None)
+    pending[user_id] = {"state": "selfie_waiting_video", "selfie_finished": True}
+    _save_pending(pending)
+    await update.message.reply_text(
+        "🎬 Готовый ролик\n\n"
+        "Пришли уже смонтированный ролик (с субтитрами, если нужны) — я НЕ буду "
+        "его переобрабатывать. Сразу перейдём к обложке, названию, описанию и "
+        "кросспостингу.\n\n"
+        "📲 <b>Маленький</b> (до 20 МБ) — отправь сюда в чат.\n"
+        "🎬 <b>Большой</b> (больше 20 МБ) — открой «Избранное», пришли ролик "
+        "<b>Файлом (документом)</b> с подписью <code>#selfie</code>, дождись "
+        "«✅ Видео получено» и нажми «✅ Обработать видео» ниже.\n\n"
         "⚠️ Не отправляй большой ролик «как видео» в чат — Telegram сожмёт качество.",
         parse_mode="HTML",
         reply_markup=selfie_handlers._intake_keyboard(),
@@ -7443,6 +7473,11 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
                 shutil.copy2(cover_path, str(proj / "cover.jpg"))
                 logger.info(f"[selfie] Saved cover to {proj.name}/cover.jpg")
             _save_text_to_project(data, "transcript.txt", transcript)
+            # Готовый ролик (/ready): durable-маркер, чтобы кросспост НЕ резал
+            # «CTA-хвост» (его нет у внешне смонтированного ролика) даже при
+            # публикации на следующий день по переоткрытой карточке.
+            if data.get("selfie_finished"):
+                _mark_finished(data)
 
         # Order fix (8 May 2026): previously status_msg.edit_text() was called
         # AFTER send_video, but Telegram renders messages in chronological
@@ -16746,9 +16781,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         video_path = _find_video_for_card(data)
         thumbnail_path = _find_thumbnail_for_card(data)
 
-        # Trim CTA for non-Instagram platforms (last 4s = "подпишитесь" призыв)
+        # Trim CTA for non-Instagram platforms (last 4s = "подпишитесь" призыв).
+        # Готовый ролик (/ready) НЕ режем: у внешне смонтированного видео нет
+        # устного CTA-хвоста → _trim_cta_from_video молча отрезал бы 4с контента.
         video_path_nocta = None
-        needs_trim = any(p in selected for p in ("youtube", "tiktok", "vk", "telegram"))
+        needs_trim = (
+            any(p in selected for p in ("youtube", "tiktok", "vk", "telegram"))
+            and not _is_finished_project(data)
+        )
         if needs_trim and video_path:
             video_path_nocta = await asyncio.to_thread(
                 _trim_cta_from_video, video_path, 4.0, script_text or ""
@@ -20933,6 +20973,7 @@ async def post_init(application):
         ]
     _cmds += [
         ("selfie", "🎥 Живое видео с телефона + субтитры"),
+        ("ready", "🎬 Готовый ролик → название/обложка/кросспост"),
         ("image", "🖼 Сгенерировать фото по описанию"),
         ("video", "🎬 Сгенерировать видео (5 или 10 сек)"),
         ("heygen_test", "🧪 Тест аватара: фото + аудио → видео"),
@@ -22055,6 +22096,7 @@ def main():
     if not _tenant.feature_blocked(_ACTIVE_TENANT, "launch_monitor"):
         app.add_handler(CommandHandler("launches", launches_command))
     app.add_handler(CommandHandler("selfie", selfie_command))
+    app.add_handler(CommandHandler("ready", ready_command))
     # /brand — переключение брендов. Регистрируется только если у тенанта >1
     # бренда (panferov: default+shoes; maksim: один → команда не нужна;
     # transitional без конфига — да, прод цел). (Phase 3 Фаза 2)

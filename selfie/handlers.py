@@ -265,12 +265,40 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await _process_local_source(user_id, source_path, selfie_tmp, msg)
 
 
+def build_finished_pending(selfie_tmp, source_path, words, transcript: str) -> dict:
+    """Pending-состояние для ГОТОВОГО ролика (/ready).
+
+    Видео уже смонтировано и с вшитыми субтитрами → пропускаем правку текста,
+    монтаж, прожиг, музыку, b-roll и идём СРАЗУ к выбору обложки
+    (selfie_cover_picking). Готовый ролик И ЕСТЬ финал → selfie_subtitled и
+    selfie_final = исходник. Транскрипт нужен только для названия/описания.
+    Чистая функция (unit-tested)."""
+    return {
+        "state": "selfie_cover_picking",
+        "selfie_finished": True,
+        "selfie_tmp_dir": str(selfie_tmp),
+        "selfie_source": str(source_path),
+        "selfie_subtitled": str(source_path),
+        "selfie_final": str(source_path),
+        "selfie_words": words,
+        "selfie_transcript": transcript,
+        "selfie_orig_transcript": transcript,
+        "selfie_music_note": "готовый ролик",
+        "selfie_cover_shown_lib_ids": [],
+    }
+
+
 async def _process_local_source(user_id, source_path, selfie_tmp, status_msg) -> None:
     """Общий конвейер source → audio → transcribe → шаг ревью текста.
 
     Используется И маленьким видео из бота (process_video), И большим оригиналом
     из «Избранного» (handle_intake_callback). Burn НЕ запускает — это после
-    подтверждения текста."""
+    подтверждения текста.
+
+    Для ГОТОВОГО ролика (/ready, флаг selfie_finished) ветвимся после расшифровки:
+    видео уже финальное → сразу к обложке, без правки/монтажа/прожига/музыки."""
+    # Захватываем флаг ДО перезаписи _PENDING[user_id] ниже (она затирает entry).
+    finished = bool((_PENDING.get(user_id) or {}).get("selfie_finished"))
     try:
         await status_msg.edit_text("🎙 Расшифровываю речь...")
 
@@ -301,6 +329,23 @@ async def _process_local_source(user_id, source_path, selfie_tmp, status_msg) ->
             )
             _PENDING[user_id] = {"state": "selfie_waiting_video"}
             _SAVE_PENDING(_PENDING)
+            return
+
+        # Готовый ролик (/ready): видео уже финальное → пропускаем правку текста,
+        # монтаж, прожиг, музыку, b-roll. Сразу к обложке.
+        if finished:
+            _PENDING[user_id] = build_finished_pending(
+                selfie_tmp, source_path, words, transcript_text)
+            _SAVE_PENDING(_PENDING)
+            await status_msg.edit_text(
+                "✅ Принял как готовый ролик — не переобрабатываю "
+                "(без монтажа, субтитров, музыки).\n\n"
+                + selfie_cover.build_picker_message()
+                + "\n\n⚠️ «Кадр из видео» захватит вшитые субтитры — для чистой "
+                "обложки лучше «Загрузить своё фото» или «Из библиотеки».",
+                reply_markup=selfie_cover.cover_picker_keyboard(),
+                parse_mode="HTML",
+            )
             return
 
         # Save to pending — БЕЗ burn subtitles, ждём подтверждения текста
@@ -2432,6 +2477,9 @@ async def _finalize_with_cover(
         "selfie_auto_title": first_sentence,
         "selfie_picked_music": data.get("selfie_picked_music"),
         "selfie_cover_note": cover_note,
+        # Готовый ролик (/ready): пронести флаг до _selfie_finalize (durable-маркер)
+        # и до кросспоста (trim-guard). Иначе rebuild здесь его терял.
+        "selfie_finished": data.get("selfie_finished"),
     }
     _SAVE_PENDING(_PENDING)
 

@@ -58,6 +58,33 @@ def project_dir(data: dict) -> Path | None:
     return d
 
 
+FINISHED_FLAG = "finished.flag"
+
+
+def mark_finished(data: dict) -> None:
+    """Пометить проект как ГОТОВЫЙ ролик (загружен извне через /ready).
+
+    Кросспост не должен резать «CTA-хвост» (_trim_cta_from_video) у внешне
+    смонтированного ролика — у него нет устного CTA. Маркер durable (переживает
+    перезапуск бота и переоткрытие карточки на следующий день), чего in-memory
+    флага `selfie_finished` не хватает. No-op если проект ещё не создан.
+    """
+    proj = project_dir(data)
+    if proj:
+        try:
+            (proj / FINISHED_FLAG).write_text("1", encoding="utf-8")
+        except OSError:
+            pass
+
+
+def is_finished_project(data: dict) -> bool:
+    """True если ролик загружен как готовый: in-memory флаг ИЛИ маркер в проекте."""
+    if data.get("selfie_finished"):
+        return True
+    proj = project_dir(data)
+    return bool(proj and (proj / FINISHED_FLAG).exists())
+
+
 def _load_pending() -> dict:
     if PENDING_FILE.exists():
         try:
@@ -90,4 +117,5 @@ def save_pending(data: dict | None = None) -> None:
 pending: dict[int, dict] = _load_pending()
 
 
-__all__ = ["pending", "save_pending", "PENDING_FILE", "PROJECTS_DIR", "project_dir"]
+__all__ = ["pending", "save_pending", "PENDING_FILE", "PROJECTS_DIR", "project_dir",
+           "FINISHED_FLAG", "mark_finished", "is_finished_project"]
