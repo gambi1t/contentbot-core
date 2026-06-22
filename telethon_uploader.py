@@ -38,6 +38,11 @@ LIB_TAG_RE = re.compile(
     r'^#lib\s+([a-zA-Z0-9_\-]+)\s+([a-zA-Z0-9_\-]+)',
     re.IGNORECASE,
 )
+# #selfie → скачать БОЛЬШОЙ оригинал selfie (>20МБ) в selfie_inbox для selfie-
+# пайплайна бота (path B; Bot API не качает >20МБ). Отдельно от #crosspost
+# (upload_final_video), чтобы два Saved-Messages-потока не перехватывали файлы.
+SELFIE_TAG = "#selfie"
+SELFIE_INBOX = BOT_DIR / "selfie_inbox"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +99,32 @@ def _clear_upload_state(user_id: str):
             )
     except Exception as e:
         logger.error(f"Failed to clear upload state: {e}")
+
+
+# ── selfie path B (большой оригинал >20МБ) ────────────────────────────────
+def _find_active_selfie(pending: dict) -> "tuple[str, dict] | None":
+    """Юзер, ждущий большое selfie-видео (path B): первый в state
+    'selfie_waiting_video', иначе None. Отдельно от _find_active_upload
+    (#crosspost/upload_final_video), чтобы потоки не перехватывали файлы."""
+    for uid, data in pending.items():
+        if data.get("state") == "selfie_waiting_video":
+            return uid, data
+    return None
+
+
+def _selfie_target_path(user_id: str) -> Path:
+    """Стабильный путь в selfie_inbox. Качаем в <path>.part → atomic rename,
+    чтобы бот не прочитал полуфайл."""
+    return SELFIE_INBOX / f"selfie_{user_id}.mp4"
+
+
+def _atomic_write_pending(pending: dict) -> None:
+    """Запись pending.json через tmp + os.replace — читатель не видит битый JSON.
+    Не полный кросс-процесс-лок (бот тоже пишет), но #selfie-запись идёт пока
+    юзер в Избранном, не жмёт кнопки бота → окно гонки минимально."""
+    tmp = PENDING_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, PENDING_FILE)
 
 
 client = TelegramClient(str(SESSION_FILE), API_ID, API_HASH)
@@ -166,9 +197,75 @@ async def handle_saved(event):
             await status.edit(f"❌ Ошибка сохранения: {e}")
         return
 
+    # --- #selfie: скачать большой оригинал selfie для selfie-пайплайна бота ---
+    if SELFIE_TAG in caption.lower():
+        try:
+            pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"#selfie: failed to read pending.json: {e}")
+            await event.reply("❌ Не удалось прочитать состояние бота. Попробуй ещё раз.")
+            return
+        active = _find_active_selfie(pending)
+        if not active:
+            await event.reply(
+                "⚠️ Бот сейчас не ждёт selfie-видео.\n\n"
+                "Сначала в @panferovai_contentbot набери /selfie, потом пришли "
+                "сюда оригинал ДОКУМЕНТОМ с подписью #selfie."
+            )
+            return
+        uid, _data = active
+        SELFIE_INBOX.mkdir(parents=True, exist_ok=True)
+        target = _selfie_target_path(uid)
+        part = target.with_suffix(target.suffix + ".part")
+        logger.info(f"#selfie download: uid={uid}, size={size_mb:.1f} MB")
+        status = await event.reply(
+            f"📥 Скачиваю selfie {size_mb:.1f} MB (оригинал, без сжатия)...")
+
+        last_percent = [0]
+
+        def progress(current, total):
+            if total:
+                pct = int(current * 100 / total)
+                if pct >= last_percent[0] + 10:
+                    last_percent[0] = pct
+                    logger.info(f"#selfie download progress: {pct}%")
+
+        try:
+            await msg.download_media(file=str(part), progress_callback=progress)
+            os.replace(part, target)
+        except Exception as e:
+            logger.error(f"#selfie download failed: {e}", exc_info=True)
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            await status.edit(f"❌ Ошибка скачивания: {e}")
+            return
+
+        # Перечитать pending (мог измениться за долгую скачку) и записать путь
+        # к оригиналу — бот подхватит его на «Обработать видео».
+        try:
+            pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+            if uid in pending and pending[uid].get("state") == "selfie_waiting_video":
+                pending[uid]["selfie_source"] = str(target)
+                pending[uid]["selfie_video_ready"] = True
+                _atomic_write_pending(pending)
+            else:
+                logger.warning(f"#selfie: uid={uid} no longer waiting, downloaded anyway")
+        except Exception as e:
+            logger.error(f"#selfie: failed to update pending: {e}")
+
+        actual = target.stat().st_size / 1024 / 1024
+        logger.info(f"#selfie saved {actual:.1f} MB to {target}")
+        await status.edit(
+            f"✅ Видео получено ({actual:.1f} MB, оригинал)\n\n"
+            f"Вернись в @panferovai_contentbot и нажми «✅ Обработать видео»."
+        )
+        return
+
     # Require trigger tag to avoid processing random videos in Saved Messages
     if TRIGGER_TAG not in caption.lower():
-        logger.info("Video in Saved Messages without #crosspost/#lib tag, ignoring")
+        logger.info("Video in Saved Messages without #crosspost/#lib/#selfie tag, ignoring")
         return
 
     logger.info(f"Got video with #crosspost tag, size {size_mb:.1f} MB")
@@ -223,7 +320,7 @@ async def main():
     await client.start()
     me = await client.get_me()
     logger.info(f"Logged in as {me.first_name} (@{me.username}) id={me.id}")
-    logger.info(f"Listening on Saved Messages for videos with {TRIGGER_TAG} tag")
+    logger.info(f"Listening on Saved Messages for videos with {TRIGGER_TAG} / #lib / {SELFIE_TAG} tags")
     await client.run_until_disconnected()
 
 

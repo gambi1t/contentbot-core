@@ -6839,10 +6839,14 @@ async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _save_pending(pending)
     await update.message.reply_text(
         "🎥 Живое видео\n\n"
-        "Отправь видео, снятое на телефон.\n"
         "Я расшифрую речь, наложу субтитры в стиле CapCut, "
         "сгенерирую обложку и создам карточку в Notion.\n\n"
-        "Просто отправь видеофайл."
+        "📲 <b>Маленький ролик</b> (до 20 МБ) — просто отправь сюда в чат.\n"
+        "🎬 <b>Качественный/длинный</b> (больше 20 МБ) — открой «Избранное», "
+        "пришли ролик <b>Файлом (документом)</b> с подписью <code>#selfie</code>, "
+        "дождись «✅ Видео получено» и нажми «✅ Обработать видео».\n\n"
+        "⚠️ Не отправляй большой ролик «как видео» в чат — Telegram сожмёт качество.",
+        parse_mode="HTML",
     )
 
 
@@ -11435,6 +11439,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if query.data.startswith("selfie_cover:"):
             await selfie_handlers.handle_cover_callback(update, context)
+            return
+        if query.data.startswith("selfie_intake:"):
+            # path B: «✅ Обработать видео» после загрузки большого оригинала #selfie
+            await selfie_handlers.handle_intake_callback(update, context)
             return
 
     # ── Селфи: текст на обложку (С текстом/Без) ──────────────────────────────

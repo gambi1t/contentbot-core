@@ -38,6 +38,7 @@ Callbacks "selfie_cover:*":
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 import tempfile
 import time
@@ -196,16 +197,47 @@ def is_video_message(message) -> bool:
     return fname.endswith(_VIDEO_EXTS)
 
 
-async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Принять видео от юзера в state 'selfie_waiting_video':
-    скачать → audio → transcribe (с brand biasing) → показать review с кнопками.
+BOT_API_DOWNLOAD_LIMIT_MB = 20
 
-    Не запускает burn subtitles — это произойдёт после подтверждения текста.
+
+def _intake_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка запуска обработки большого видео, скачанного telethon в inbox."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Обработать видео", callback_data="selfie_intake:process")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+    ])
+
+
+async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Принять видео от юзера в state 'selfie_waiting_video'.
+
+    Маленькое (≤20 МБ) — качаем прямо через Bot API. Большой оригинал (>20 МБ)
+    Bot API скачать не может (getFile-лимит) → направляем слать документом в
+    «Избранное» с #selfie (path B, telethon_uploader), потом юзер жмёт
+    «✅ Обработать видео». Burn не запускает — это после подтверждения текста.
     """
     user_id = update.effective_user.id
     video_file = update.message.video or update.message.document
     if not is_video_message(update.message):
         await update.message.reply_text("Отправь видеофайл (MP4/MOV). Жду видео, снятое на телефон.")
+        return
+
+    # Bot API не качает getFile() >20МБ → большой оригинал через «Избранное»
+    # (Telegram не пережимает документы → качество сохраняется). path B.
+    size_bytes = getattr(video_file, "file_size", 0) or 0
+    if size_bytes > BOT_API_DOWNLOAD_LIMIT_MB * 1024 * 1024:
+        await update.message.reply_text(
+            f"📦 Видео {size_bytes / 1024 / 1024:.0f} МБ — больше лимита Telegram "
+            f"для ботов ({BOT_API_DOWNLOAD_LIMIT_MB} МБ). Скачать его через бота "
+            "без потери качества нельзя.\n\n"
+            "Чтобы сохранить оригинал:\n"
+            "1️⃣ Открой «Избранное» (Saved Messages).\n"
+            "2️⃣ Пришли туда этот ролик <b>Файлом (документом)</b> с подписью "
+            "<code>#selfie</code>.\n"
+            "3️⃣ Дождись «✅ Видео получено» и нажми «✅ Обработать видео» ниже.",
+            parse_mode="HTML",
+            reply_markup=_intake_keyboard(),
+        )
         return
 
     msg = await update.message.reply_text("📥 Загружаю видео...")
@@ -223,8 +255,24 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         file_size = source_path.stat().st_size / 1024 / 1024
         _LOGGER.info(f"[selfie] Source video downloaded: {file_size:.1f} MB")
+    except Exception as e:
+        _LOGGER.error(f"[selfie] download error: {e}", exc_info=True)
+        _PENDING[user_id] = {"state": "selfie_waiting_video"}
+        _SAVE_PENDING(_PENDING)
+        await msg.edit_text(f"Ошибка загрузки видео: {e}\n\nПопробуй ещё раз.")
+        return
 
-        await msg.edit_text("🎙 Расшифровываю речь...")
+    await _process_local_source(user_id, source_path, selfie_tmp, msg)
+
+
+async def _process_local_source(user_id, source_path, selfie_tmp, status_msg) -> None:
+    """Общий конвейер source → audio → transcribe → шаг ревью текста.
+
+    Используется И маленьким видео из бота (process_video), И большим оригиналом
+    из «Избранного» (handle_intake_callback). Burn НЕ запускает — это после
+    подтверждения текста."""
+    try:
+        await status_msg.edit_text("🎙 Расшифровываю речь...")
 
         # Extract audio
         audio_tmp = selfie_tmp / "_tmp_audio.wav"
@@ -247,11 +295,11 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             pass
 
         if not transcript_text.strip():
-            await msg.edit_text(
+            await status_msg.edit_text(
                 "Не удалось распознать речь в видео. "
                 "Попробуй отправить другое видео с чёткой речью."
             )
-            _PENDING[user_id]["state"] = "selfie_waiting_video"
+            _PENDING[user_id] = {"state": "selfie_waiting_video"}
             _SAVE_PENDING(_PENDING)
             return
 
@@ -267,19 +315,63 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         _SAVE_PENDING(_PENDING)
 
         # Show review with buttons
-        await msg.edit_text(
+        await status_msg.edit_text(
             build_review_message(transcript_text, edited=False),
             reply_markup=_review_keyboard(can_use_as_is=True),
             parse_mode="HTML",
         )
     except Exception as e:
-        _LOGGER.error(f"[selfie] process_video error: {e}", exc_info=True)
-        _PENDING[user_id]["state"] = "selfie_waiting_video"
+        _LOGGER.error(f"[selfie] process error: {e}", exc_info=True)
+        _PENDING[user_id] = {"state": "selfie_waiting_video"}
         _SAVE_PENDING(_PENDING)
-        await msg.edit_text(
+        await status_msg.edit_text(
             f"Ошибка обработки видео: {e}\n\n"
             "Попробуй отправить другое видео."
         )
+
+
+async def handle_intake_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Обработать selfie_intake:* callbacks. Возвращает True если обработан.
+
+    'process' → взять большой оригинал, скачанный telethon в selfie-inbox
+    (pending[uid]['selfie_source'] + флаг selfie_video_ready), переместить в tmp
+    и запустить тот же конвейер, что и для маленького видео из бота."""
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("selfie_intake:"):
+        return False
+    action = query.data.split(":", 1)[1]
+    if action != "process":
+        return False
+
+    await query.answer()
+    user_id = query.from_user.id
+    data = _PENDING.get(user_id) or {}
+    source = data.get("selfie_source")
+    if not data.get("selfie_video_ready") or not source or not Path(source).exists():
+        await query.message.reply_text(
+            "Пока не вижу видео. Пришли оригинал в «Избранное» документом с подписью "
+            "<code>#selfie</code>, дождись «✅ Видео получено», потом нажми снова.",
+            parse_mode="HTML",
+            reply_markup=_intake_keyboard(),
+        )
+        return True
+
+    # Move inbox file → private tmp dir (единый путь с маленьким видео; finalize
+    # чистит selfie_tmp_dir, inbox-копия удаляется move'ом).
+    selfie_tmp = Path(tempfile.mkdtemp(prefix="selfie_"))
+    dst = selfie_tmp / "source.mp4"
+    try:
+        shutil.move(str(source), str(dst))
+    except Exception as e:
+        _LOGGER.error(f"[selfie] intake move failed: {e}", exc_info=True)
+        await query.message.reply_text(f"Ошибка переноса видео: {e}\n\nПопробуй ещё раз.")
+        return True
+
+    file_size = dst.stat().st_size / 1024 / 1024
+    _LOGGER.info(f"[selfie] Source video taken from inbox: {file_size:.1f} MB")
+    status = await query.message.reply_text("📥 Видео принято, начинаю обработку...")
+    await _process_local_source(user_id, dst, selfie_tmp, status)
+    return True
 
 
 async def handle_text_review_callback(
