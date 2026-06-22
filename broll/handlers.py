@@ -597,6 +597,19 @@ async def handle_broll_source(
         save_draft(draft, DRAFTS_DIR)
         await asyncio.to_thread(materialize_items, items, draft.work_dir)
         await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True, regen=False)
+        # Частичный сбой: клипов меньше плана (часть не докачалась с fal —
+        # транзиентный HTTP 500). Предлагаем добрать недостающие по plan.json,
+        # тем же промптом, без нового вызова режиссёра (см. handle_ai_video_fill).
+        _got, _planned = len(clips), plan["n_clips"]
+        if _got < _planned:
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ Готово {_got} из {_planned} клипов — часть не докачалась с сервера "
+                f"(транзиентный сбой, не модель). Можно собрать с тем, что есть, "
+                f"или добрать недостающие тем же промптом.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    f"🔄 Добрать недостающие ({_planned - _got})",
+                    callback_data=f"b2avfill:{draft_id}")]]))
         return
 
     # Стале-callback на ещё-не-подключённый режим (Critical 3): не молчим.
@@ -1272,6 +1285,48 @@ async def _send_hf_preview(context, chat_id, draft, draft_id: str,
         reply_markup=_approval_keyboard(
             draft.notion_url, hf_draft_id=draft_id if regen else None),
         disable_web_page_preview=True)
+
+
+async def handle_ai_video_fill(update, context, draft_id: str, chat_id: int | None = None) -> None:
+    """«Добрать недостающие» AI-видео клипы (b2avfill): regen_ai_clips дорендерит
+    пропавшие по plan.json (тот же промпт, без режиссёра, скачивание с ретраями)
+    → пересобираем source_items из ВСЕХ ai_*.mp4 → пере-показываем превью."""
+    import ai_video_broll
+    from .draft import hf_items_from_clips
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if chat_id is None:
+        chat_id = (draft.chat_id if draft else None) or update.effective_chat.id
+    if not draft or not draft.work_dir:
+        await context.bot.send_message(chat_id, "⚠️ Черновик потерян — собери ролик заново.")
+        return
+    work = Path(draft.work_dir)
+    status = await context.bot.send_message(chat_id, "🎥 Добираю недостающие клипы (Kling 3.0)…")
+    try:
+        new_paths, _cost = await asyncio.to_thread(ai_video_broll.regen_ai_clips, work)
+    except Exception as e:
+        logger.error(f"[broll] ai_video fill failed: {e}", exc_info=True)
+        await status.edit_text(f"⚠️ Не удалось добрать клипы: {str(e)[:200]}")
+        return
+    # Пересобрать source_items из ВСЕХ клипов (старые + добранные), по порядку.
+    clips_dir = work / ai_video_broll.CLIPS_SUBDIR
+    all_clips = sorted(clips_dir.glob("ai_*.mp4"))
+    items = hf_items_from_clips(all_clips)
+    if not items:
+        await status.edit_text("⚠️ Клипов нет — попробуй сгенерировать заново.")
+        return
+    draft.source_items = items
+    draft.touch(time.time())
+    save_draft(draft, DRAFTS_DIR)
+    await asyncio.to_thread(materialize_items, items, draft.work_dir)
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    if not new_paths:
+        await context.bot.send_message(
+            chat_id, "ℹ️ Добрать не удалось — сервер снова не отдал клип. "
+                     "Можно собрать с тем, что есть, или попробовать позже.")
+    await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True, regen=False)
 
 
 async def _generate_hf_clips(context, chat_id, draft, draft_id: str, source_mode: str,

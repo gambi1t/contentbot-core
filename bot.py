@@ -778,6 +778,7 @@ _CALLBACK_FEATURE_MAP = {
     "selfie_broll:gen": "remotion",     # «🎨 Сгенерировать графику (AI)» = Remotion
     "selfie_broll:hf": "hyperframes",   # «🎞 Графика HyperFrames»
     "b2src:ai_video": "ai_video",       # ловит ai_video / _go / _menu внутри Pipeline-2
+    "b2avfill:": "ai_video",            # «добрать недостающие» AI-клипы — тоже платный fal-рендер
     # Pipeline 2 (broll_pipeline) — все b2*-callbacks (вход тоже гейтится отдельно
     # в idea→broll ветке).
     "b2man:": "broll_pipeline",
@@ -13067,6 +13068,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         from broll.handlers import handle_hf_regen_back
         await handle_hf_regen_back(update, context, query.data.split(":", 1)[1])
+        return
+
+    if query.data.startswith("b2avfill:"):
+        # «Добрать недостающие» AI-видео клипы (частичный сбой скачивания).
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import handle_ai_video_fill
+        await handle_ai_video_fill(update, context, query.data.split(":", 1)[1],
+                                   chat_id=query.message.chat_id)
         return
 
     if query.data == "broll_approve":

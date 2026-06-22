@@ -40,5 +40,57 @@ def test_parse_accepts_aivideo_pseudomodes():
     assert parse_source_cb("b2src:ai_video_menu:d1") == ("ai_video_menu", "d1")
 
 
+# ── #3: добор недостающих AI-клипов (partial-failure recovery) ────────────────
+def test_aivideo_fill_wired_in_bot():
+    src = (Path(__file__).resolve().parent.parent / "bot.py").read_text(encoding="utf-8")
+    assert 'startswith("b2avfill:")' in src               # dispatch есть
+    assert "handle_ai_video_fill" in src                   # зовёт хендлер
+    assert '"b2avfill:": "ai_video"' in src                # гейтится по ai_video (платный fal)
+
+
+def test_handle_ai_video_fill_rebuilds_from_all_clips(monkeypatch, tmp_path):
+    import types
+    import asyncio
+    import ai_video_broll
+    import broll.handlers as bh
+
+    work = tmp_path / "broll_runs" / "d1"
+    clips_dir = work / ai_video_broll.CLIPS_SUBDIR
+    clips_dir.mkdir(parents=True)
+    (clips_dir / "ai_01.mp4").write_bytes(b"x")            # 1 клип уже есть
+
+    def fake_regen(out_dir, indices=None, progress_cb=None):
+        (Path(out_dir) / ai_video_broll.CLIPS_SUBDIR / "ai_02.mp4").write_bytes(b"y")
+        return [Path(out_dir) / ai_video_broll.CLIPS_SUBDIR / "ai_02.mp4"], 1.12
+    monkeypatch.setattr(ai_video_broll, "regen_ai_clips", fake_regen)
+
+    fake_draft = types.SimpleNamespace(
+        chat_id=42, work_dir=str(work), source_items=[],
+        script_text="s", theme="t", notion_url=None, notion_page_id=None,
+        source_mode="ai_video", touch=lambda *a: None)
+    monkeypatch.setattr(bh, "load_draft", lambda did, d: fake_draft)
+    monkeypatch.setattr(bh, "save_draft", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "materialize_items", lambda *a, **k: None)
+    preview = {"called": False}
+
+    async def fake_preview(*a, **k):
+        preview["called"] = True
+    monkeypatch.setattr(bh, "_send_hf_preview", fake_preview)
+
+    class _Msg:
+        async def edit_text(self, *a, **k): pass
+        async def delete(self): pass
+
+    class _Bot:
+        async def send_message(self, *a, **k): return _Msg()
+
+    ctx = types.SimpleNamespace(bot=_Bot())
+    upd = types.SimpleNamespace(effective_chat=types.SimpleNamespace(id=42))
+
+    asyncio.run(bh.handle_ai_video_fill(upd, ctx, "d1", chat_id=42))
+    assert len(fake_draft.source_items) == 2               # пересобрано из ai_01 + добранного ai_02
+    assert preview["called"] is True                       # превью пере-показано
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -369,6 +369,10 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
                 f"⚠️ Лимит трат: беру {budget_cap} клипов (потолок {AI_VIDEO_MAX_DURATION_SEC}с/ролик)")
         plans = plans[:budget_cap]
 
+    # Сохранить план рядом с клипами — чтобы ДОБРАТЬ упавший клип по тому же
+    # промпту без повторного вызова режиссёра (см. regen_ai_clips).
+    _write_plan(clips_dir, plans, duration)
+
     _notify(progress_cb, f"🎥 Генерю {len(plans)} кинематографичных клипа (Kling 3.0 Pro, ~{duration}с)…")
     paths: list[Path] = []
     for i, clip in enumerate(plans, start=1):
@@ -387,3 +391,78 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
     cost = len(paths) * duration * KLING_PRICE_PER_SEC_USD
     logger.info(f"ai_video: {len(paths)}/{len(plans)} clips ready, est cost ${cost:.2f}")
     return paths, cost
+
+
+def _write_plan(clips_dir, plans, duration) -> None:
+    """Сохранить план клипов (plan.json) рядом с ними. Нужно, чтобы добрать
+    упавший на скачивании клип по ТОМУ ЖЕ промпту, не вызывая режиссёра заново."""
+    try:
+        clips_dir = Path(clips_dir)
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        data = {"duration": int(duration), "clips": [
+            {"i": i, "prompt": c.get("prompt", ""),
+             "negative_prompt": c.get("negative_prompt"), "beat": c.get("beat", "")}
+            for i, c in enumerate(plans, start=1)]}
+        (clips_dir / "plan.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"ai_video: не смог сохранить plan.json: {e}")
+
+
+def _read_plan(clips_dir):
+    """Прочитать сохранённый план клипов (или None)."""
+    p = Path(clips_dir) / "plan.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"ai_video: битый plan.json: {e}")
+        return None
+
+
+def regen_ai_clips(out_dir, indices=None, progress_cb=None):
+    """Перегенерить отдельные клипы AI-видео по сохранённому плану (plan.json).
+
+    indices=None → все НЕДОСТАЮЩИЕ (нет файла ai_NN.mp4) — «добор» после
+    частичного сбоя (напр. клип упал на скачивании). Иначе — заданные номера
+    (1-индексация), напр. ручная перегенерация сцены N.
+
+    Промпт берётся из plan.json (без нового вызова режиссёра). Скачивание уже
+    с ретраями (generate_kling_video). Возвращает (list[Path] новых, cost_usd).
+    """
+    ok, reason = fal_media.kling_ready()
+    if not ok:
+        raise AiVideoError(f"Видео-движок недоступен: {reason}")
+    clips_dir = Path(out_dir) / CLIPS_SUBDIR
+    plan = _read_plan(clips_dir)
+    if not plan or not plan.get("clips"):
+        raise AiVideoError("план клипов не найден (plan.json) — нечего добирать")
+    duration = int(plan.get("duration", 5))
+    by_index = {int(c["i"]): c for c in plan["clips"] if "i" in c}
+
+    if indices is None:
+        indices = [i for i in sorted(by_index)
+                   if not (clips_dir / f"ai_{i:02d}.mp4").exists()]
+    else:
+        indices = [int(i) for i in indices if int(i) in by_index]
+    if not indices:
+        return [], 0.0
+
+    _notify(progress_cb, f"🎥 Добираю {len(indices)} клип(ов) (Kling 3.0 Pro, ~{duration}с)…")
+    new_paths: list[Path] = []
+    for i in indices:
+        clip = by_index.get(i)
+        if not clip or not clip.get("prompt"):
+            continue
+        dest = clips_dir / f"ai_{i:02d}.mp4"
+        res = fal_media.generate_kling_video(
+            clip["prompt"], dest, duration=duration,
+            negative_prompt=clip.get("negative_prompt"))
+        if res:
+            new_paths.append(Path(res))
+        else:
+            logger.warning(f"ai_video regen: clip {i} failed again")
+    cost = len(new_paths) * duration * KLING_PRICE_PER_SEC_USD
+    logger.info(f"ai_video regen: {len(new_paths)}/{len(indices)} clips filled, est cost ${cost:.2f}")
+    return new_paths, cost

@@ -147,5 +147,119 @@ def test_kling_passes_negative_prompt(monkeypatch, tmp_path):
     assert captured.get("negative_prompt") == "text, logo, deformed hands"
 
 
+# ── ретрай скачивания: транзиентный CDN-сбой не теряет оплаченный клип ─────────
+def test_kling_download_retries_transient_then_succeeds(monkeypatch, tmp_path):
+    """HTTP 500 на скачивании ретраится — отрендеренный (оплаченный) клип не теряется."""
+    import fal_media
+    fake_fal = types.SimpleNamespace(
+        subscribe=lambda endpoint, **kw: {"video": {"url": "http://x/v.mp4"}})
+    monkeypatch.setitem(sys.modules, "fal_client", fake_fal)
+    monkeypatch.setattr(fal_media, "_is_configured", lambda: True)
+    monkeypatch.setattr(fal_media.time, "sleep", lambda *a: None)   # без реального backoff
+
+    attempts = {"n": 0}
+
+    def flaky(url, part):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise Exception("HTTP Error 500: Internal Server Error")
+        Path(part).write_bytes(b"x" * 60000)
+
+    monkeypatch.setattr(fal_media, "_download_timeout", flaky)
+
+    out = fal_media.generate_kling_video("p", tmp_path / "c.mp4", duration=5)
+    assert out is not None                  # клип сохранён несмотря на 2 сбоя
+    assert attempts["n"] == 3               # 2 фейла + успех на 3-й
+    assert Path(out).exists()
+
+
+def test_kling_download_gives_up_after_retries(monkeypatch, tmp_path):
+    """Все попытки скачивания падают → None (исчерпали ретраи, без краша)."""
+    import fal_media
+    fake_fal = types.SimpleNamespace(
+        subscribe=lambda endpoint, **kw: {"video": {"url": "http://x/v.mp4"}})
+    monkeypatch.setitem(sys.modules, "fal_client", fake_fal)
+    monkeypatch.setattr(fal_media, "_is_configured", lambda: True)
+    monkeypatch.setattr(fal_media.time, "sleep", lambda *a: None)
+
+    n = {"n": 0}
+
+    def always_fail(url, part):
+        n["n"] += 1
+        raise Exception("HTTP Error 500")
+
+    monkeypatch.setattr(fal_media, "_download_timeout", always_fail)
+
+    out = fal_media.generate_kling_video("p", tmp_path / "c.mp4", duration=5)
+    assert out is None
+    assert n["n"] == fal_media.KLING_DOWNLOAD_RETRIES    # все попытки исчерпаны
+
+
+# ── #3 частичный сбой: персист плана + добор недостающих клипов ───────────────
+def test_generate_ai_broll_persists_plan(monkeypatch, tmp_path):
+    """generate_ai_broll сохраняет план клипов (plan.json) — чтобы потом
+    можно было ДОБРАТЬ упавший клип по тому же промпту без вызова режиссёра."""
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        A.fal_media, "generate_kling_video",
+        lambda prompt, dest, duration=5, aspect="9:16", negative_prompt=None:
+            (Path(dest).write_bytes(b"x"), str(dest))[1])
+    monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [
+        {"beat": "x", "prompt": "Multiple shots. p1", "negative_prompt": "text"},
+        {"beat": "y", "prompt": "Multiple shots. p2", "negative_prompt": "text"}])
+
+    A.generate_ai_broll("сценарий", tmp_path, claude=object(), duration=10, target_clips=2)
+    import json as _json
+    plan = _json.loads((tmp_path / A.CLIPS_SUBDIR / "plan.json").read_text(encoding="utf-8"))
+    assert plan["duration"] == 10
+    assert len(plan["clips"]) == 2
+    assert plan["clips"][1]["prompt"] == "Multiple shots. p2"
+    assert plan["clips"][1]["i"] == 2
+
+
+def test_regen_fills_only_missing_clips(monkeypatch, tmp_path):
+    """regen_ai_clips добирает ТОЛЬКО недостающие клипы (нет файла) по плану."""
+    import json as _json
+    clips_dir = tmp_path / A.CLIPS_SUBDIR
+    clips_dir.mkdir(parents=True)
+    (clips_dir / "plan.json").write_text(_json.dumps({
+        "duration": 10,
+        "clips": [{"i": 1, "prompt": "Multiple shots. one", "negative_prompt": "text"},
+                  {"i": 2, "prompt": "Multiple shots. two", "negative_prompt": "text"}],
+    }), encoding="utf-8")
+    (clips_dir / "ai_01.mp4").write_bytes(b"x")   # клип 1 уже есть, 2 — пропущен
+
+    rendered = []
+
+    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
+        rendered.append(prompt)
+        Path(dest).write_bytes(b"y")
+        return str(dest)
+
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(A.fal_media, "generate_kling_video", fake_kling)
+
+    new_paths, cost = A.regen_ai_clips(tmp_path)
+    assert len(new_paths) == 1                       # добрали только пропущенный
+    assert rendered == ["Multiple shots. two"]       # именно клип 2 по плану
+    assert (clips_dir / "ai_02.mp4").exists()
+    assert abs(cost - 1 * 10 * A.KLING_PRICE_PER_SEC_USD) < 1e-9
+
+
+def test_regen_nothing_missing_is_noop(monkeypatch, tmp_path):
+    """Все клипы на месте → regen ничего не рендерит (0 трат)."""
+    import json as _json
+    clips_dir = tmp_path / A.CLIPS_SUBDIR
+    clips_dir.mkdir(parents=True)
+    (clips_dir / "plan.json").write_text(_json.dumps({
+        "duration": 10, "clips": [{"i": 1, "prompt": "one"}]}), encoding="utf-8")
+    (clips_dir / "ai_01.mp4").write_bytes(b"x")
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(A.fal_media, "generate_kling_video",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("не должен вызываться")))
+    new_paths, cost = A.regen_ai_clips(tmp_path)
+    assert new_paths == [] and cost == 0.0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

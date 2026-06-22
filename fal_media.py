@@ -52,6 +52,7 @@ SEEDANCE_RESOLUTION = "720p"        # default: cheaper (~4/9 of 1080p, token-pri
 SEEDANCE_TIMEOUT_S = 900            # hard deadline for fal subscribe (paid cloud call must not hang)
 SEEDANCE_DOWNLOAD_TIMEOUT_S = 120   # socket timeout for clip download
 SEEDANCE_MIN_BYTES = 50_000         # below this the "mp4" is an error page / truncated → reject
+KLING_DOWNLOAD_RETRIES = 3          # retry transient CDN failures on clip download — render is PAID, an HTTP 500 must not lose the clip (фикс 22.06: терялся 1 из 2 клипов)
 
 Duration = Literal[5, 10]
 Aspect = Literal["9:16", "16:9", "1:1"]
@@ -105,6 +106,37 @@ def _download_timeout(url: str, dest: "str | Path") -> None:
     """Download url → dest with connect/read timeout (Seedance is paid — never hang)."""
     with urllib.request.urlopen(url, timeout=SEEDANCE_DOWNLOAD_TIMEOUT_S) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f)
+
+
+def _download_clip_with_retries(url: str, part: "str | Path", *,
+                                retries: int = KLING_DOWNLOAD_RETRIES) -> bool:
+    """Скачать готовый (ОПЛАЧЕННЫЙ) клип с ретраями. Рендер на fal уже прошёл —
+    транзиентный CDN-сбой (напр. HTTP 500) или обрезанный файл на скачивании НЕ
+    должны выбрасывать клип с первой попытки (раньше было 0 ретраев → 1 из 2
+    клипов терялся, 22 июня). Повторное скачивание того же url бесплатно и
+    безопасно. Возвращает True если part скачан и валиден (≥ SEEDANCE_MIN_BYTES)."""
+    part = Path(part)
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            _download_timeout(url, part)
+            size = part.stat().st_size
+            if size >= SEEDANCE_MIN_BYTES:
+                if attempt > 1:
+                    logger.info(f"fal_media: clip download ok on attempt {attempt}/{retries}")
+                return True
+            last_err = f"too small ({size}B)"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {str(e)[:120]}"
+        logger.warning(f"fal_media: clip download attempt {attempt}/{retries} failed: {last_err}")
+        try:
+            part.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if attempt < retries:
+            time.sleep(2 * attempt)   # backoff 2с, 4с
+    logger.error(f"fal_media: clip download failed after {retries} attempts: {last_err}")
+    return False
 
 
 # --- Public API -----------------------------------------------------------
@@ -434,18 +466,12 @@ def generate_kling_video(
         logger.error(f"fal_media.generate_kling_video: no video.url in result: {result!r}")
         return None
 
-    # Atomic + validated: download to .part, reject tiny/broken, then rename.
+    # Atomic + validated download С РЕТРАЯМИ: рендер оплачен — транзиентный
+    # CDN-сбой на скачивании не должен терять клип (фикс 22.06: 1 из 2 клипов
+    # терялся на HTTP 500). Качаем в .part, валидируем, потом атомарный rename.
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
-    try:
-        _download_timeout(url, part)
-    except Exception as e:
-        logger.error(f"fal_media.generate_kling_video: download failed: {e}")
-        part.unlink(missing_ok=True)
-        return None
-    if part.stat().st_size < SEEDANCE_MIN_BYTES:
-        logger.error(f"fal_media.generate_kling_video: download too small ({part.stat().st_size}B) — likely broken")
-        part.unlink(missing_ok=True)
+    if not _download_clip_with_retries(url, part):
         return None
     part.replace(dest)
 
