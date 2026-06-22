@@ -63,6 +63,7 @@ _LOGGER = None
 _SELFIE_FINALIZE = None  # legacy bot.py finalizer
 _TITLE_PICKER = None  # optional override of the default first-sentence title UI
 _COVER_TEXT_STEP = None  # optional «текст на обложку?» step before title picker
+_SELFIE_DRAFT_CARD = None  # optional: создать черновик Notion-карточки на «ОК»
 
 
 def init(
@@ -73,6 +74,7 @@ def init(
     selfie_finalize=None,
     title_picker=None,
     cover_text_step=None,
+    draft_card=None,
 ) -> None:
     """Inject bot.py dependencies. Call once at startup.
 
@@ -90,7 +92,7 @@ def init(
             cover-pick goes straight to title_picker (no text overlay step).
     """
     global _PENDING, _SAVE_PENDING, _ASSETS_DIR, _LOGGER, _SELFIE_FINALIZE
-    global _TITLE_PICKER, _COVER_TEXT_STEP
+    global _TITLE_PICKER, _COVER_TEXT_STEP, _SELFIE_DRAFT_CARD
     _PENDING = pending
     _SAVE_PENDING = save_pending
     _ASSETS_DIR = assets_dir
@@ -98,6 +100,7 @@ def init(
     _SELFIE_FINALIZE = selfie_finalize
     _TITLE_PICKER = title_picker
     _COVER_TEXT_STEP = cover_text_step
+    _SELFIE_DRAFT_CARD = draft_card
 
 
 # ── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -453,14 +456,14 @@ async def handle_text_review_callback(
         await query.edit_message_text("⚠️ Сессия selfie не найдена. Начни заново через /selfie.")
         return True
 
-    if action == "ok":
+    if action in ("ok", "confirm"):
+        # Раннее сохранение: транскрипт подтверждён → создаём черновик карточки
+        # (как «комбайн»), чтобы работа не терялась при сбое посередине.
+        # Best-effort — внутри своя защита, flow не рвём.
+        if _SELFIE_DRAFT_CARD is not None:
+            await _SELFIE_DRAFT_CARD(query, context, user_id)
         # Текст ОК → спрашиваем про монтаж перед прожигом.
-        await _show_montage_choice(query, user_id, edited=False)
-        return True
-
-    if action == "confirm":
-        # Подтвердил после правки → спрашиваем про монтаж.
-        await _show_montage_choice(query, user_id, edited=True)
+        await _show_montage_choice(query, user_id, edited=(action == "confirm"))
         return True
 
     if action == "edit" or action == "edit_again":

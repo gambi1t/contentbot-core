@@ -7359,8 +7359,106 @@ async def pub_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _selfie_first_sentence_title(transcript: str) -> str:
+    """Заголовок-черновик селфи-карточки из первого предложения транскрипта
+    (placeholder до выбора хука в финале). ≤80 симв., фолбэк «Живое видео»."""
+    t = (transcript or "").strip()
+    first = t.split(".")[0].strip()[:80] if t else ""
+    if len(first) < 5:
+        first = t[:80].strip()
+    return first or "Живое видео"
+
+
+def _selfie_card_data(title: str) -> dict:
+    """card_data селфи-карточки (черновик и финал — одинаково). Brand-aware
+    короткий CTA в свойство «Призыв». Вынесено из _selfie_finalize (было
+    продублировано), используется и при раннем создании черновика."""
+    brand_cfg = _get_active_brand()
+    tg_handle = brand_cfg.get("telegram_channel_handle") or ""
+    tg_display = brand_cfg.get("telegram_channel_display") or ""
+    if tg_handle:
+        short_cta = (f"Подписывайся на TG-канал {tg_handle} — {tg_display}"
+                     if tg_display else f"Подписывайся на TG-канал {tg_handle}")
+    else:
+        short_cta = ""
+    return {
+        "title": title,
+        "cta": short_cta,
+        "rubric": "Свободный формат",
+        "platforms": _default_platforms(),
+        "format": ["Short video"],
+    }
+
+
+def _selfie_make_draft(transcript: str) -> tuple[str, str, dict]:
+    """Создать ЧЕРНОВИК Notion-карточки селфи (sync, под asyncio.to_thread):
+    карточка с транскриптом-сценарием + статус «Монтаж» (in-progress). Заголовок
+    = первое предложение (обновится на выбранный хук в финале). → (url, id, card_data)."""
+    card_data = _selfie_card_data(_selfie_first_sentence_title(transcript))
+    url, pid = create_notion_card(card_data, transcript)
+    try:
+        update_notion_status(pid, "Монтаж")
+    except Exception:
+        logger.warning("[selfie] draft status update failed")
+    return url, pid, card_data
+
+
+def _selfie_persist_card(data: dict, title: str, transcript: str,
+                         cover_url: str | None) -> tuple[str, str, dict]:
+    """Сохранить селфи-карточку в финале (sync, под asyncio.to_thread).
+
+    Если черновик уже создан на «ОК» (data['notion_page_id']) — ОБНОВЛЯЕМ его
+    (название + обложку-баннер), НЕ создавая дубль (паттерн Pipeline-2,
+    bot.py:8713/8693). Иначе (напр. /ready без шага «ОК») — создаём.
+    → (url, id, card_data)."""
+    card_data = dict(data.get("card_data") or _selfie_card_data(title))
+    card_data["title"] = title
+    page_id = data.get("notion_page_id")
+    if page_id:
+        notion.pages.update(
+            page_id=page_id,
+            properties={"Name": {"title": [{"text": {"content": title}}]}},
+        )
+        if cover_url:
+            notion.pages.update(
+                page_id=page_id,
+                cover={"type": "external", "external": {"url": cover_url}},
+            )
+        return data.get("notion_url"), page_id, card_data
+    url, pid = create_notion_card(card_data, transcript, cover_url)
+    return url, pid, card_data
+
+
+async def _selfie_create_draft_card(message_or_query, context, user_id: int) -> None:
+    """Раннее сохранение: создать черновик карточки сразу после подтверждения
+    текста («ОК»), чтобы работа селфи не терялась при сбое/рестарте посередине
+    (как «комбайн» и Pipeline-2). Идемпотентно + best-effort: ошибка Notion не
+    рвёт flow (финал создаст карточку как фолбэк). Инжектится в selfie_handlers."""
+    data = pending.get(user_id, {})
+    if data.get("notion_page_id"):
+        return  # уже есть карточка/черновик
+    transcript = (data.get("selfie_transcript") or "").strip()
+    if not transcript:
+        return
+    try:
+        url, pid, card_data = await asyncio.to_thread(_selfie_make_draft, transcript)
+    except Exception as e:
+        logger.warning(f"[selfie] draft card creation failed (continue without): {e}")
+        return
+    data["card_data"] = card_data
+    data["notion_url"] = url
+    data["notion_page_id"] = pid
+    data["selfie_draft_card"] = True
+    pending[user_id] = data
+    _save_pending(pending)
+    logger.info(f"[selfie] draft card created early at confirm: {url}")
+
+
 async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
-    """Finalize selfie pipeline: create Notion card, save files, show crosspost."""
+    """Finalize selfie pipeline: create/UPDATE Notion card, save files, show crosspost.
+
+    Если на «ОК» создан черновик (data['notion_page_id']) — _selfie_persist_card
+    его обновляет (название/обложка), а не плодит дубль."""
     import shutil
 
     data = pending.get(user_id, {})
@@ -7382,35 +7480,8 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
     status_msg = await send_msg("📋 Создаю карточку в Notion...")
 
     try:
-        # Brand-aware short CTA for the Notion "Призыв" property.
-        # For Maksim — "Подписывайся на TG-канал @yumsunov_realbiz —
-        # Юмсунов | Про реальный бизнес". Falls back to empty for default
-        # brand (no preset channel). Note: this is the CTA stored in
-        # Notion meta — it is NOT the post body. The actual TG-post body
-        # is generated below via tg_post_writer and saved as a Notion
-        # body block, not as a property.
-        brand_cfg = _get_active_brand()
-        tg_handle = brand_cfg.get("telegram_channel_handle") or ""
-        tg_display = brand_cfg.get("telegram_channel_display") or ""
-        if tg_handle:
-            if tg_display:
-                short_cta = f"Подписывайся на TG-канал {tg_handle} — {tg_display}"
-            else:
-                short_cta = f"Подписывайся на TG-канал {tg_handle}"
-        else:
-            short_cta = ""
-
-        card_data = {
-            "title": title,
-            "cta": short_cta,
-            "rubric": "Свободный формат",
-            "platforms": _default_platforms(),
-            "format": ["Short video"],
-        }
-
-        # Загрузить обложку на публичный URL → передать в Notion, иначе она
-        # сохранялась только в проект-папку и НЕ показывалась в карточке Notion
-        # (Артём 9 июня: «зашёл в Notion — не увидел выбранную обложку»).
+        # Загрузить обложку на публичный URL → баннер карточки Notion (Артём
+        # 9 июня: «зашёл в Notion — не увидел выбранную обложку»).
         cover_url = None
         if cover_path and Path(cover_path).exists():
             try:
@@ -7421,8 +7492,11 @@ async def _selfie_finalize(update_or_query, context, user_id: int, title: str):
             except Exception as e:
                 logger.warning(f"[selfie] Cover upload for Notion failed: {e}")
 
-        notion_url, notion_page_id = await asyncio.to_thread(
-            create_notion_card, card_data, transcript, cover_url,
+        # Черновик создан на «ОК» (раннее сохранение) → ОБНОВЛЯЕМ его (название +
+        # обложка), иначе (напр. /ready без «ОК») — создаём. Без дублей карточек.
+        # card_data (с brand-aware CTA в «Призыв») собирается внутри.
+        notion_url, notion_page_id, card_data = await asyncio.to_thread(
+            _selfie_persist_card, data, title, transcript, cover_url,
         )
 
         # Move to "Готово к публикации" since video is already done
@@ -22140,6 +22214,9 @@ def main():
         # handle_callback take it from there.
         title_picker=_maksim_selfie_title_picker,
         cover_text_step=_maksim_selfie_cover_text_step,
+        # Раннее сохранение: создать черновик карточки на «ОК после расшифровки»
+        # (как «комбайн»), чтобы работа не терялась при сбое посередине.
+        draft_card=_selfie_create_draft_card,
     )
 
     # Менеджер B-roll библиотеки (/library): загрузка/удаление клипов и фото.
