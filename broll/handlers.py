@@ -1513,10 +1513,12 @@ def _av_scene_picker_kb(draft_id: str, n: int) -> InlineKeyboardMarkup:
 
 
 def _av_scene_action_kb(draft_id: str, n: int) -> InlineKeyboardMarkup:
-    """Действия над сценой N. «🎤 Поправить голосом» добавится Инкрементом 2."""
+    """Действия над сценой N: ре-ролл тем же промптом / голос-правка промпта / назад."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎲 Перегенерировать (тот же промпт)",
                               callback_data=f"b2avgo:{draft_id}:{n}")],
+        [InlineKeyboardButton("🎤 Поправить голосом",
+                              callback_data=f"b2avvoice:{draft_id}:{n}")],
         [InlineKeyboardButton("⬅️ К списку сцен", callback_data=f"b2avre:{draft_id}")],
     ])
 
@@ -1599,6 +1601,70 @@ async def handle_av_regen_back(update: Update, context: ContextTypes.DEFAULT_TYP
     if draft is None or not draft.source_items:
         await context.bot.send_message(chat_id, "⚠️ Черновик устарел — запусти ролик заново.")
         return
+    await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True, regen=False)
+
+
+async def handle_av_voice_start(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                draft_id: str, n: int) -> None:
+    """«🎤 Поправить голосом» (b2avvoice:<id>:<n>): ставит pending-state, ждёт
+    голосовую/текстовую правку (её ловит process_voice/process_idea → handle_av_voice_done)."""
+    q = update.callback_query
+    chat_id = q.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items or not (1 <= n <= len(draft.source_items)):
+        await context.bot.send_message(chat_id, "⚠️ Нет такой сцены.")
+        return
+    uid = q.from_user.id
+    data = _bot_pending.get(uid) or {}
+    data["state"] = "awaiting_av_prompt_edit"
+    data["av_edit_draft_id"] = draft_id
+    data["av_edit_scene"] = n
+    _bot_pending[uid] = data
+    _bot_save_pending(_bot_pending)
+    await context.bot.send_message(
+        chat_id,
+        f"🎤 Надиктуй (или напиши) правку для сцены {n} — что поменять в кадре.\n"
+        f"Например: «убери людей, телефон крупнее, кадр темнее». «Отмена» — выйти.")
+
+
+async def handle_av_voice_done(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                               draft_id: str, n: int, instruction: str) -> None:
+    """Применить голос-правку сцены N: revise_clip_prompt (LLM переписывает промпт
+    в plan.json) → regen_ai_clips([n]) (ре-рендер тем же движком) → пересбор → превью."""
+    import ai_video_broll
+    from .draft import hf_items_from_clips
+    chat_id = update.effective_chat.id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.work_dir or not draft.source_items:
+        await context.bot.send_message(chat_id, "⚠️ Черновик потерян — собери ролик заново.")
+        return
+    work = Path(draft.work_dir)
+    status = await context.bot.send_message(
+        chat_id, f"🎬 Переписываю промпт сцены {n} и перегенерирую (Kling 3.0, ~1-3 мин)…")
+    new_prompt = await asyncio.to_thread(ai_video_broll.revise_clip_prompt, work, n, instruction)
+    if not new_prompt:
+        await status.edit_text("⚠️ Не удалось переписать промпт — старый клип цел. Попробуй ещё раз.")
+        return
+    try:
+        new_paths, _cost = await asyncio.to_thread(ai_video_broll.regen_ai_clips, work, [n])
+    except Exception as e:
+        logger.error(f"[broll] av voice regen {n} failed: {e}", exc_info=True)
+        await status.edit_text(f"⚠️ Промпт обновлён, но рендер не вышел: {str(e)[:150]}")
+        return
+    if not new_paths:
+        await status.edit_text(
+            "⚠️ Промпт обновлён, но сервер не отдал клип — нажми «Перегенерировать сцену» ещё раз.")
+        return
+    clips_dir = work / ai_video_broll.CLIPS_SUBDIR
+    items = hf_items_from_clips(sorted(clips_dir.glob("ai_*.mp4")))
+    draft.source_items = items
+    draft.touch(time.time())
+    save_draft(draft, DRAFTS_DIR)
+    await asyncio.to_thread(materialize_items, items, draft.work_dir)
+    try:
+        await status.delete()
+    except Exception:
+        pass
     await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True, regen=False)
 
 

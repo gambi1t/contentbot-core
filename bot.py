@@ -8228,6 +8228,26 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _handle_tgpost_surg_edit_instruction(update, context, idea_text.strip())
         return
 
+    # ─── AI-видео: правка промпта сцены текстом (альтернатива голосу) ───
+    if state == "awaiting_av_prompt_edit" and idea_text and not idea_text.startswith("/"):
+        data = pending.get(user_id) or {}
+        _av_did = data.get("av_edit_draft_id")
+        _av_n = data.get("av_edit_scene")
+        data["state"] = None
+        data.pop("av_edit_draft_id", None)
+        data.pop("av_edit_scene", None)
+        pending[user_id] = data
+        _save_pending(pending)
+        if idea_text.strip().lower() in ("отмена", "отменить", "выйти", "стоп"):
+            await update.message.reply_text("✖️ Правка сцены отменена.")
+            return
+        if not _av_did or not _av_n:
+            await update.message.reply_text("⚠️ Контекст сцены потерян — открой пересборку заново.")
+            return
+        from broll.handlers import handle_av_voice_done
+        await handle_av_voice_done(update, context, _av_did, int(_av_n), idea_text.strip())
+        return
+
     # ─── Carousel theme intake (Pipeline #6) ───
     # State set by `carousel_tpl:<X>` callback after user picked template.
     # User types a free-form theme → render carousel preview via carousel.handlers.
@@ -10105,6 +10125,39 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             await _handle_tgpost_surg_edit_instruction(update, context, idea_text.strip())
+            return
+
+        # ─── AI-видео: голос-правка промпта сцены N (Pipeline 2) ───
+        # State set by «🎤 Поправить голосом» (b2avvoice). Транскрипт = инструкция
+        # правки → revise_clip_prompt (LLM) + regen_ai_clips([n]) в broll.handlers.
+        if current_state == "awaiting_av_prompt_edit" and idea_text:
+            data = pending.get(user_id) or {}
+            _av_did = data.get("av_edit_draft_id")
+            _av_n = data.get("av_edit_scene")
+            data["state"] = None
+            data.pop("av_edit_draft_id", None)
+            data.pop("av_edit_scene", None)
+            pending[user_id] = data
+            _save_pending(pending)
+            if idea_text.strip().lower() in ("отмена", "отменить", "выйти", "стоп"):
+                try:
+                    await msg.edit_text("✖️ Правка сцены отменена.")
+                except Exception:
+                    pass
+                return
+            if not _av_did or not _av_n:
+                try:
+                    await msg.edit_text("⚠️ Контекст сцены потерян — открой пересборку заново.")
+                except Exception:
+                    pass
+                return
+            try:
+                await msg.edit_text(
+                    f"🎤 Правка сцены {_av_n}: «{idea_text}»\n\n🎬 Переписываю промпт и перегенерирую…")
+            except Exception:
+                pass
+            from broll.handlers import handle_av_voice_done
+            await handle_av_voice_done(update, context, _av_did, int(_av_n), idea_text.strip())
             return
 
         # ─── Carousel theme intake (voice) — Pipeline #6 ───
@@ -13114,6 +13167,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         from broll.handlers import handle_av_regen_go
         await handle_av_regen_go(update, context, _parts[1], int(_parts[2]))
+        return
+
+    if query.data.startswith("b2avvoice:"):
+        # Голос-правка промпта сцены N → ставим pending-state, ждём голосовое/текст.
+        _parts = query.data.split(":")
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import handle_av_voice_start
+        await handle_av_voice_start(update, context, _parts[1], int(_parts[2]))
         return
 
     if query.data.startswith("b2avback:"):

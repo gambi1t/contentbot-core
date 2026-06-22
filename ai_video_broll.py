@@ -466,3 +466,62 @@ def regen_ai_clips(out_dir, indices=None, progress_cb=None):
     cost = len(new_paths) * duration * KLING_PRICE_PER_SEC_USD
     logger.info(f"ai_video regen: {len(new_paths)}/{len(indices)} clips filled, est cost ${cost:.2f}")
     return new_paths, cost
+
+
+_REVISE_PROMPT = (
+    "Ты — режиссёр AI-видео Kling 3.0. Дан текущий промпт ОДНОГО клипа и правка от "
+    "пользователя (надиктована голосом, по-русски). Перепиши промпт с учётом правки, "
+    "СОХРАНив формат Kling: на английском, multi-shot, 60–100 слов, явные субъекты и их "
+    "действия, корректная анатомия рук/лиц, БЕЗ любого текста/надписей/UI на экране "
+    "(это главное правило — на экране телефона/вывесках ничего читаемого). Верни ТОЛЬКО "
+    'JSON {"prompt":"...","negative_prompt":"..."} без markdown и пояснений.'
+)
+
+
+def revise_clip_prompt(out_dir, index, instruction, claude=None):
+    """LLM-правка промпта клипа N по инструкции пользователя (с голоса) — обновляет
+    plan.json. Сам ре-рендер делает regen_ai_clips([N]) ПОСЛЕ этой правки.
+    Возвращает новый промпт (str) или None при сбое (тогда старый промпт цел)."""
+    clips_dir = Path(out_dir) / CLIPS_SUBDIR
+    plan = _read_plan(clips_dir)
+    if not plan or not plan.get("clips"):
+        return None
+    by_index = {int(c["i"]): c for c in plan["clips"] if "i" in c}
+    clip = by_index.get(int(index))
+    if not clip:
+        return None
+    if claude is None:
+        claude = _default_claude()
+    user = (
+        f"{_REVISE_PROMPT}\n\n"
+        f"ТЕКУЩИЙ ПРОМПТ:\n{clip.get('prompt', '')}\n\n"
+        f"ТЕКУЩИЙ negative_prompt:\n{clip.get('negative_prompt') or HOUSE_NEGATIVE}\n\n"
+        f"ПРАВКА ПОЛЬЗОВАТЕЛЯ: {instruction}"
+    )
+    flock = _acquire_director_lock()
+    try:
+        resp = claude.messages.create(
+            model=_DIRECTOR_MODEL, max_tokens=_DIRECTOR_MAX_TOKENS,
+            messages=[{"role": "user", "content": user}])
+        raw = getattr(resp.content[0], "text", "") if resp.content else ""
+        data = json.loads(_strip_fences(raw))
+    except Exception as e:
+        logger.warning(f"ai_video revise: LLM/parse failed: {e}")
+        return None
+    finally:
+        _release_director_lock(flock)
+    new_prompt = (data.get("prompt") or "").strip() if isinstance(data, dict) else ""
+    if len(new_prompt) < MIN_PROMPT_LEN:
+        logger.warning("ai_video revise: revised prompt too short — keeping old")
+        return None
+    new_neg = (data.get("negative_prompt") or "").strip() if isinstance(data, dict) else ""
+    clip["prompt"] = new_prompt
+    clip["negative_prompt"] = new_neg if new_neg else (clip.get("negative_prompt") or HOUSE_NEGATIVE)
+    try:
+        (clips_dir / "plan.json").write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"ai_video revise: write plan.json failed: {e}")
+        return None
+    logger.info(f"ai_video revise: clip {index} prompt updated ({len(new_prompt)} chars)")
+    return new_prompt

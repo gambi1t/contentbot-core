@@ -98,7 +98,7 @@ def test_av_scene_picker_keyboards():
     pick = [b.callback_data for row in _av_scene_picker_kb("d1", 3).inline_keyboard for b in row]
     assert "b2avsc:d1:1" in pick and "b2avsc:d1:3" in pick and "b2avback:d1" in pick
     act = [b.callback_data for row in _av_scene_action_kb("d1", 2).inline_keyboard for b in row]
-    assert "b2avgo:d1:2" in act and "b2avre:d1" in act
+    assert "b2avgo:d1:2" in act and "b2avre:d1" in act and "b2avvoice:d1:2" in act
     appr = [b.callback_data for row in _approval_keyboard(None, av_draft_id="d1").inline_keyboard
             for b in row if b.callback_data]
     assert "b2avre:d1" in appr                 # кнопка ре-ролла на превью AI-видео
@@ -156,12 +156,67 @@ def test_av_regen_go_rerolls_and_repreviews(monkeypatch, tmp_path):
 
 def test_av_reroll_wired_in_bot():
     src = (Path(__file__).resolve().parent.parent / "bot.py").read_text(encoding="utf-8")
-    for cb in ('"b2avre:"', '"b2avsc:"', '"b2avgo:"', '"b2avback:"'):
+    for cb in ('"b2avre:"', '"b2avsc:"', '"b2avgo:"', '"b2avback:"', '"b2avvoice:"'):
         assert f"startswith({cb})" in src, f"нет dispatch {cb}"
     assert '"b2av": "ai_video"' in src          # зонтик-гейт по ai_video
     for h in ("handle_av_regen_menu", "handle_av_regen_scene",
-              "handle_av_regen_go", "handle_av_regen_back"):
+              "handle_av_regen_go", "handle_av_regen_back",
+              "handle_av_voice_start", "handle_av_voice_done"):
         assert h in src
+    # голос+текст: state-ветка для правки промпта сцены
+    assert "awaiting_av_prompt_edit" in src
+
+
+def test_av_voice_done_revises_and_repreviews(monkeypatch, tmp_path):
+    import types
+    import asyncio
+    import ai_video_broll
+    import broll.handlers as bh
+
+    work = tmp_path / "broll_runs" / "d1"
+    clips_dir = work / ai_video_broll.CLIPS_SUBDIR
+    clips_dir.mkdir(parents=True)
+    (clips_dir / "ai_01.mp4").write_bytes(b"x")
+
+    calls = {}
+    monkeypatch.setattr(
+        ai_video_broll, "revise_clip_prompt",
+        lambda out, n, instr, claude=None: (calls.update(revise=(n, instr)),
+                                            "Multiple shots. revised prompt, long enough text")[1])
+
+    def fake_regen(out_dir, indices=None, progress_cb=None):
+        calls["regen"] = indices
+        (Path(out_dir) / ai_video_broll.CLIPS_SUBDIR / "ai_01.mp4").write_bytes(b"new")
+        return [Path(out_dir) / ai_video_broll.CLIPS_SUBDIR / "ai_01.mp4"], 1.12
+    monkeypatch.setattr(ai_video_broll, "regen_ai_clips", fake_regen)
+
+    fake_draft = types.SimpleNamespace(
+        chat_id=42, work_dir=str(work), source_items=[object()],
+        script_text="s", theme="t", notion_url=None, notion_page_id=None,
+        source_mode="ai_video", touch=lambda *a: None)
+    monkeypatch.setattr(bh, "load_draft", lambda did, d: fake_draft)
+    monkeypatch.setattr(bh, "save_draft", lambda *a, **k: None)
+    monkeypatch.setattr(bh, "materialize_items", lambda *a, **k: None)
+    preview = {"n": 0}
+
+    async def fake_preview(*a, **k):
+        preview["n"] += 1
+    monkeypatch.setattr(bh, "_send_hf_preview", fake_preview)
+
+    class _Msg:
+        async def edit_text(self, *a, **k): pass
+        async def delete(self): pass
+
+    class _Bot:
+        async def send_message(self, *a, **k): return _Msg()
+
+    upd = types.SimpleNamespace(effective_chat=types.SimpleNamespace(id=42))
+    ctx = types.SimpleNamespace(bot=_Bot())
+
+    asyncio.run(bh.handle_av_voice_done(upd, ctx, "d1", 1, "убери людей"))
+    assert calls.get("revise") == (1, "убери людей")    # промпт переписан по инструкции
+    assert calls.get("regen") == [1]                     # ре-рендер именно сцены 1
+    assert preview["n"] == 1                              # превью пере-показано
 
 
 if __name__ == "__main__":

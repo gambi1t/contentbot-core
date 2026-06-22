@@ -261,5 +261,40 @@ def test_regen_nothing_missing_is_noop(monkeypatch, tmp_path):
     assert new_paths == [] and cost == 0.0
 
 
+# ── #2 инкремент 2: голос-правка промпта клипа (revise_clip_prompt) ───────────
+def test_revise_clip_prompt_updates_plan(tmp_path):
+    import json as _json
+    clips_dir = tmp_path / A.CLIPS_SUBDIR
+    clips_dir.mkdir(parents=True)
+    (clips_dir / "plan.json").write_text(_json.dumps({
+        "duration": 10,
+        "clips": [{"i": 1, "prompt": "Multiple shots. old prompt one here", "negative_prompt": "text"},
+                  {"i": 2, "prompt": "Multiple shots. old prompt two here", "negative_prompt": "text"}],
+    }), encoding="utf-8")
+
+    fake = _FakeClaude(['{"prompt":"Multiple shots. REVISED clip two, no people, brighter phone on calm desk","negative_prompt":"text, people, watermark"}'])
+    new = A.revise_clip_prompt(tmp_path, 2, "убери людей, телефон ярче", claude=fake)
+    assert new and "REVISED" in new
+    plan = _json.loads((clips_dir / "plan.json").read_text(encoding="utf-8"))
+    assert "REVISED" in plan["clips"][1]["prompt"]            # клип 2 переписан
+    assert plan["clips"][0]["prompt"].endswith("one here")   # клип 1 не тронут
+    assert plan["clips"][1]["negative_prompt"] == "text, people, watermark"
+
+
+def test_revise_clip_prompt_keeps_old_on_bad_llm(tmp_path):
+    import json as _json
+    clips_dir = tmp_path / A.CLIPS_SUBDIR
+    clips_dir.mkdir(parents=True)
+    (clips_dir / "plan.json").write_text(_json.dumps({
+        "duration": 10,
+        "clips": [{"i": 1, "prompt": "Multiple shots. original good prompt", "negative_prompt": "text"}]}),
+        encoding="utf-8")
+    fake = _FakeClaude(['{"prompt":"short"}'])               # < MIN_PROMPT_LEN
+    out = A.revise_clip_prompt(tmp_path, 1, "что-то", claude=fake)
+    assert out is None
+    plan = _json.loads((clips_dir / "plan.json").read_text(encoding="utf-8"))
+    assert plan["clips"][0]["prompt"] == "Multiple shots. original good prompt"   # старый цел
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
