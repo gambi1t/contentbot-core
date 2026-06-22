@@ -15088,7 +15088,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Вариант не найден")
             return
         title = hooks[idx]
-        await query.edit_message_text(f"✅ Текст: «{title}»")
+        await query.edit_message_text(f"✅ Название: «{title}»")
         # Наложить на обложку, если юзер выбрал «с текстом» (merged flow).
         await _apply_selfie_cover_text(context, user_id, query.message.chat_id, title)
         await context.bot.send_message(chat_id=query.message.chat_id, text="📋 Создаю карточку…")
