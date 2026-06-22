@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 from pathlib import Path
 
@@ -54,13 +55,31 @@ _DIRECTOR_ATTEMPTS = 2                 # one retry on malformed/insufficient out
 _DIRECTOR_MAX_TOKENS = 2000
 
 # Контекст автора по умолчанию (грунтит предмет, НЕ навязывает тему бизнеса).
-# В реале должен приходить из tenant-конфига; пока дефолт под Максима (этот бот).
-# TODO(tenant): прокинуть business_context из tenant.py через handlers.
+# Per-tenant (срез C): персона выбирается по активному тенанту в _default_persona()
+# (panferov → Артём; иначе → Максим, дефолт этого ядра). business_context, если
+# передан явно, перебивает дефолт.
 _DEFAULT_PERSONA = (
     "Максим — предприниматель из Тюмени, владелец картинг-центра и глэмпинга "
     "«Life Drive». Его контент — про предпринимательский путь, мышление, дисциплину, "
     "образ жизни; ИНОГДА про его бизнесы (картинг, глэмпинг)."
 )
+_PERSONA_PANFEROV = (
+    "Артём Панфёров — основатель AI-студии, эксперт по ИИ для предпринимателей. "
+    "Его контент — про практическое применение ИИ в бизнесе и жизни: нейросети, "
+    "автоматизация, ИИ-агенты, инструменты, мышление и путь предпринимателя."
+)
+
+
+def _default_persona() -> str:
+    """Персона режиссёра активного тенанта (per-tenant, срез C): panferov → Артём,
+    иначе → Максим (дефолт ядра). Через tenant.active_tenant_id() (lazy import, как
+    style_contract), чтобы ai_video_broll оставался импортируемым standalone."""
+    try:
+        import tenant
+        tid = tenant.active_tenant_id()
+    except Exception:
+        return _DEFAULT_PERSONA
+    return _PERSONA_PANFEROV if tid == "panferov" else _DEFAULT_PERSONA
 
 # Базовый negative prompt для Kling (research 2026-06: 5-8 терминов, худшее —
 # первым; 20+ снижает качество). Наш главный провал — читаемый текст на экране
@@ -190,7 +209,7 @@ def plan_clips(script_text: str, claude, max_clips: int = MAX_CLIPS,
     else:
         min_clips = min(MIN_CLIPS, max_clips)
         count_note = ""
-    persona = (business_context or _DEFAULT_PERSONA).strip()
+    persona = (business_context or _default_persona()).strip()
     base = (
         f"{_DIRECTOR_PROMPT}\n\n"
         f"КОНТЕКСТ АВТОРА: {persona}{count_note}\n\n"
@@ -269,12 +288,25 @@ def clips_needed(est_sec: float, clip_len: float, buffer: int = 0) -> int:
 
 FULLSCREEN_CLIP_LEN = 10   # дефолт для фуллскрина: 10с раскрывает мульти-шот, вдвое меньше вызовов
 
+# Cost-guard (срез C): жёсткий потолок суммарной длительности сгенерированного
+# видеоряда за ОДИН прогон. Kling = реальные деньги fal.ai ($0.112/сек) → длинный
+# сценарий не должен разогнать трату. env-override (паттерн paths.py). Дефолт 60с
+# (~$6.72/прогон при 10с-клипах). Применяется в fullscreen_plan (видно в оценке)
+# и как жёсткий backstop в generate_ai_broll (любой путь входа).
+AI_VIDEO_MAX_DURATION_SEC = int(os.getenv("AI_VIDEO_MAX_DURATION_SEC", "60"))
+
+
+def _max_clips_for_budget(duration: int) -> int:
+    """Потолок числа клипов, чтобы n·duration ≤ AI_VIDEO_MAX_DURATION_SEC."""
+    return max(1, AI_VIDEO_MAX_DURATION_SEC // max(1, int(duration)))
+
 
 def fullscreen_plan(script_text: str, clip_len: int = FULLSCREEN_CLIP_LEN) -> dict:
     """План фуллскрин-ролика для экрана подтверждения: число клипов под длину
-    озвучки (оценка) + стоимость. Возвращает {n_clips, est_sec, clip_len, cost}."""
+    озвучки (оценка) + стоимость, с учётом cost-guard (AI_VIDEO_MAX_DURATION_SEC).
+    Возвращает {n_clips, est_sec, clip_len, cost}."""
     est = estimate_voiceover_sec(script_text)
-    n = clips_needed(est, clip_len)
+    n = min(clips_needed(est, clip_len), _max_clips_for_budget(clip_len))
     cost = n * clip_len * KLING_PRICE_PER_SEC_USD
     return {"n_clips": n, "est_sec": est, "clip_len": clip_len, "cost": cost}
 
@@ -325,6 +357,17 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
     _notify(progress_cb, "🎬 Режиссёр придумывает раскадровку…")
     plans = plan_clips(script_text, claude, max_clips=max_clips, target_clips=target_clips,
                        business_context=business_context)
+
+    # Cost-guard backstop (срез C): любой путь входа не сгенерит > AI_VIDEO_MAX_DURATION_SEC
+    # секунд видео за прогон — защита от money-leak fal.ai на длинных сценариях.
+    budget_cap = _max_clips_for_budget(duration)
+    if len(plans) > budget_cap:
+        logger.warning(
+            f"ai_video cost-guard: {len(plans)}→{budget_cap} клипов "
+            f"(потолок {AI_VIDEO_MAX_DURATION_SEC}с/прогон при {duration}с-клипах)")
+        _notify(progress_cb,
+                f"⚠️ Лимит трат: беру {budget_cap} клипов (потолок {AI_VIDEO_MAX_DURATION_SEC}с/ролик)")
+        plans = plans[:budget_cap]
 
     _notify(progress_cb, f"🎥 Генерю {len(plans)} кинематографичных клипа (Kling 3.0 Pro, ~{duration}с)…")
     paths: list[Path] = []
