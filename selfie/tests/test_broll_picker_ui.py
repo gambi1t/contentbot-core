@@ -186,7 +186,9 @@ def test_library_keyboard_has_reroll_and_back():
     kb = build_library_keyboard(samples, kind="image")
     have = {b.callback_data for row in kb.inline_keyboard for b in row}
     assert "selfie_broll:reroll:photo" in have
-    assert "selfie_broll:back" in have
+    # «Назад» из списка библиотеки ведёт к подменю КАТЕГОРИЙ (catback),
+    # а не к главному picker'у (back). Ср. handlers.py action=="catback".
+    assert "selfie_broll:catback:photo" in have
 
 
 def test_library_keyboard_back_reroll_use_clip_for_video_kind():
@@ -200,7 +202,7 @@ def test_library_keyboard_empty_samples():
     """Если в библиотеке пусто — должна быть кнопка Назад, без pick'ов."""
     kb = build_library_keyboard([], kind="image")
     have = {b.callback_data for row in kb.inline_keyboard for b in row}
-    assert "selfie_broll:back" in have
+    assert "selfie_broll:catback:photo" in have
     pick_btns = [
         c for c in have if (c or "").startswith("selfie_broll:pick:")
     ]
