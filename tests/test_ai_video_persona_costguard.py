@@ -94,7 +94,7 @@ def test_generate_ai_broll_cost_guard_caps(monkeypatch, tmp_path):
         calls["kling"] += 1
         return str(dest)
 
-    monkeypatch.setattr(A.fal_media, "seedance_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
     monkeypatch.setattr(A.fal_media, "generate_kling_video", fake_kling)
     # директор вернул 10 клипов — cost-guard должен срезать до 6 (60/10)
     monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [

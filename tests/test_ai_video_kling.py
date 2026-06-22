@@ -73,7 +73,7 @@ def test_generate_ai_broll_calls_kling(monkeypatch, tmp_path):
         calls["seedance"] += 1
         return None
 
-    monkeypatch.setattr(A.fal_media, "seedance_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
     monkeypatch.setattr(A.fal_media, "generate_kling_video", fake_kling)
     monkeypatch.setattr(A.fal_media, "generate_seedance_video", fake_seedance)
     monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [

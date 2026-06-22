@@ -347,7 +347,7 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
     Tolerates per-clip failures (returns the successful ones); raises AiVideoError
     if the video backend is unconfigured or nothing was produced.
     """
-    ok, reason = fal_media.seedance_ready()      # preflight (same FAL_KEY gates Kling too)
+    ok, reason = fal_media.kling_ready()         # preflight (FAL_KEY + fal_client)
     if not ok:
         raise AiVideoError(f"Видео-движок недоступен: {reason}")
     if claude is None:

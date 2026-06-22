@@ -73,17 +73,17 @@ def test_seedance_download_crash_leaves_no_file(monkeypatch, tmp_path):
     assert not (tmp_path / "ai_01.mp4.part").exists()   # atomic: no leftover .part
 
 
-def test_seedance_ready_false_without_key(monkeypatch):
+def test_kling_ready_false_without_key(monkeypatch):
     monkeypatch.delenv("FAL_KEY", raising=False)
     import fal_media
-    ok, reason = fal_media.seedance_ready()
+    ok, reason = fal_media.kling_ready()
     assert ok is False and reason
 
 
-def test_seedance_ready_true_with_key(monkeypatch):
+def test_kling_ready_true_with_key(monkeypatch):
     monkeypatch.setenv("FAL_KEY", "id:secret")
     import fal_media
-    ok, _ = fal_media.seedance_ready()
+    ok, _ = fal_media.kling_ready()
     assert ok is True            # fal_client is installed in this env
 
 
@@ -155,7 +155,7 @@ class _SpyClaude:
 
 def test_engine_preflight_fails_before_claude(monkeypatch, tmp_path):
     import ai_video_broll
-    monkeypatch.setattr(ai_video_broll.fal_media, "seedance_ready", lambda: (False, "FAL_KEY missing"))
+    monkeypatch.setattr(ai_video_broll.fal_media, "kling_ready", lambda: (False, "FAL_KEY missing"))
     spy = _SpyClaude()
     with pytest.raises(ai_video_broll.AiVideoError):
         ai_video_broll.generate_ai_broll("s", tmp_path, claude=spy)
@@ -164,7 +164,7 @@ def test_engine_preflight_fails_before_claude(monkeypatch, tmp_path):
 
 def test_engine_threads_max_clips_and_caps_kling_calls(monkeypatch, tmp_path):
     import ai_video_broll
-    monkeypatch.setattr(ai_video_broll.fal_media, "seedance_ready", lambda: (True, ""))
+    monkeypatch.setattr(ai_video_broll.fal_media, "kling_ready", lambda: (True, ""))
     seen = {}
 
     def director_spy(script, claude, max_clips=ai_video_broll.MAX_CLIPS, target_clips=None,
@@ -189,7 +189,7 @@ def test_engine_threads_max_clips_and_caps_kling_calls(monkeypatch, tmp_path):
 
 def test_engine_forwards_prompt_and_duration_to_kling(monkeypatch, tmp_path):
     import ai_video_broll
-    monkeypatch.setattr(ai_video_broll.fal_media, "seedance_ready", lambda: (True, ""))
+    monkeypatch.setattr(ai_video_broll.fal_media, "kling_ready", lambda: (True, ""))
     monkeypatch.setattr(ai_video_broll, "plan_clips",
                         lambda script, claude, max_clips=4, target_clips=None,
                         business_context=None: [{"prompt": "PROMPT_X", "beat": "b"}])

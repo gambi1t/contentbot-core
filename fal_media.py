@@ -85,11 +85,12 @@ def _download(url: str, dest: Path) -> Path:
     return dest
 
 
-def seedance_ready() -> "tuple[bool, str]":
-    """Cheap preflight: is Seedance callable right now? (FAL_KEY + fal_client).
+def kling_ready() -> "tuple[bool, str]":
+    """Cheap preflight: is the fal video engine (Kling) callable right now?
+    (FAL_KEY + fal_client).
 
     Lets the engine fail fast with a clear reason BEFORE spending the Claude
-    director call.
+    director call. (Бывш. seedance_ready — движок переключён на Kling 2026-06-20.)
     """
     if not _is_configured():
         return False, "FAL_KEY not configured"
