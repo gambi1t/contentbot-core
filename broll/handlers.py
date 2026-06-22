@@ -95,7 +95,8 @@ _SCENE_LABELS = {
 
 
 def _approval_keyboard(notion_url: str | None = None,
-                       hf_draft_id: str | None = None) -> InlineKeyboardMarkup:
+                       hf_draft_id: str | None = None,
+                       av_draft_id: str | None = None) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("✅ Собрать ролик", callback_data="broll_approve")],
     ]
@@ -103,6 +104,10 @@ def _approval_keyboard(notion_url: str | None = None,
     if hf_draft_id:
         rows.append([InlineKeyboardButton(
             "🔁 Перегенерировать сцену", callback_data=f"b2hfre:{hf_draft_id}")])
+    # AI-видео (Kling): пер-сценный ре-ролл по plan.json (тот же промпт / голос-правка).
+    if av_draft_id:
+        rows.append([InlineKeyboardButton(
+            "🔁 Перегенерировать сцену", callback_data=f"b2avre:{av_draft_id}")])
     rows.append([InlineKeyboardButton("🔄 Другой сценарий", callback_data="broll_regen")])
     if notion_url:
         rows.append([InlineKeyboardButton("📋 К карточке", url=notion_url)])
@@ -1280,10 +1285,13 @@ async def _send_hf_preview(context, chat_id, draft, draft_id: str,
     }
     if with_clips:
         await _send_scene_clips(context, chat_id, draft.source_items)
+    _is_av = draft.source_mode == SourceMode.AI_VIDEO
     await context.bot.send_message(
         chat_id, _hf_preview_text(len(clips), regen=regen), parse_mode="HTML",
         reply_markup=_approval_keyboard(
-            draft.notion_url, hf_draft_id=draft_id if regen else None),
+            draft.notion_url,
+            hf_draft_id=draft_id if regen else None,
+            av_draft_id=draft_id if _is_av else None),
         disable_web_page_preview=True)
 
 
@@ -1493,6 +1501,105 @@ async def handle_hf_regen_back(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_message(chat_id, "⚠️ Черновик устарел — запусти ролик заново.")
         return
     await _send_hf_preview(context, chat_id, draft, draft_id)
+
+
+# ── #2: пер-сценный ре-ролл AI-видео (зеркало HF-регена, движок regen_ai_clips) ──
+def _av_scene_picker_kb(draft_id: str, n: int) -> InlineKeyboardMarkup:
+    btns = [InlineKeyboardButton(str(i), callback_data=f"b2avsc:{draft_id}:{i}")
+            for i in range(1, n + 1)]
+    rows = [btns[:3], btns[3:]] if n > 3 else [btns]
+    rows.append([InlineKeyboardButton("⬅️ Назад к ролику", callback_data=f"b2avback:{draft_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _av_scene_action_kb(draft_id: str, n: int) -> InlineKeyboardMarkup:
+    """Действия над сценой N. «🎤 Поправить голосом» добавится Инкрементом 2."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 Перегенерировать (тот же промпт)",
+                              callback_data=f"b2avgo:{draft_id}:{n}")],
+        [InlineKeyboardButton("⬅️ К списку сцен", callback_data=f"b2avre:{draft_id}")],
+    ])
+
+
+async def handle_av_regen_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                               draft_id: str) -> None:
+    """Пикер сцен AI-видео (callback b2avre): клипы с номерами + выбор какую перегенерировать."""
+    import ai_video_broll
+    chat_id = update.callback_query.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items:
+        await context.bot.send_message(chat_id, "⚠️ Черновик устарел — запусти ролик заново.")
+        return
+    if not (Path(draft.work_dir) / ai_video_broll.CLIPS_SUBDIR / "plan.json").is_file():
+        await context.bot.send_message(
+            chat_id, "⚠️ Перегенерация доступна только для свежего AI-видео — сделай новый ролик.")
+        return
+    n = len(draft.source_items)
+    await context.bot.send_message(chat_id, "Сцены по порядку — какую перегенерировать?")
+    await _send_scene_clips(context, chat_id, draft.source_items)
+    await context.bot.send_message(
+        chat_id, f"🔁 Номер сцены (1–{n}):", reply_markup=_av_scene_picker_kb(draft_id, n))
+
+
+async def handle_av_regen_scene(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                draft_id: str, n: int) -> None:
+    """Юзер выбрал сцену N (callback b2avsc:<id>:<n>) — меню действий над ней."""
+    chat_id = update.callback_query.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items or not (1 <= n <= len(draft.source_items)):
+        await context.bot.send_message(chat_id, "⚠️ Нет такой сцены.")
+        return
+    await context.bot.send_message(
+        chat_id, f"Сцена {n}: что делаем?", reply_markup=_av_scene_action_kb(draft_id, n))
+
+
+async def handle_av_regen_go(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                             draft_id: str, n: int) -> None:
+    """Перегенерировать сцену N тем же промптом (callback b2avgo:<id>:<n>) →
+    regen_ai_clips([n]) перезаписывает ai_NN.mp4 → пересбор source_items → превью."""
+    import ai_video_broll
+    from .draft import hf_items_from_clips
+    chat_id = update.callback_query.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items or not (1 <= n <= len(draft.source_items)):
+        await context.bot.send_message(chat_id, "⚠️ Нет такой сцены.")
+        return
+    work = Path(draft.work_dir)
+    status = await context.bot.send_message(
+        chat_id, f"🎲 Перегенерирую сцену {n} (Kling 3.0, ~1-3 мин)…")
+    try:
+        new_paths, _cost = await asyncio.to_thread(ai_video_broll.regen_ai_clips, work, [n])
+    except Exception as e:
+        logger.error(f"[broll] av regen scene {n} failed: {e}", exc_info=True)
+        await status.edit_text(
+            f"⚠️ Сцену {n} перегенерировать не вышло — старая осталась. {str(e)[:150]}")
+        return
+    if not new_paths:
+        await status.edit_text(
+            f"⚠️ Сцену {n} не отдал сервер (транзиентный сбой) — старая осталась, можно повторить.")
+        return
+    clips_dir = work / ai_video_broll.CLIPS_SUBDIR
+    items = hf_items_from_clips(sorted(clips_dir.glob("ai_*.mp4")))
+    draft.source_items = items
+    draft.touch(time.time())
+    save_draft(draft, DRAFTS_DIR)
+    await asyncio.to_thread(materialize_items, items, draft.work_dir)
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True, regen=False)
+
+
+async def handle_av_regen_back(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                               draft_id: str) -> None:
+    """Назад к превью AI-видео (callback b2avback)."""
+    chat_id = update.callback_query.message.chat_id
+    draft = load_draft(draft_id, DRAFTS_DIR)
+    if draft is None or not draft.source_items:
+        await context.bot.send_message(chat_id, "⚠️ Черновик устарел — запусти ролик заново.")
+        return
+    await _send_hf_preview(context, chat_id, draft, draft_id, with_clips=True, regen=False)
 
 
 async def handle_broll2_manual_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

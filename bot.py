@@ -778,7 +778,7 @@ _CALLBACK_FEATURE_MAP = {
     "selfie_broll:gen": "remotion",     # «🎨 Сгенерировать графику (AI)» = Remotion
     "selfie_broll:hf": "hyperframes",   # «🎞 Графика HyperFrames»
     "b2src:ai_video": "ai_video",       # ловит ai_video / _go / _menu внутри Pipeline-2
-    "b2avfill:": "ai_video",            # «добрать недостающие» AI-клипы — тоже платный fal-рендер
+    "b2av": "ai_video",                 # b2avfill/b2avre/b2avsc/b2avgo/b2avback — добор + пер-сценный ре-ролл AI-видео (платный fal-рендер)
     # Pipeline 2 (broll_pipeline) — все b2*-callbacks (вход тоже гейтится отдельно
     # в idea→broll ветке).
     "b2man:": "broll_pipeline",
@@ -13080,6 +13080,49 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from broll.handlers import handle_ai_video_fill
         await handle_ai_video_fill(update, context, query.data.split(":", 1)[1],
                                    chat_id=query.message.chat_id)
+        return
+
+    if query.data.startswith("b2avre:"):
+        # Пер-сценный ре-ролл AI-видео: пикер сцен.
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        from broll.handlers import handle_av_regen_menu
+        await handle_av_regen_menu(update, context, query.data.split(":", 1)[1])
+        return
+
+    if query.data.startswith("b2avsc:"):
+        # Выбрана сцена N → меню действий.
+        _parts = query.data.split(":")
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import handle_av_regen_scene
+        await handle_av_regen_scene(update, context, _parts[1], int(_parts[2]))
+        return
+
+    if query.data.startswith("b2avgo:"):
+        # Перегенерировать сцену N тем же промптом.
+        _parts = query.data.split(":")
+        try:
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        from broll.handlers import handle_av_regen_go
+        await handle_av_regen_go(update, context, _parts[1], int(_parts[2]))
+        return
+
+    if query.data.startswith("b2avback:"):
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        from broll.handlers import handle_av_regen_back
+        await handle_av_regen_back(update, context, query.data.split(":", 1)[1])
         return
 
     if query.data == "broll_approve":
