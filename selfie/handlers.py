@@ -1415,14 +1415,18 @@ async def handle_broll_callback(
         # Пересчёт лимита по АКТУАЛЬНОМУ состоянию (Critical 2).
         items = _items_from_pending(cur)
         free_now = selfie_broll.MAX_BROLL_ITEMS - len(items)
-        added = 0
-        for clip in clips[:max(0, free_now)]:
+        added_clips = clips[:max(0, free_now)]
+        for clip in added_clips:
             _store_item(cur, selfie_broll.BrollItem(
                 kind="video", source=Path(clip), label=f"[AI] {Path(clip).stem}",
             ))
-            added += 1
+        added = len(added_clips)
         cur.pop("selfie_ai_job_id", None)
         _SAVE_PENDING(_PENDING)
+        # Превью сгенерированных сцен (см. HF-ветку): имена [AI] ничего не говорят.
+        if added_clips:
+            await _send_broll_previews(
+                context, chat_id, [{"path": str(c)} for c in added_clips], "video")
         items = _items_from_pending(cur)
         capped = "" if added >= len(clips) else (
             f" (лимит {selfie_broll.MAX_BROLL_ITEMS} — лишние не добавил)"
@@ -1430,7 +1434,7 @@ async def handle_broll_callback(
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"🎨 Готово — добавил {added} AI-сцен{capped}.\n\n"
+                f"🎨 Готово — добавил {added} AI-сцен{capped}. Превью выше.\n\n"
                 + selfie_broll.build_picker_message(items)
             ),
             reply_markup=selfie_broll.build_picker_keyboard(items),
@@ -1512,18 +1516,24 @@ async def handle_broll_callback(
 
         items = _items_from_pending(cur)
         free_now = selfie_broll.MAX_BROLL_ITEMS - len(items)
-        added = 0
-        for clip in clips[:max(0, free_now)]:
+        added_clips = clips[:max(0, free_now)]
+        for clip in added_clips:
             _store_item(cur, selfie_broll.BrollItem(
                 kind="video", source=Path(clip), label=f"[HF] {Path(clip).stem}",
             ))
-            added += 1
+        added = len(added_clips)
         cur.pop("selfie_hf_job_id", None)
         _SAVE_PENDING(_PENDING)
+        # Превью сгенерированных сцен — иначе в пикере только имена [HF] hf_NN,
+        # непонятно что внутри (Артём 22.06). Best-effort, ошибка не рвёт flow.
+        if added_clips:
+            await _send_broll_previews(
+                context, chat_id, [{"path": str(c)} for c in added_clips], "video")
         items = _items_from_pending(cur)
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🎞 Готово — добавил {added} граф-сцен(ы). Добавь ещё B-roll или жми «Готово».",
+            text=f"🎞 Готово — добавил {added} граф-сцен(ы). Превью выше. "
+                 "Добавь ещё B-roll или жми «Готово».",
             reply_markup=selfie_broll.build_picker_keyboard(items),
         )
         return True
@@ -1645,19 +1655,23 @@ async def handle_broll_callback(
 
         items = _items_from_pending(cur)
         free_now = selfie_broll.MAX_BROLL_ITEMS - len(items)
-        added = 0
-        for clip in clips[:max(0, free_now)]:
+        added_clips = clips[:max(0, free_now)]
+        for clip in added_clips:
             _store_item(cur, selfie_broll.BrollItem(
                 kind="video", source=Path(clip), label=f"[AI-видео] {Path(clip).stem}",
             ))
-            added += 1
+        added = len(added_clips)
         cur.pop("selfie_aivid_job_id", None)
         _SAVE_PENDING(_PENDING)
-        items = _items_from_pending(cur)
         # Honest about paid-but-unused: clips are already generated & billed.
         if added < len(clips):
             _LOGGER.warning(
                 f"[selfie/aivid] user={user_id} discarded {len(clips) - added} PAID clips (free_now={free_now})")
+        # Превью оплаченных клипов (см. HF-ветку): имена [AI-видео] не информативны.
+        if added_clips:
+            await _send_broll_previews(
+                context, chat_id, [{"path": str(c)} for c in added_clips], "video")
+        items = _items_from_pending(cur)
         await context.bot.send_message(
             chat_id=chat_id,
             text=_aivid_done_text(added, len(clips)),

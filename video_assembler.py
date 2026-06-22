@@ -146,8 +146,12 @@ class AssemblyError(Exception):
     """Raised when auto-montage fails."""
 
 
-def _run(cmd: list[str], desc: str, timeout: int = 300) -> str:
-    """Run a subprocess; raise AssemblyError on failure. Returns stdout."""
+def _run(cmd: list[str], desc: str, timeout: int = 900) -> str:
+    """Run a subprocess; raise AssemblyError on failure. Returns stdout.
+
+    timeout=900 (было 300): на CPU сервера переэнкод аватара ~52с в полноэкран
+    не укладывался в 300с → TimeoutExpired → откат к пикеру (Артём 22.06,
+    «монтаж не готов»). Вместе с preset=veryfast (см. ниже) даёт большой запас."""
     logger.info(f"[assembler] {desc}")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
@@ -744,7 +748,7 @@ def _image_to_broll_clip(
             "-r", str(FPS),
             "-an",
             "-c:v", "libx264",
-            "-preset", "medium",
+            "-preset", "veryfast",
             "-crf", "15",
             "-pix_fmt", "yuv420p",
             str(output_path),
@@ -894,7 +898,7 @@ def _assemble_split(
                     f"pad={CANVAS_W}:{broll_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
                     f"setsar=1,fps={FPS}"
                 ),
-                "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+                "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
                 "-pix_fmt", "yuv420p",
                 str(seg_out),
             ],
@@ -931,7 +935,7 @@ def _assemble_split(
                 f"crop={CANVAS_W}:{avatar_h}:(iw-{CANVAS_W})/2:"
                 f"min({AVATAR_CROP_Y}\\,ih-{avatar_h}),setsar=1,fps={FPS}"
             ),
-            "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             str(avatar_bot),
@@ -946,7 +950,7 @@ def _assemble_split(
             "-i", str(broll_top), "-i", str(avatar_bot),
             "-filter_complex", "[0:v][1:v]vstack=inputs=2[outv]",
             "-map", "[outv]", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", "-shortest",
@@ -1063,7 +1067,7 @@ def _assemble_dynamic(
                 f"scale={_full_w}:{_full_h}:force_original_aspect_ratio=increase,"
                 f"crop={CANVAS_W}:{CANVAS_H},setsar=1,fps={FPS}"
             ),
-            "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             str(avatar_full),
@@ -1089,7 +1093,7 @@ def _assemble_dynamic(
                     f"crop={CANVAS_W}:{CANVAS_H},setsar=1,fps={FPS}"
                 ),
                 "-an",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
                 "-pix_fmt", "yuv420p",
                 str(broll_scaled),
             ],
@@ -1132,7 +1136,7 @@ def _assemble_dynamic(
             "-filter_complex", filter_str,
             "-map", prev_label,
             "-map", "0:a",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
@@ -1219,7 +1223,7 @@ def _pro_broll_full_seg_args(broll_clip, dur: float, seg_out) -> list[str]:
         "-i", str(broll_clip),
         "-t", f"{dur:.3f}",
         "-an",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
         "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
         str(seg_out),
     ]
@@ -1244,7 +1248,7 @@ def _pro_split_seg_args(broll_clip, avatar_half, start: float, dur: float, seg_o
         "-map", "[outv]",
         "-t", f"{dur:.3f}",
         "-an",
-        "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
         "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
         str(seg_out),
     ]
@@ -1304,7 +1308,7 @@ def _assemble_pro(
                 f"scale={_pro_full_w}:{_pro_full_h}:force_original_aspect_ratio=increase,"
                 f"crop={CANVAS_W}:{CANVAS_H},setsar=1,fps={FPS}"
             ),
-            "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
             "-c:a", "aac", "-b:a", "192k",
             str(avatar_full),
@@ -1324,7 +1328,7 @@ def _assemble_pro(
                 f"crop={CANVAS_W}:{HALF_H}:(iw-{CANVAS_W})/2:min({AVATAR_CROP_Y}\\,ih-{HALF_H}),"
                 f"setsar=1,fps={FPS}"
             ),
-            "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
             "-an",
             str(avatar_half),
@@ -1389,7 +1393,7 @@ def _assemble_pro(
                 "-i", str(clip),
                 "-t", f"{prep_dur:.1f}",
                 "-vf", vf,
-                "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+                "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
                 "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                 str(out),
             ],
@@ -1478,7 +1482,7 @@ def _assemble_pro(
                 "-i", str(clip),
                 "-t", f"{prep_dur:.1f}",
                 "-vf", vf,
-                "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+                "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
                 "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                 str(out),
             ],
@@ -1512,7 +1516,7 @@ def _assemble_pro(
                     "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(avatar_full),
                     "-an",
-                    "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
                     "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                     str(seg_out),
                 ],
@@ -1544,7 +1548,7 @@ def _assemble_pro(
                     "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(avatar_full),
                     "-an",
-                    "-c:v", "libx264", "-preset", "medium", "-crf", "15",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
                     "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
                     str(seg_out),
                 ],
