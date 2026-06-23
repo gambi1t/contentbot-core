@@ -1212,11 +1212,82 @@ def _quantize_plan_to_frames(montage_plan: list[dict], fps: int = FPS) -> list[d
     return out
 
 
-def _pro_broll_full_seg_args(broll_clip, dur: float, seg_out) -> list[str]:
-    """Full-screen B-roll pro segment. Loops the (already-scaled) clip to fill the
-    slot instead of freezing its last frame — short AI/library clip < slot would
-    otherwise hold a стоп-кадр. Same `-stream_loop -1 … -t dur` as _assemble_dynamic.
+def _broll_fit_strategy(slot_dur: float, clip_dur: float | None) -> dict:
+    """B (без задвоения): выбрать стратегию подгонки клипа под слот.
+
+    Раньше всегда `stream_loop -1 -t dur`: если slot > clip, клип проигрывался
+    второй раз с начала → визуально «один B-roll дважды» (Артём 22.06). Теперь:
+      - slot ≤ clip → trim (просто `-t`)
+      - clip < slot ≤ clip × MAX_STRETCH (1.5) → растяжка PTS (≈ замедление,
+        визуально мягко, без перезапуска клипа)
+      - slot > clip × 1.5 → растянуть до clip×1.5 + freeze хвостом (tpad clone).
+        Задвоения нет ценой стоп-кадра в конце; на длинных слотах редок, т.к.
+        A (масштаб сцен под длину) делает слоты короче (8 сцен на 50с вместо 6).
+      - clip_dur неизвестна → fallback на старый `stream_loop` (поведение как было).
+    Чистая функция (unit-tested) — возвращает {mode, stretch_ratio?, freeze_dur?}."""
+    MAX_STRETCH = 1.5
+    if clip_dur is None or clip_dur <= 0:
+        return {"mode": "loop"}  # legacy fallback
+    if slot_dur <= clip_dur + 0.05:
+        return {"mode": "trim"}
+    ratio = slot_dur / clip_dur
+    if ratio <= MAX_STRETCH:
+        return {"mode": "stretch", "stretch_ratio": ratio}
+    # ratio > MAX_STRETCH: растянуть до пол-стретча + freeze
+    stretched_dur = clip_dur * MAX_STRETCH
+    return {
+        "mode": "stretch_freeze",
+        "stretch_ratio": MAX_STRETCH,
+        "stretched_dur": stretched_dur,
+        "freeze_dur": slot_dur - stretched_dur,
+    }
+
+
+def _pro_broll_full_seg_args(broll_clip, dur: float, seg_out,
+                             clip_dur: float | None = None) -> list[str]:
+    """Full-screen B-roll pro segment. Fits clip to slot WITHOUT replay (B-фикс):
+    trim / stretch-PTS / stretch+freeze — см. _broll_fit_strategy. Раньше всегда
+    `stream_loop -1` → короткий клип в длинном слоте проигрывался дважды.
     """
+    strat = _broll_fit_strategy(dur, clip_dur)
+    if strat["mode"] == "stretch":
+        # setpts*ratio = замедление видео до длины слота; короткий клип «дышит» вместо повтора
+        return [
+            "ffmpeg", "-y",
+            "-i", str(broll_clip),
+            "-filter:v", f"setpts={strat['stretch_ratio']:.4f}*PTS",
+            "-t", f"{dur:.3f}",
+            "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
+            "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
+            str(seg_out),
+        ]
+    if strat["mode"] == "stretch_freeze":
+        # setpts растягивает + tpad клонирует последний кадр на остатке слота
+        return [
+            "ffmpeg", "-y",
+            "-i", str(broll_clip),
+            "-filter:v",
+            f"setpts={strat['stretch_ratio']:.4f}*PTS,"
+            f"tpad=stop_mode=clone:stop_duration={strat['freeze_dur']:.3f}",
+            "-t", f"{dur:.3f}",
+            "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
+            "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
+            str(seg_out),
+        ]
+    if strat["mode"] == "trim":
+        # slot ≤ clip → просто берём начало клипа, без loop
+        return [
+            "ffmpeg", "-y",
+            "-i", str(broll_clip),
+            "-t", f"{dur:.3f}",
+            "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
+            "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
+            str(seg_out),
+        ]
+    # mode == "loop" (clip_dur неизвестна) — старое поведение, чтобы ничего не сломать
     return [
         "ffmpeg", "-y",
         "-stream_loop", "-1",
@@ -1229,22 +1300,35 @@ def _pro_broll_full_seg_args(broll_clip, dur: float, seg_out) -> list[str]:
     ]
 
 
-def _pro_split_seg_args(broll_clip, avatar_half, start: float, dur: float, seg_out) -> list[str]:
-    """50/50 split pro segment: looped B-roll (top) + avatar (bottom).
+def _pro_split_seg_args(broll_clip, avatar_half, start: float, dur: float, seg_out,
+                        clip_dur: float | None = None) -> list[str]:
+    """50/50 split pro segment: B-roll (top) + avatar (bottom).
 
-    `-ss start -t dur` sit before the SECOND `-i` → they seek the AVATAR to the
-    segment position (lip-sync) and are UNCHANGED. B-roll (input 0) loops to fill
-    the slot (was tpad=clone freeze); setpts resets its PTS after the loop so the
-    vstack pairs frames cleanly.
+    B-фикс симметрично _pro_broll_full_seg_args: вместо stream_loop (который
+    давал «B-roll дважды» в slot > clip) — выбор по _broll_fit_strategy:
+    trim / stretch / stretch+freeze. Аватар (input 1) seek'ается с `-ss start
+    -t dur` как раньше (lip-sync, не меняется).
     """
+    strat = _broll_fit_strategy(dur, clip_dur)
+    broll_filter = "[0:v]setpts=PTS-STARTPTS[b]"
+    broll_args = ["-i", str(broll_clip)]
+    if strat["mode"] == "stretch":
+        broll_filter = f"[0:v]setpts={strat['stretch_ratio']:.4f}*(PTS-STARTPTS)[b]"
+    elif strat["mode"] == "stretch_freeze":
+        broll_filter = (
+            f"[0:v]setpts={strat['stretch_ratio']:.4f}*(PTS-STARTPTS),"
+            f"tpad=stop_mode=clone:stop_duration={strat['freeze_dur']:.3f}[b]"
+        )
+    elif strat["mode"] == "loop":
+        broll_args = ["-stream_loop", "-1", "-i", str(broll_clip)]
+    # mode == "trim": дефолт (setpts=PTS-STARTPTS), без stream_loop
     return [
         "ffmpeg", "-y",
-        "-stream_loop", "-1",
-        "-i", str(broll_clip),
+        *broll_args,
         "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
         "-i", str(avatar_half),
         "-filter_complex",
-        "[0:v]setpts=PTS-STARTPTS[b];[b][1:v]vstack=inputs=2[outv]",
+        f"{broll_filter};[b][1:v]vstack=inputs=2[outv]",
         "-map", "[outv]",
         "-t", f"{dur:.3f}",
         "-an",
@@ -1524,20 +1608,31 @@ def _assemble_pro(
             )
 
         elif layout == "broll_full" and bi is not None and bi in broll_full_clips:
-            # Full-screen B-roll (video only): loop the clip to fill the slot —
-            # short clip used to freeze its last frame (tpad). seg всегда ровно dur.
+            # Full-screen B-roll: B-фикс — без stream_loop. fit-strategy выбирает
+            # trim / stretch / stretch+freeze (см. _broll_fit_strategy). Раньше
+            # короткий клип в длинном слоте проигрывался дважды (Артём 22.06).
             broll_clip = broll_full_clips[bi]
+            cdur = None
+            try:
+                cdur = _probe_duration(broll_clip)
+            except Exception as _e:
+                logger.warning(f"[assembler] probe failed for broll {bi}: {_e} → legacy loop")
             _run(
-                _pro_broll_full_seg_args(broll_clip, dur, seg_out),
-                f"pro: seg {si} broll_full #{bi} ({dur:.1f}s)",
+                _pro_broll_full_seg_args(broll_clip, dur, seg_out, clip_dur=cdur),
+                f"pro: seg {si} broll_full #{bi} ({dur:.1f}s, clip={cdur or '?'}s)",
             )
 
         elif layout == "split" and bi is not None and bi in broll_half_clips:
-            # 50/50 split: B-roll top (looped to fill) + avatar bottom (seeked to seg).
+            # 50/50 split: B-roll top + avatar bottom (B-фикс симметрично).
             broll_clip = broll_half_clips[bi]
+            cdur = None
+            try:
+                cdur = _probe_duration(broll_clip)
+            except Exception as _e:
+                logger.warning(f"[assembler] probe failed for split broll {bi}: {_e} → legacy loop")
             _run(
-                _pro_split_seg_args(broll_clip, avatar_half, start, dur, seg_out),
-                f"pro: seg {si} split #{bi} ({dur:.1f}s)",
+                _pro_split_seg_args(broll_clip, avatar_half, start, dur, seg_out, clip_dur=cdur),
+                f"pro: seg {si} split #{bi} ({dur:.1f}s, clip={cdur or '?'}s)",
             )
 
         else:
