@@ -81,6 +81,13 @@
   .foot-note{font-size:12.5px;color:#7a8294;margin:8px 0 0}
   code{background:var(--neutral);border:1px solid var(--line);padding:1px 6px;border-radius:5px;
     font:600 12.5px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--accent)}
+  .copybtn{float:right;cursor:pointer;border:1px solid var(--accent);background:var(--accent);
+    color:#fff;border-radius:8px;padding:7px 13px;margin:-2px 0 0 10px;
+    font:600 12.5px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  .copybtn:hover{opacity:.92} .copybtn:active{transform:translateY(1px)}
+  .prompt{white-space:pre-wrap;word-break:break-word;clear:both;background:var(--neutral);
+    border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0 0;
+    font:500 12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--ink)}
   footer{text-align:center;color:var(--muted);font-size:13.5px;margin-top:42px;
     padding-top:22px;border-top:1px solid var(--line)}
   footer a{color:var(--accent);text-decoration:none}
@@ -93,6 +100,8 @@
     header.hero{-webkit-print-color-adjust:exact;print-color-adjust:exact;margin:-16mm -14mm 0}
     .tablewrap.large-table{break-inside:auto}
     .tablewrap.large-table tr{break-inside:avoid}
+    .copybtn{display:none}
+    .card.prompt-card{break-inside:auto}
   }
 </style>
 </head>
@@ -101,7 +110,7 @@
   <div class="inner">
     <h1>Контент-бот Life Drive</h1>
     <p>Гайд для SMM — что бот умеет и как им пользоваться</p>
-    <div class="meta">Бот: @yumsunov_content_bot · обновлено 22 июня 2026</div>
+    <div class="meta">Бот: @yumsunov_content_bot · обновлено 23 июня 2026</div>
   </div>
 </header>
 
@@ -143,6 +152,7 @@
     <a href="#notion">8 · Notion — пульт всех идей</a>
     <a href="#pubs">9 · Учёт публикаций — сколько и куда вышло</a>
     <a href="#none">10 · Чего пока нет (честно)</a>
+    <a href="#plan">11 · Контент-план — что постить каждый день</a>
   </div>
 
   <div class="section-label">Часть 1 · Рабочие пайплайны</div>
@@ -390,11 +400,106 @@
     <div class="note honesty">Если что-то из этого понадобится в работе (например, статистика) — скажи Максиму, доделаем. Этот список честный на 22 июня 2026.</div>
   </div>
 
+  <!-- 11 CONTENT PLAN -->
+  <h2 id="plan"><span class="num">11</span>🗓 Контент-план — что постить каждый день <span class="pill ok">готово</span></h2>
+  <div class="card">
+    <div class="when">Когда: раз в неделю — собрать план постов на 7 дней вперёд, чтобы каждый день был готовый ролик.</div>
+    <p class="muted">Не нужно выдумывать темы каждый день вручную. Раз в неделю вставляешь готовый промпт в ChatGPT, отвечаешь на 3 вопроса — получаешь таблицу на неделю. Дальше каждый день берёшь строку плана и делаешь по ней ролик в боте.</p>
+    <ol class="steps">
+      <li>Открой ChatGPT, нажми «📋 Скопировать промпт» ниже и вставь его <b>первым сообщением</b>.</li>
+      <li>Ответь на 3 коротких вопроса, которые задаст ChatGPT (события недели / готовые материалы / приоритетная тема).</li>
+      <li>Получишь таблицу на 7 дней. Каждый день бери строку и делай ролик в боте — тип съёмки указан в столбце «Как делать в боте».</li>
+      <li>После публикации руками отметь в боте: <code>/calendar</code> → «➕ Отметить публикацию» (что ушло кнопкой кросспоста — бот посчитал сам, см. раздел 9).</li>
+    </ol>
+  </div>
+
+  <div class="card prompt-card">
+    <h3><button class="copybtn" onclick="copyPrompt('cp-prompt', this)">📋 Скопировать промпт</button>Промпт для ChatGPT</h3>
+    <p class="muted">Скопируй целиком и вставь в ChatGPT первым сообщением. Менять под себя ничего не нужно — контекст Максима уже зашит.</p>
+    <pre class="prompt" id="cp-prompt">Ты — опытный контент-стратег и SMM-директор. Твоя задача — составлять контент-план для ЛИЧНОГО БРЕНДА Максима Юмсунова. Прочитай контекст, задай мне 3 коротких уточняющих вопроса и выдай план на 7 дней в виде таблицы.
+
+КТО ТАКОЙ МАКСИМ
+- Предприниматель из Тюмени, 17 лет в бизнесе. Владелец Life Drive: картинг-центр и премиум-глэмпинг. Состоявшийся, не новичок, регулярно выступает экспертом.
+- Цель медийки — вырасти с тюменского уровня на общероссийский.
+- Подача: спокойно, по делу, на личном опыте и цифрах. Без инфоцыганщины и громких обещаний.
+
+ГЛАВНОЕ ПРАВИЛО (НЕ нарушать)
+- Это ЛИЧНЫЙ БРЕНД предпринимателя, а НЕ реклама картинга/глэмпинга. Основные темы — предпринимательство, управление, деньги, эффективность, личные инсайты Максима. Картинг и глэмпинг — это ФОН и материал для историй/аналогий, а НЕ главная тема. (Частая ошибка — скатиться в промо бизнесов. Не делай так.)
+
+АУДИТОРИЯ
+- Предприниматели и «сильные в своей профессии», мужчины 30+ с детьми, ценящие рост и эффективность. Люди с деньгами, которым интересно следить за энергичным практиком.
+- НЕ целимся в: гонщиков-картингистов 18–25, туристов «куда поехать», подростков.
+
+КАНАЛЫ
+- Главный — Telegram @yumsunov_realbiz (туда ведём и удерживаем). Instagram, YouTube Shorts, VK, TikTok — расширение охвата: один и тот же ролик кросспостим.
+
+ФОРМАТ РОЛИКОВ
+- Talking-head в стиле Алекса Хормози / Коди Санчез: Максим в кадре говорит (60–70% времени), B-roll-вставки (30–40%) под ключевые тезисы. НЕ влоги, НЕ постановка.
+- Вертикаль, 30–90 сек.
+
+РУБРИКИ (чередовать)
+- Виральный совет — короткий сильный инсайт, который хочется переслать.
+- Экспертный разбор — разбор бизнес-темы на опыте Максима.
+- Личные мысли / Инсайты — личная история, урок, ошибка.
+- Behind-the-scenes — как устроено в его бизнесах (как материал для урока, не промо).
+- Юмор/мем — редко, для разнообразия.
+- TG-пост текстом — для тем, где видео не нужно.
+
+ЗОЛОТЫЕ ТЕМЫ МАКСИМА (из реального опыта — опирайся на них)
+- Делегирование: поднял управляющую до директора.
+- «Бизнес — это не я, я лишь катализатор»; цель — система, работающая без владельца.
+- Деньги как инструмент эффективности, а не самоцель.
+- Закрыл нестабильный проект (зимний картинг на льду: «400 тыс. за 4 месяца — ерунда»).
+- Правило трёх корректировок: ошибка → штраф → увольнение.
+- Рост через масштаб (сапборд-флот: 10 → 30 → 80 → 140).
+
+КАДЕНЦИЯ
+- Минимум 1 ролик в день. Неделя = микс: 3–4 виральных совета/инсайта (ядро), 1–2 экспертных разбора, 1 behind-the-scenes, 1 TG-пост текстом. Юмор/семейное — по ситуации, не чаще раза в неделю.
+
+ОГРАНИЧЕНИЯ
+- Не выдумывай факты и цифры сверх перечисленных. Нужен факт для темы — пометь «[уточнить у Максима]».
+- Название глэмпинга в контенте НЕ используем.
+- Не уходи в рекламу бизнесов — личный бренд первичен.
+
+ФОРМАТ ОТВЕТА
+Сначала задай мне 3 коротких вопроса:
+  1) что важного на этой неделе (события, инфоповоды)?
+  2) есть ли готовые отснятые материалы и какие?
+  3) есть ли тема-приоритет?
+Потом выдай таблицу на 7 дней со столбцами:
+| День | Рубрика | Тема | Хук (1 фраза — чем цепляем) | Площадки | Как делать в боте |
+В столбце «Как делать в боте» выбери одно: Селфи (Максим снимает себя) · AI-аватар (без съёмки) · B-roll-монтаж (закадровый голос + видеоряд) · Карусель (текстово-визуальная тема) · TG-пост (текст).</pre>
+  </div>
+
+  <div class="card">
+    <h3>Памятка — коротко</h3>
+    <p class="muted"><b>Зачем 1 ролик в день.</b> Алгоритмы Reels / Shorts / TG награждают регулярность. Рост — это постоянство, а не «иногда густо, потом тишина».</p>
+    <p class="muted"><b>Что постим (микс на неделю):</b> ядро — виральные советы и личные инсайты Максима (talking-head: он в кадре + B-roll-вставки, стиль Хормози). Реже — экспертные разборы, behind-the-scenes, 1 TG-пост текстом. Юмор/семейное — изредка.</p>
+    <div class="note honesty">⚠️ Главное: это <b>личный бренд Максима-предпринимателя</b>, а НЕ реклама картинга/глэмпинга. Бизнесы — фон и материал для историй, а не тема. Легко скатиться в промо — не надо.</div>
+    <p class="muted"><b>Каналы:</b> ведём в Telegram <b>@yumsunov_realbiz</b>; остальные (IG / YT Shorts / VK / TikTok) — кросспост того же ролика.</p>
+  </div>
+
   <footer>
     Сделано <a href="https://postulataistudio.ru/">студией Postulat</a> ·
     <a href="https://t.me/postulataistudio">@postulataistudio</a><br>
     Внутренний гайд для команды Life Drive · вопросы по боту — в студию.
   </footer>
 </div>
+<script>
+  function selectEl(el){
+    var r = document.createRange(); r.selectNodeContents(el);
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+  }
+  function copyPrompt(id, btn){
+    var el = document.getElementById(id); if(!el) return;
+    var restore = btn.getAttribute('data-label');
+    if(restore === null){ restore = btn.innerText; btn.setAttribute('data-label', restore); }
+    var ok = function(){ btn.innerText = '✅ Скопировано';
+      setTimeout(function(){ btn.innerText = btn.getAttribute('data-label'); }, 1800); };
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(el.innerText).then(ok).catch(function(){ selectEl(el); });
+    } else { selectEl(el); }
+  }
+</script>
 </body>
 </html>
