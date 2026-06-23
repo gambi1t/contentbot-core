@@ -6391,7 +6391,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `/stats` — последний замер подписчиков\n"
             "• `/calendar` — сетка публикаций\n\n"
             "*Настройки:*\n"
-            "• `/yt_auth`, `/vk_auth` — авторизовать соцсети для кросспоста\n\n"
+            "• `/yt_auth`, `/ig_auth`, `/vk_auth` — авторизовать соцсети для кросспоста\n\n"
             "_Нажми любую кнопку ниже — сразу перейду туда._"
         )
         kb = InlineKeyboardMarkup([
@@ -21223,6 +21223,7 @@ async def post_init(application):
         _cmds.append(("brand", "🏷 Сменить бренд"))
     _cmds += [
         ("yt_auth", "Авторизовать YouTube"),
+        ("ig_auth", "Авторизовать Instagram"),
         ("vk_auth", "Авторизовать VK"),
         ("admin", "⚙️ Админ-панель (биллинг, клиенты)"),
         ("billing", "💰 Баланс и биллинг"),
