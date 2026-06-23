@@ -75,6 +75,17 @@ def _scene_files_for(n: int) -> list[str]:
     return [f"scene_{i:02d}.html" for i in range(1, n + 1)]
 
 
+def _hf_phase_progress(n: int) -> tuple[str, str]:
+    """Пользовательские сообщения прогресса фаз 1/2 с РЕАЛЬНЫМ числом сцен n.
+
+    Раньше зашито «6 сцен»; после A число динамическое (5..10) → сообщение врало
+    «6», и на 9-сценном ролике Артём решил, что вернулось старое поведение (23.06).
+    Эти строки — последнее место, где жила зашитая «6» (промпты/валидатор уже на n)."""
+    step1 = f"📋 Шаг 1/3: придумываю раскадровку ({n} разных сцен)…"
+    step2 = f"🎨 Шаг 2/3: раскадровка готова — пишу {n} HTML-сцен (~3-5 мин)…"
+    return step1, step2
+
+
 STORYBOARD_FILE = "storyboard.json"     # фаза 1 пишет сюда (gated валидатором)
 REFERENCE_PACK_FILE = "reference_pack.md"  # curated-выжимка скилла (деплоится в HF_PROJECT)
 MAX_STORYBOARD_ATTEMPTS = 3             # генерация storyboard + 2 fix-round
@@ -1915,12 +1926,12 @@ def generate_hyperframes_broll(
         # Claude планирует 6 РАЗНЫХ сцен → storyboard.json → валидатор-гейт.
         # Это решает монотонность по построению (см. project_hyperframes_
         # pipeline_architecture.md).
-        logger.info("[hf_broll] Фаза 1: storyboard (раскадровка 6 сцен)…")
-        _notify(progress_cb, "📋 Шаг 1/3: придумываю раскадровку (6 разных сцен)…")
+        logger.info(f"[hf_broll] Фаза 1: storyboard (раскадровка {N_INSERTS} сцен)…")
+        _p1, _p2 = _hf_phase_progress(N_INSERTS)
+        _notify(progress_cb, _p1)
         storyboard, sb_cost = _run_storyboard_phase(script_text)
         total_cost += sb_cost
-        _notify(progress_cb,
-                "🎨 Шаг 2/3: раскадровка готова — пишу 6 HTML-сцен (~3-5 мин)…")
+        _notify(progress_cb, _p2)
 
         # ── ФАЗА 2: per-scene build ────────────────────────────────────
         # По умолчанию (10 июня) — SINGLE-SHOT: одна completion на сцену без
