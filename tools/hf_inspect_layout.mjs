@@ -302,8 +302,25 @@ async function main() {
 
           // 1) offscreen — текст И карточки. severity: blocking для semantic,
           //    advisory для decor (явный data-hf-role="decor" / allow-offscreen).
+          // GPT-5 strict-readiness: offscreen на УРОВНЕ текст-блока, не отдельных
+          // kinetic-type букв/слов — иначе анимирующаяся буква, выезжающая из-за
+          // кадра, даёт ложный blocking. Сворачиваем split-куски к их blockRoot
+          // (bbox всего блока), каждый блок проверяем один раз.
+          const _seenBlock = new Set();
+          const _textCands = [];
+          for (const x of texts) {
+            if (x.blockRoot && x.blockRoot !== x.el) {
+              if (_seenBlock.has(x.blockRoot)) continue;
+              _seenBlock.add(x.blockRoot);
+              const br = x.blockRoot.getBoundingClientRect();
+              const btxt = (x.blockRoot.textContent || x.text).trim().slice(0, 30);
+              _textCands.push({ ...x, r: br, text: btxt, kind: "text" });
+            } else {
+              _textCands.push({ ...x, kind: "text" });
+            }
+          }
           const offCandidates = [
-            ...texts.map((x) => ({ ...x, kind: "text" })),
+            ..._textCands,
             ...cards.map((x) => ({ ...x, kind: "card", text: "", role: "decor" })),
           ];
           for (const c of offCandidates) {

@@ -1765,6 +1765,48 @@ def _needs_fix_round(layout_by_scene: dict | None, render_errors: list[str]) -> 
     return bool(_blocking_layout_subset(layout_by_scene))
 
 
+def _max_rounds_outcome(render_errors: list[str], gate_mode: str,
+                        blocking_layout: dict | None) -> str:
+    """Что делать ПОСЛЕ исчерпания MAX_FIX_ROUNDS (GPT-5 §9, Step 5):
+
+    - 'render_fail' — остались render-ошибки → без mp4 нет видео, хард-фейл.
+    - 'best_effort' — strict + layout-blocking, но рендер ОК → отдать ролик с
+      предупреждением (не валить весь ролик из-за вёрстки; deliver best-effort).
+    - 'clean' — ничего блокирующего (сюда обычно не доходим). Чистая функция."""
+    if render_errors:
+        return "render_fail"
+    if gate_mode == "strict" and blocking_layout:
+        return "best_effort"
+    return "clean"
+
+
+def _build_quality_report(n_scenes: int, layout_by_scene: dict | None,
+                          blocking_layout: dict | None, fix_rounds: int,
+                          best_effort: bool) -> dict:
+    """Компактный quality-report (GPT-5 §6 / Step 6) для лога и мониторинга gate:
+    сколько сцен, blocking/advisory по типам, fix-раунды, отдан ли best-effort,
+    какие сцены перегенерировались. Чистая функция (unit-tested)."""
+    def _by_type(d: dict | None) -> dict:
+        out: dict = {}
+        for issues in (d or {}).values():
+            for i in issues:
+                t = i.get("type", "?") if isinstance(i, dict) else "?"
+                out[t] = out.get(t, 0) + 1
+        return out
+    blk = _by_type(blocking_layout)
+    allt = _by_type(layout_by_scene)
+    adv = {t: allt.get(t, 0) - blk.get(t, 0) for t in allt}
+    adv = {t: c for t, c in adv.items() if c > 0}
+    return {
+        "scenes": n_scenes,
+        "blocking": blk,
+        "advisory": adv,
+        "fix_rounds": fix_rounds,
+        "best_effort": best_effort,
+        "regenerated": sorted(blocking_layout or {}),
+    }
+
+
 def _layout_gate_preflight() -> tuple[bool, dict]:
     """Проверяет инфру layout-критика. → (всё-ок, детали по компонентам).
 
@@ -1975,6 +2017,9 @@ def generate_hyperframes_broll(
         clips: list[Path] = []
         errors: list[str] = []
         fix_round = 0
+        best_effort = False              # strict: отдали с layout-warning (Step 5)
+        layout_by_scene: dict = {}
+        blocking_layout: dict = {}
         # Выбор render-движка (Phase 1 Step 4 — наш по умолчанию, npx fallback)
         use_npx_render = os.getenv("HF_USE_NPX_RENDER", "").strip() == "1"
         _render_fn = _render_all if use_npx_render else _render_all_native
@@ -2010,19 +2055,25 @@ def generate_hyperframes_broll(
                 break  # чисто (advisory/off лог уже сделан выше)
 
             if fix_round >= MAX_FIX_ROUNDS:
-                # GPT-5 High 3: после MAX_FIX_ROUNDS — fallback templates (Step 5, P1).
-                # Пока — хард-фейл с понятным сообщением (как было раньше).
-                reason_parts = []
-                if errors:
-                    reason_parts.append("render: " + "; ".join(e[:120] for e in errors))
-                if _layout_gate_mode() == "strict" and blocking_layout:
-                    reason_parts.append(
-                        "layout-blocking: " + ", ".join(
-                            f"{k}({len(v)})" for k, v in blocking_layout.items()))
-                raise HyperFramesBrollError(
-                    f"B-roll (HyperFrames) не собрался после {MAX_FIX_ROUNDS} "
-                    f"повторов. {' | '.join(reason_parts)}"
-                )
+                outcome = _max_rounds_outcome(errors, _layout_gate_mode(), blocking_layout)
+                if outcome == "render_fail":
+                    # render-ошибки → без mp4 нет видео, хард-фейл (как было).
+                    raise HyperFramesBrollError(
+                        f"B-roll (HyperFrames) не собрался после {MAX_FIX_ROUNDS} "
+                        f"повторов. render: {'; '.join(e[:120] for e in errors)}"
+                    )
+                if outcome == "best_effort":
+                    # GPT-5 §9 Step 5: рендер ОК, но в strict осталась вёрстка-
+                    # blocking → отдаём ролик best-effort с предупреждением, НЕ
+                    # валим весь ролик из-за layout.
+                    best_effort = True
+                    logger.warning(
+                        f"[hf_broll] strict best-effort: layout-blocking осталось после "
+                        f"{MAX_FIX_ROUNDS} fix-round → отдаю как есть: "
+                        + ", ".join(f"{k}({len(v)})" for k, v in blocking_layout.items()))
+                    _notify(progress_cb,
+                            "⚠️ Графика собрана; критик отметил вёрстку пары сцен — отдаю как есть.")
+                break
 
             fix_round += 1
             # Для fix-prompt сцены: render-errors ВСЕГДА; layout-blocking — только в strict.
@@ -2055,6 +2106,16 @@ def generate_hyperframes_broll(
             shutil.copyfile(sb_src, Path(out_dir) / STORYBOARD_FILE)
     except Exception as e:
         logger.warning(f"[hf_broll] storyboard не скопирован в draft: {e}")
+
+    # GPT-5 Step 6: компактный quality-report для мониторинга gate (по нему решаем,
+    # стоит ли держать strict / где шумит детектор). Только когда детектор включён.
+    if _layout_gate_mode() != "off":
+        try:
+            _qr = _build_quality_report(N_INSERTS, layout_by_scene,
+                                        blocking_layout, fix_round, best_effort)
+            logger.info(f"[hf_broll] hf_quality: {json.dumps(_qr, ensure_ascii=False)}")
+        except Exception as _e:
+            logger.warning(f"[hf_broll] quality-report не собрался: {_e}")
 
     logger.info(
         f"[hf_broll] ✅ готово: {len(clips)} вставок в {out_dir}/hyperframes, "
