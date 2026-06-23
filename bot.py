@@ -21250,9 +21250,10 @@ async def ig_auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🔗 Авторизуй Instagram через Facebook:\n\n"
             f"{url}\n\n"
-            f"После авторизации скопируй code из URL (параметр ?code=...) "
-            f"и отправь его командой:\n"
-            f"/ig_code КОД",
+            f"Нажми на ссылку → войди в Facebook → разреши доступ.\n"
+            f"Токен сохранится автоматически — ничего копировать не нужно.\n\n"
+            f"(Если автоматически не сохранилось — скопируй code из URL и пришли "
+            f"командой /ig_code КОД вручную.)",
         )
     except Exception as e:
         logger.error(f"ig_auth error: {e}", exc_info=True)
