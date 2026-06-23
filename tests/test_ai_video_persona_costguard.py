@@ -90,7 +90,7 @@ def test_fullscreen_plan_short_unaffected():
 def test_generate_ai_broll_cost_guard_caps(monkeypatch, tmp_path):
     calls = {"kling": 0}
 
-    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
+    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
         calls["kling"] += 1
         return str(dest)
 

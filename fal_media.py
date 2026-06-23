@@ -53,6 +53,26 @@ SEEDANCE_TIMEOUT_S = 900            # hard deadline for fal subscribe (paid clou
 SEEDANCE_DOWNLOAD_TIMEOUT_S = 120   # socket timeout for clip download
 SEEDANCE_MIN_BYTES = 50_000         # below this the "mp4" is an error page / truncated → reject
 KLING_DOWNLOAD_RETRIES = 3          # retry transient CDN failures on clip download — render is PAID, an HTTP 500 must not lose the clip (фикс 22.06: терялся 1 из 2 клипов)
+KLING_RENDER_RETRIES = 2            # повтор САМОГО рендер-вызова на ТЕХНИЧЕСКИЕ ошибки fal (23.06: all clips failed = downstream_service_error)
+# Типы ошибок fal (док: fal.ai/docs/errors). Технические/инфра — безопасно
+# повторить (рендер не завершился → НЕ оплачен). content_policy_violation и
+# валидация (422) — финальные, повтор не поможет (и денег там нет).
+_FAL_RETRYABLE_TYPES = (
+    "downstream_service_error", "downstream_service_unavailable",
+    "internal_server_error", "generation_timeout",
+)
+
+
+def _classify_fal_error(exc) -> str:
+    """Категория ошибки fal по тексту исключения: 'content' (модерация —
+    повтор бесполезен, нужно править сценарий) / 'technical' (инфра —
+    можно повторить) / 'other'. Источник типов: fal.ai/docs/errors."""
+    msg = str(exc).lower()
+    if "content_polic" in msg:          # content_policy_violation
+        return "content"
+    if any(t in msg for t in _FAL_RETRYABLE_TYPES):
+        return "technical"
+    return "other"
 
 Duration = Literal[5, 10]
 Aspect = Literal["9:16", "16:9", "1:1"]
@@ -401,6 +421,7 @@ def generate_kling_video(
     duration: Duration = 5,
     aspect: Aspect = "9:16",
     negative_prompt: "str | None" = None,
+    errors_out: "list | None" = None,
 ) -> Optional[str]:
     """Generate one cinematic clip via Kling 3.0 Pro (text-to-video).
 
@@ -440,30 +461,51 @@ def generate_kling_video(
         f"neg={(negative_prompt or '')[:80]!r} key={_safe_key_preview()}"
     )
 
-    try:
-        result = fal_client.subscribe(
-            VIDEO_T2V_ENDPOINT,
-            arguments={
-                "prompt": prompt,
-                "duration": str(duration),
-                "aspect_ratio": aspect,
-                "generate_audio": False,   # звук монтаж выкидывает + audio off дешевле ($0.112 vs $0.168/с)
-                # negative_prompt: жёстко гасит текст/UI/артефакты рук/лиц (схема fal v3/pro
-                # принимает поле; дефолт fal — "blur, distort, low quality"). Шлём только если задан.
-                **({"negative_prompt": negative_prompt} if negative_prompt else {}),
-            },
-            with_logs=False,
-            start_timeout=SEEDANCE_TIMEOUT_S,
-            client_timeout=SEEDANCE_TIMEOUT_S,
-        )
-    except Exception as e:
-        logger.error(f"fal_media.generate_kling_video: API error: {type(e).__name__}: {str(e)[:200]}")
+    # Рендер-вызов С РЕТРАЕМ на ТЕХНИЧЕСКИЕ ошибки fal (downstream_service_error
+    # и т.п.) — БЕЗ двойного списания: повторяем ТОЛЬКО при сбое (рендер не
+    # завершился → fal не списал). Успех → break (никогда не повторяем).
+    # content_policy/валидация → мгновенный отказ (повтор не поможет).
+    result = None
+    last_cat = "other"
+    for attempt in range(1, KLING_RENDER_RETRIES + 1):
+        try:
+            result = fal_client.subscribe(
+                VIDEO_T2V_ENDPOINT,
+                arguments={
+                    "prompt": prompt,
+                    "duration": str(duration),
+                    "aspect_ratio": aspect,
+                    "generate_audio": False,   # звук монтаж выкидывает + audio off дешевле ($0.112 vs $0.168/с)
+                    # negative_prompt: жёстко гасит текст/UI/артефакты рук/лиц (схема fal v3/pro
+                    # принимает поле; дефолт fal — "blur, distort, low quality"). Шлём только если задан.
+                    **({"negative_prompt": negative_prompt} if negative_prompt else {}),
+                },
+                with_logs=False,
+                start_timeout=SEEDANCE_TIMEOUT_S,
+                client_timeout=SEEDANCE_TIMEOUT_S,
+            )
+            break
+        except Exception as e:
+            last_cat = _classify_fal_error(e)
+            logger.error(
+                f"fal_media.generate_kling_video: API error "
+                f"(attempt {attempt}/{KLING_RENDER_RETRIES}, {last_cat}): "
+                f"{type(e).__name__}: {str(e)[:200]}")
+            if last_cat == "technical" and attempt < KLING_RENDER_RETRIES:
+                time.sleep(3 * attempt)   # backoff 3с/6с — провайдер моргнул, повторим
+                continue
+            break  # content / валидация / other ИЛИ исчерпали попытки — финал
+    if result is None:
+        if errors_out is not None:
+            errors_out.append(last_cat)
         return None
 
     video = result.get("video") or {}
     url = video.get("url") if isinstance(video, dict) else None
     if not url:
         logger.error(f"fal_media.generate_kling_video: no video.url in result: {result!r}")
+        if errors_out is not None:
+            errors_out.append("technical")
         return None
 
     # Atomic + validated download С РЕТРАЯМИ: рендер оплачен — транзиентный
@@ -472,6 +514,8 @@ def generate_kling_video(
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     if not _download_clip_with_retries(url, part):
+        if errors_out is not None:
+            errors_out.append("technical")
         return None
     part.replace(dest)
 

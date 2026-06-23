@@ -360,6 +360,64 @@ async def generate_broll_preview(
     )
 
 
+def _av_fail_text(category: str) -> str:
+    """Сообщение при полном сбое AI-видео (Kling) — по типу ошибки.
+
+    «technical» — сбой на стороне fal/Kling (инфра): уже сделали 2 попытки,
+    можно повторить ещё или собрать ролик другим источником.
+    «content» — сценарий зацепил модерацию нейросети (чувствительные слова/
+    темы): повтор бесплатно НЕ поможет — надо править текст или сменить
+    источник. Кнопки «Повторить» в этом случае НЕ даём (см. _av_fail_keyboard)."""
+    if category == "content":
+        return (
+            "⚠️ <b>AI-видео не сгенерировалось — сработала модерация Kling.</b>\n\n"
+            "Нейросеть отклонила сценарий (чувствительные слова или темы — "
+            "например, насилие, бренды, реальные персоны, политика). "
+            "Повторная генерация по тому же тексту даст тот же отказ.\n\n"
+            "<b>Что делать:</b> вернись к сценарию и переформулируй спорные "
+            "места — либо собери ролик из графики или библиотеки клипов "
+            "(там модерации нет)."
+        )
+    return (
+        "⚠️ <b>AI-видео не сгенерировалось — сбой на стороне Kling.</b>\n\n"
+        "Это техническая ошибка сервиса генерации (не твой сценарий и не "
+        "баланс). Бот уже попробовал дважды. Так бывает при перегрузке "
+        "сервиса — обычно помогает повтор через минуту.\n\n"
+        "<b>Что делать:</b> нажми «Повторить» — или собери ролик из графики "
+        "/ библиотеки клипов, если повтор снова не сработает."
+    )
+
+
+def _av_fail_keyboard(draft_id: str, category: str) -> InlineKeyboardMarkup:
+    """Кнопки восстановления при сбое AI-видео. Все ведут на существующие
+    b2src-режимы (parse_source_cb → handle_broll_source), новых диспетчеров
+    в bot.py не требуется.
+
+    «Повторить» (повторная генерация Kling) показываем ТОЛЬКО при технической
+    ошибке: при полном сбое ни один клип не отдал результат → списания не было,
+    поэтому повтор не приводит к двойному списанию. При content-ошибке повтор
+    бесполезен — кнопку не даём, ведём на правку сценария / другой источник."""
+    rows = []
+    if category != "content":
+        rows.append([InlineKeyboardButton(
+            "🔁 Повторить генерацию",
+            callback_data=f"b2src:{SourceMode.AI_VIDEO_GO}:{draft_id}")])
+    else:
+        rows.append([InlineKeyboardButton(
+            "✏️ Править сценарий",
+            callback_data=f"b2scr:edit:{draft_id}")])
+    rows.append([InlineKeyboardButton(
+        "🎨 Собрать из графики",
+        callback_data=f"b2src:{SourceMode.HF_ONLY}:{draft_id}")])
+    rows.append([InlineKeyboardButton(
+        "🎞 Взять из библиотеки",
+        callback_data=f"b2src:{SourceMode.AUTO}:{draft_id}")])
+    rows.append([InlineKeyboardButton(
+        "⬅️ К выбору источника",
+        callback_data=f"b2src:{SourceMode.AI_VIDEO_MENU}:{draft_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def handle_broll_source(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -585,8 +643,15 @@ async def handle_broll_source(
                 ai_video_broll.generate_ai_broll, draft.script_text, work,
                 duration=plan["clip_len"], target_clips=plan["n_clips"])
         except Exception as e:
-            logger.error(f"[broll] ai_video failed: {e}", exc_info=True)
-            await status.edit_text(f"⚠️ Не удалось сгенерировать AI-видео: {str(e)[:200]}")
+            # Категория: AiVideoError несёт .category (content/technical); любой
+            # другой Exception считаем техническим (инфра/код), не виним сценарий.
+            category = getattr(e, "category", None) or "technical"
+            logger.error(f"[broll] ai_video failed ({category}): {e}", exc_info=True)
+            await status.edit_text(
+                _av_fail_text(category),
+                parse_mode="HTML",
+                reply_markup=_av_fail_keyboard(draft_id, category),
+            )
             return
         items = hf_items_from_clips(clips)
         if not items:

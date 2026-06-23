@@ -42,7 +42,16 @@ logger = logging.getLogger(__name__)
 
 
 class AiVideoError(Exception):
-    """Raised when the engine cannot produce a usable result."""
+    """Raised when the engine cannot produce a usable result.
+
+    category: "content" — отклонено модерацией fal (повтор бесполезен, надо
+    править сценарий) · "technical" — сбой инфраструктуры fal (повтор может
+    помочь) · None — категория неизвестна.
+    """
+
+    def __init__(self, message, category=None):
+        super().__init__(message)
+        self.category = category
 
 
 # --- Director config ------------------------------------------------------
@@ -375,18 +384,24 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
 
     _notify(progress_cb, f"🎥 Генерю {len(plans)} кинематографичных клипа (Kling 3.0 Pro, ~{duration}с)…")
     paths: list[Path] = []
+    clip_errors: list[str] = []
     for i, clip in enumerate(plans, start=1):
         dest = clips_dir / f"ai_{i:02d}.mp4"
         res = fal_media.generate_kling_video(
             clip["prompt"], dest, duration=duration,
-            negative_prompt=clip.get("negative_prompt"))
+            negative_prompt=clip.get("negative_prompt"), errors_out=clip_errors)
         if res:
             paths.append(Path(res))
         else:
             logger.warning(f"ai_video: clip {i}/{len(plans)} failed, skipping")
 
     if not paths:
-        raise AiVideoError("all Kling clips failed")
+        # Категория для сообщения юзеру: "content" (модерация fal — повтор
+        # бесполезен, надо править сценарий) приоритетнее "technical" (инфра
+        # fal — повтор может помочь). Если хоть один клип отклонён по контенту,
+        # вся пачка идёт по одному сценарию → классифицируем как content.
+        category = "content" if "content" in clip_errors else "technical"
+        raise AiVideoError("all Kling clips failed", category=category)
 
     cost = len(paths) * duration * KLING_PRICE_PER_SEC_USD
     logger.info(f"ai_video: {len(paths)}/{len(plans)} clips ready, est cost ${cost:.2f}")

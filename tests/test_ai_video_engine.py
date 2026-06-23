@@ -32,7 +32,7 @@ def _patch_kling(monkeypatch, fail_calls=()):
     monkeypatch.setattr(ai_video_broll.fal_media, "kling_ready", lambda: (True, ""))
     state = {"n": 0}
 
-    def gen(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
+    def gen(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
         state["n"] += 1
         if state["n"] in fail_calls:
             return None

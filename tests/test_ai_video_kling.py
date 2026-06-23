@@ -64,7 +64,7 @@ def test_fullscreen_plan_cost_kling_and_no_overshoot():
 def test_generate_ai_broll_calls_kling(monkeypatch, tmp_path):
     calls = {"kling": 0, "seedance": 0}
 
-    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
+    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
         calls["kling"] += 1
         calls["neg"] = negative_prompt
         return str(dest)
@@ -202,7 +202,7 @@ def test_generate_ai_broll_persists_plan(monkeypatch, tmp_path):
     monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
     monkeypatch.setattr(
         A.fal_media, "generate_kling_video",
-        lambda prompt, dest, duration=5, aspect="9:16", negative_prompt=None:
+        lambda prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None:
             (Path(dest).write_bytes(b"x"), str(dest))[1])
     monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [
         {"beat": "x", "prompt": "Multiple shots. p1", "negative_prompt": "text"},
@@ -231,7 +231,7 @@ def test_regen_fills_only_missing_clips(monkeypatch, tmp_path):
 
     rendered = []
 
-    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
+    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
         rendered.append(prompt)
         Path(dest).write_bytes(b"y")
         return str(dest)

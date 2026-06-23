@@ -175,7 +175,7 @@ def test_engine_threads_max_clips_and_caps_kling_calls(monkeypatch, tmp_path):
     monkeypatch.setattr(ai_video_broll, "plan_clips", director_spy)
     calls = {"n": 0}
 
-    def kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
+    def kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
         calls["n"] += 1
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
         Path(dest).write_bytes(b"x")
@@ -195,7 +195,7 @@ def test_engine_forwards_prompt_and_duration_to_kling(monkeypatch, tmp_path):
                         business_context=None: [{"prompt": "PROMPT_X", "beat": "b"}])
     captured = {}
 
-    def kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None):
+    def kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
         captured["prompt"] = prompt
         captured["duration"] = duration
         Path(dest).parent.mkdir(parents=True, exist_ok=True)
