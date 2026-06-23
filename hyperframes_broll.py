@@ -583,9 +583,24 @@ HF_SINGLESHOT_MODEL = os.getenv("HF_SINGLESHOT_MODEL", "claude-opus-4-8")
 SINGLESHOT_MAX_TOKENS = 16000  # сцена ~13KB ≈ 4-5k токенов, запас ×3
 
 
+def _active_reference_pack_path() -> Path:
+    """Per-tenant reference_pack (C2): `reference_pack.<tenant_id>.md` если
+    есть, иначе дефолт `reference_pack.md` (симметрично style_contract).
+
+    tenant.active_tenant_id() — lazy import (модуль остаётся standalone)."""
+    try:
+        import tenant
+        tid = tenant.active_tenant_id()
+    except Exception:
+        return HF_PROJECT / REFERENCE_PACK_FILE
+    cand = HF_PROJECT / f"reference_pack.{tid}.md"
+    return cand if cand.exists() else HF_PROJECT / REFERENCE_PACK_FILE
+
+
 def _load_inline_refs() -> tuple[str, str]:
-    """(reference_pack, index_sample) из HF_PROJECT — инлайн-контекст промпта."""
-    ref_p = HF_PROJECT / REFERENCE_PACK_FILE
+    """(reference_pack, index_sample) из HF_PROJECT — инлайн-контекст промпта.
+    reference_pack резолвится per-tenant (C2)."""
+    ref_p = _active_reference_pack_path()
     idx_p = HF_PROJECT / "index.html"
     if not ref_p.exists():
         raise HyperFramesBrollError(f"Нет {ref_p} — single-shot промпт неполон")
@@ -923,7 +938,7 @@ async def _run_build_phase_async(storyboard: dict, job) -> float:
 
 
 def _run_motion_gate() -> None:
-    """Прогон motion smoke-test на всех 6 scene_NN.html в HF_PROJECT.
+    """Прогон motion smoke-test на всех N scene_NN.html в HF_PROJECT (N=N_INSERTS).
 
     Вызывается ПОСЛЕ build, ДО render — ловит scene_04-style баги
     (timeline зарегистрирован, но визуально статичен) до того как мы
