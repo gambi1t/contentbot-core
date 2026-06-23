@@ -46,8 +46,35 @@ _GEN_LOCK = threading.Lock()
 HF_PROJECT = Path(
     os.getenv("HYPERFRAMES_PROJECT_DIR", "/home/maksim-bot/hyperframes-broll")
 )
-N_INSERTS = 6
+N_INSERTS = 6  # дефолт/фолбэк; реальное число — _scene_count_for_script() под длину
 SCENE_FILES = [f"scene_{i:02d}.html" for i in range(1, N_INSERTS + 1)]
+
+# A (масштаб под длину): раньше всегда 6 сцен — заточено под ~30с озвучки, на
+# 50-60с не хватало материала → монтаж дублировал клипы. Считаем число сцен по
+# длине озвучки (через число слов ≈ темп речи RU ~2.3 сл/с), ~14 слов на сцену
+# (≈6с экранного времени), clamp [5..10] (пол — ритм, потолок — стоимость/время).
+HF_MIN_SCENES = 5
+HF_MAX_SCENES = 10
+HF_WORDS_PER_SCENE = 14
+
+
+def _scene_count_for_script(script_text: str) -> int:
+    """Сколько HF-сцен генерить под данный сценарий. Чистая функция (unit-tested).
+
+    Источник длины — число слов транскрипта (≈ длина озвучки): сигнатуру
+    generate_hyperframes_broll менять не нужно. ~30с→~5, ~50с→~8, ~60с→~10 (cap)."""
+    words = len((script_text or "").split())
+    if words <= 0:
+        return 6  # дефолт как раньше
+    n = round(words / HF_WORDS_PER_SCENE)
+    return max(HF_MIN_SCENES, min(HF_MAX_SCENES, n))
+
+
+def _scene_files_for(n: int) -> list[str]:
+    """scene_01..scene_NN.html для заданного числа сцен (динамика вместо SCENE_FILES)."""
+    return [f"scene_{i:02d}.html" for i in range(1, n + 1)]
+
+
 STORYBOARD_FILE = "storyboard.json"     # фаза 1 пишет сюда (gated валидатором)
 REFERENCE_PACK_FILE = "reference_pack.md"  # curated-выжимка скилла (деплоится в HF_PROJECT)
 MAX_STORYBOARD_ATTEMPTS = 3             # генерация storyboard + 2 fix-round
@@ -164,23 +191,29 @@ def _read_storyboard() -> dict | None:
 
 
 def _build_storyboard_prompt(script_text: str) -> str:
-    """Промпт фазы 1: Claude планирует 6 РАЗНЫХ сцен → storyboard.json.
+    """Промпт фазы 1: Claude планирует N РАЗНЫХ сцен → storyboard.json.
+    Число сцен N = N_INSERTS (выставлен per-run под длину сценария, A).
     БЕЗ HTML. Автономно (обход approval-gate скилла)."""
     archetypes = ", ".join(sorted(_sv.BUSINESS_ARCHETYPES))
     motions = ", ".join(sorted(_sv.MOTION_FAMILIES))
     styles = ", ".join(sorted(_sv.VISUAL_STYLES))
+    n = N_INSERTS
+    last = f"scene_{n:02d}"
+    min_uniq = max(_sv.MIN_UNIQUE_ARCHETYPES, round(n * 0.7))
+    max_chart = max(_sv.MAX_CHART_ARCHETYPES, round(n / 3))
     return f"""Ты — арт-директор автономного production-пайплайна HyperFrames.
 Это АВТОНОМНЫЙ режим (AUTO_APPROVE): не жди подтверждения пользователя, НЕ
 используй AskUserQuestion и никаких интерактивных вопросов — выполни задачу
 до конца сам.
 
-ЗАДАЧА ФАЗЫ 1: НЕ пиши HTML. Составь раскадровку 6 графических B-roll-вставок
-под сценарий и запиши её в файл `storyboard.json` в корне проекта.
+ЗАДАЧА ФАЗЫ 1: НЕ пиши HTML. Составь раскадровку {n} графических B-roll-вставок
+под сценарий и запиши её в файл `storyboard.json` в корне проекта. Число вставок
+({n}) подобрано под длину озвучки — НЕ меняй его.
 
 ОБЯЗАТЕЛЬНО прочитай `reference_pack.md` (в корне проекта) — там визуальный
 вокабуляр, архетипы, анти-паттерны, правила разнообразия.
 
-СЦЕНАРИЙ (озвучка ~30 секунд):
+СЦЕНАРИЙ (озвучка целиком — раздели её на {n} визуальных моментов):
 ─────────────────────────────────────
 {script_text}
 ─────────────────────────────────────
@@ -201,18 +234,18 @@ def _build_storyboard_prompt(script_text: str) -> str:
       "primary_text": "<главный текст на экране, 3..80 симв>",
       "reason": "<почему этот архетип лучше всего иллюстрирует момент, ≥20 симв>"
     }},
-    ... ещё 5 сцен (scene_02..scene_06)
+    ... ещё {n - 1} сцен (scene_02..{last})
   ]
 }}
 
 ПРАВИЛА РАЗНООБРАЗИЯ (иначе раскадровка не пройдёт валидацию):
-- Ровно 6 сцен, id по порядку scene_01..scene_06.
+- Ровно {n} сцен, id по порядку scene_01..{last}.
 - Соседние сцены НЕ повторяют business_archetype.
-- ≥5 уникальных business_archetype из 6 (борьба с монотонностью!).
+- ≥{min_uniq} уникальных business_archetype из {n} (борьба с монотонностью!).
 - ≥4 уникальных motion_family, ≥2 разных density, ≥2 разных scale_profile.
-- Архетипы-графики (cashflow_timeline, table_snapshot, calendar_grid) — ≤2 суммарно.
+- Архетипы-графики (cashflow_timeline, table_snapshot, calendar_grid) — ≤{max_chart} суммарно.
 - НЕ 3 сцены подряд с одинаковой density/scale_profile (визуальный ритм).
-- scene_06 = final_cta (финальный призыв/итог).
+- {last} = final_cta (финальный призыв/итог).
 - Каждый business_archetype выбирай ПОД смысл фрагмента сценария.
 
 После записи storyboard.json — закончи. HTML напишешь в следующей фазе."""
@@ -241,7 +274,7 @@ def _run_storyboard_phase(script_text: str) -> tuple[dict, float]:
         if sb is None:
             errors = ["storyboard.json не создан или не является валидным JSON"]
         else:
-            ok, errors = _sv.validate_storyboard(sb)
+            ok, errors = _sv.validate_storyboard(sb, n_scenes=N_INSERTS)
             if ok:
                 n_arch = len({s.get("business_archetype") for s in sb["scenes"]})
                 logger.info(
@@ -1688,6 +1721,16 @@ def generate_hyperframes_broll(
         )
     total_cost = 0.0
     try:
+        # A: число сцен под длину сценария (раньше всегда 6 → на 50-60с не хватало
+        # материала, монтаж дублировал). Под _GEN_LOCK (одна генерация за раз)
+        # безопасно выставить модульные глобалы — их читают SCENE_FILES-потребители,
+        # промпт раскадровки и валидатор (через N_INSERTS).
+        global N_INSERTS, SCENE_FILES
+        N_INSERTS = _scene_count_for_script(script_text)
+        SCENE_FILES = _scene_files_for(N_INSERTS)
+        logger.info(
+            f"[hf_broll] сцен под длину: {N_INSERTS} "
+            f"(слов={len((script_text or '').split())})")
         ensure_git_baseline()
 
         # ── ФАЗА 1: storyboard (machine-gated diversity) ─────────────────

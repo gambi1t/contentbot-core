@@ -74,6 +74,63 @@ def _golden() -> dict:
     }
 
 
+def _golden_n(n: int) -> dict:
+    """Валидный storyboard на N сцен (для A — масштаб под длину). Разнообразие
+    архетипов/motion/density/scale соблюдено, последняя сцена = final_cta."""
+    arch_pool = ["hero_number", "cashflow_timeline", "reserve_gauge", "before_after_cards",
+                 "checklist", "risk_matrix", "table_snapshot", "formula_card", "stack_layers", "path_map"]
+    motions = sorted(SV.MOTION_FAMILIES)
+    styles = sorted(SV.VISUAL_STYLES)
+    dens = ["sparse", "balanced", "dense"]
+    scales = ["hero", "medium", "compact"]
+    scenes = []
+    for i in range(n - 1):
+        scenes.append({
+            "id": f"scene_{i+1:02d}", "business_archetype": arch_pool[i % len(arch_pool)],
+            "hf_technique": "svg_path_drawing", "visual_style": styles[i % len(styles)],
+            "motion_family": motions[i % len(motions)], "density": dens[i % 3],
+            "scale_profile": scales[i % 3], "primary_text": f"Текст сцены {i+1}",
+            "script_beat": "Фрагмент сценария достаточной длины для валидатора здесь.",
+            "reason": "Этот архетип лучше всего иллюстрирует данный момент сценария.",
+        })
+    scenes.append({
+        "id": f"scene_{n:02d}", "business_archetype": "final_cta",
+        "hf_technique": "kinetic_typography", "visual_style": "maximalist_type",
+        "motion_family": "kinetic_type", "density": "sparse", "scale_profile": "hero",
+        "primary_text": "Подпишись на канал",
+        "script_beat": "Финальный призыв подписаться на канал автора здесь.",
+        "reason": "Финальная сцена — призыв к действию, итог ролика.",
+    })
+    return {"version": "1.0", "scenes": scenes}
+
+
+def test_parameterized_scene_count(errors):
+    print("\n-- A: validate_storyboard(n_scenes=8) — 8 сцен ок, 6 при n=8 fail --")
+    ok8, e8 = SV.validate_storyboard(_golden_n(8), n_scenes=8)
+    _assert(ok8, f"8 валидных сцен проходят при n_scenes=8 (errs={e8})", errors)
+    ok6, e6 = SV.validate_storyboard(_golden(), n_scenes=8)
+    _assert(not ok6 and any("8" in e for e in e6), f"6 сцен при n_scenes=8 → fail (errs={e6})", errors)
+    _assert(SV.validate_storyboard(_golden_n(5), n_scenes=5)[0], "5 сцен ок при n_scenes=5", errors)
+
+
+def test_default_still_6(errors):
+    print("\n-- A: дефолт n_scenes=6 (backward-compat) --")
+    ok, e = SV.validate_storyboard(_golden())  # без n_scenes
+    _assert(ok, f"golden(6) проходит по дефолту (errs={e})", errors)
+
+
+def test_diversity_scales_with_count(errors):
+    print("\n-- A: для 8 сцен порог уникальных архетипов выше (мало → fail) --")
+    d = _golden_n(8)
+    # 4 уникальных архетипа на 8 сцен (не-соседние повторы) → ниже порога для n=8
+    for idx, a in [(0, "hero_number"), (2, "hero_number"), (4, "hero_number"),
+                   (1, "checklist"), (3, "checklist"), (5, "checklist"), (6, "stack_layers")]:
+        d["scenes"][idx]["business_archetype"] = a
+    ok, e = SV.validate_storyboard(d, n_scenes=8)
+    _assert(not ok and any("уникальн" in x.lower() or "архетип" in x.lower() for x in e),
+            f"4 уникальных на 8 сцен → fail (errs={e})", errors)
+
+
 def test_golden_valid(errors):
     print("\n-- эталонный storyboard валиден --")
     ok, errs = SV.validate_storyboard(_golden())
@@ -195,6 +252,9 @@ def main():
     if not hasattr(SV, "validate_storyboard"):
         print("\nFAIL: модуль не готов")
         return 1
+    test_parameterized_scene_count(errors)
+    test_default_still_6(errors)
+    test_diversity_scales_with_count(errors)
     test_golden_valid(errors)
     test_wrong_scene_count(errors)
     test_bad_enum(errors)

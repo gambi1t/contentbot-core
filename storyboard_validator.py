@@ -63,13 +63,20 @@ PRIMARY_TEXT_MIN, PRIMARY_TEXT_MAX = 3, 80
 SCRIPT_BEAT_MIN = 20
 
 
-def validate_storyboard(data: dict) -> tuple[bool, list[str]]:
+def validate_storyboard(data: dict, n_scenes: int = N_SCENES) -> tuple[bool, list[str]]:
     """Проверяет storyboard на схему + diversity-правила.
+
+    n_scenes — ожидаемое число сцен (A: масштаб под длину видео; дефолт N_SCENES=6
+    для backward-compat). Пороги разнообразия масштабируются под n_scenes, чтобы
+    качество не падало на длинных роликах.
 
     Возвращает (ok, errors). errors — человекочитаемые строки (на русском),
     которые можно отдать Клоду на исправление в fix-round.
     """
     errors: list[str] = []
+    # Пороги под фактическое число сцен (для 6 — как было: 5 и 2).
+    min_uniq_arch = max(MIN_UNIQUE_ARCHETYPES, round(n_scenes * 0.7))
+    max_chart = max(MAX_CHART_ARCHETYPES, round(n_scenes / 3))
 
     if not isinstance(data, dict):
         return False, ["storyboard должен быть JSON-объектом"]
@@ -79,8 +86,8 @@ def validate_storyboard(data: dict) -> tuple[bool, list[str]]:
         return False, ["нет массива 'scenes'"]
 
     # ── 1. Кол-во сцен ───────────────────────────────────────────────────
-    if len(scenes) != N_SCENES:
-        errors.append(f"должно быть ровно {N_SCENES} сцен, а найдено {len(scenes)}")
+    if len(scenes) != n_scenes:
+        errors.append(f"должно быть ровно {n_scenes} сцен, а найдено {len(scenes)}")
 
     # ── 2. Поля + enum по каждой сцене ───────────────────────────────────
     for i, sc in enumerate(scenes):
@@ -119,7 +126,7 @@ def validate_storyboard(data: dict) -> tuple[bool, list[str]]:
 
     # Если структура совсем битая (нет 6 валидных сцен) — diversity не считаем
     valid_scenes = [s for s in scenes if isinstance(s, dict)]
-    if len(valid_scenes) != N_SCENES:
+    if len(valid_scenes) != n_scenes:
         return (len(errors) == 0), errors
 
     arts = [s.get("business_archetype") for s in valid_scenes]
@@ -137,10 +144,10 @@ def validate_storyboard(data: dict) -> tuple[bool, list[str]]:
 
     # ── 4. Разнообразие архетипов / motion / density / scale ─────────────
     uniq_arts = len({a for a in arts if a})
-    if uniq_arts < MIN_UNIQUE_ARCHETYPES:
+    if uniq_arts < min_uniq_arch:
         errors.append(
             f"мало разнообразия: {uniq_arts} уникальных business_archetype, "
-            f"нужно ≥{MIN_UNIQUE_ARCHETYPES} из {N_SCENES} (монотонность)"
+            f"нужно ≥{min_uniq_arch} из {n_scenes} (монотонность)"
         )
     uniq_motion = len({m for m in motions if m})
     if uniq_motion < MIN_UNIQUE_MOTION:
@@ -149,23 +156,23 @@ def validate_storyboard(data: dict) -> tuple[bool, list[str]]:
             f"нужно ≥{MIN_UNIQUE_MOTION}"
         )
     if len({d for d in densities if d}) < MIN_UNIQUE_DENSITY:
-        errors.append(f"нужно ≥{MIN_UNIQUE_DENSITY} разных density на 6 сцен")
+        errors.append(f"нужно ≥{MIN_UNIQUE_DENSITY} разных density на {n_scenes} сцен")
     if len({s for s in scales if s}) < MIN_UNIQUE_SCALE:
-        errors.append(f"нужно ≥{MIN_UNIQUE_SCALE} разных scale_profile на 6 сцен")
+        errors.append(f"нужно ≥{MIN_UNIQUE_SCALE} разных scale_profile на {n_scenes} сцен")
 
-    # ── 5. Чарты ≤2 (анти-монотонность графиков) ─────────────────────────
+    # ── 5. Чарты ≤max (анти-монотонность графиков) ───────────────────────
     n_charts = sum(1 for a in arts if a in CHART_ARCHETYPES)
-    if n_charts > MAX_CHART_ARCHETYPES:
+    if n_charts > max_chart:
         errors.append(
             f"слишком много графиков-чартов: {n_charts} "
-            f"({', '.join(sorted(CHART_ARCHETYPES))}), максимум {MAX_CHART_ARCHETYPES}"
+            f"({', '.join(sorted(CHART_ARCHETYPES))}), максимум {max_chart}"
         )
 
     # ── 6. Финал — CTA ───────────────────────────────────────────────────
     if arts[-1] != "final_cta":
         errors.append(
-            f"scene_06: финальная сцена должна быть 'final_cta' (призыв/итог), "
-            f"а не '{arts[-1]}'"
+            f"scene_{n_scenes:02d}: финальная сцена должна быть 'final_cta' "
+            f"(призыв/итог), а не '{arts[-1]}'"
         )
 
     # ── 7. Не 3 подряд одинаковой density / scale (визуальный ритм) ───────
