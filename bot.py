@@ -3880,12 +3880,16 @@ def generate_cover(cover_text: str, output_path: str, avatar_override: str = Non
 
 # Пути media/covers — в /srv/ (стандартное место для раздаваемых данных:
 # nginx www-data туда имеет доступ; /home/<user>/ закрыта правами).
-# Папки принадлежат maksim-bot (бот пишет), chmod 755 (nginx читает).
-# Раздаются nginx по поддомену maksim-bot.panferov-ai.ru (vhost + SSL).
-COVERS_DIR = Path("/srv/bot-covers-maksim")
-COVERS_BASE_URL = "https://maksim-bot.panferov-ai.ru/covers"
-MEDIA_DIR = Path("/srv/bot-media-maksim")
-MEDIA_BASE_URL = "https://maksim-bot.panferov-ai.ru/media"
+# Папки/URL per-tenant (бот пишет, nginx читает). 23.06: были захардкожены на
+# maksim-bot → у panferov обложка Reels (ig_cover_url через save_media_permanent →
+# MEDIA_BASE_URL) уходила на сервер Максима, Meta не могла её скачать → IG-публикация
+# падала 2207052. Домен/папка теперь из tenant (panferov → bot.panferov-ai.ru +
+# /srv/bot-{covers,media}, совпадает с nginx alias). Максим (default) — без изменений.
+_IS_PANFEROV = _tenant.active_tenant_id() == "panferov"
+COVERS_DIR = Path("/srv/bot-covers" if _IS_PANFEROV else "/srv/bot-covers-maksim")
+COVERS_BASE_URL = f"https://{_tenant.public_domain()}/covers"
+MEDIA_DIR = Path("/srv/bot-media" if _IS_PANFEROV else "/srv/bot-media-maksim")
+MEDIA_BASE_URL = f"https://{_tenant.public_domain()}/media"
 
 
 def save_cover_permanent(source_path: str, card_title: str = "") -> str:
