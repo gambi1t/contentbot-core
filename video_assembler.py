@@ -61,6 +61,29 @@ def _avatar_crop_y(brand_name: str) -> int:
     return _AVATAR_CROP_Y_BY_BRAND.get(brand_name, DEFAULT_AVATAR_CROP_Y)
 
 
+def montage_brand_name() -> str:
+    """brand_name для assemble_auto_montage, выведенный из активного тенанта.
+
+    Геометрия аватара per-brand (см. ``_AVATAR_CROP_Y_BY_BRAND``): maksim →
+    "maksim" (crop_y fallback 260, голова выше в split-кадре), panferov / default
+    / прочие → их tenant_id, для которого fallback падает на
+    ``DEFAULT_AVATAR_CROP_Y`` (280). Раньше selfie-флоу слал "maksim" ЖЁСТКО →
+    panferov получал Максимову геометрию (260 вместо 280).
+
+    Резолв тенанта — как в ``subtitle_burner._active_canonical`` /
+    ``selfie.broll_picker`` (``tenant.active_tenant_id()``, env
+    ``TENANT_ID_EXPECTED``). Lazy import — модуль остаётся standalone-импортируемым
+    для dev-скриптов ``_assemble_*.py`` (они передают brand_name явно). Бренд
+    "shoes" сюда не попадает: он задаётся явно другими вызовами (product-фото),
+    а selfie-аватар привязан к тенанту, не к продуктовому бренду."""
+    try:
+        import tenant
+        tid = (tenant.active_tenant_id() or "").strip()
+    except Exception:
+        tid = ""
+    return tid or "default"
+
+
 # ── Automatic avatar head framing (avatar-agnostic) ─────────────────────────
 # Instead of a hand-tuned crop_y per avatar, detect the head on a sampled frame
 # and compute the crop so the head always has the same headroom in the bottom
@@ -1754,6 +1777,146 @@ def build_bookend_montage_plan(
     plan.append({"start": round(t, 3), "end": round(D, 3),
                  "layout": "avatar_full", "broll_index": None})
     return plan
+
+
+def validate_montage_plan(plan: list[dict], avatar_duration: float,
+                          n_broll: int | None = None) -> list[str]:
+    """Проверка монтажного плана (B-roll sync, GPT-5 §12.5). Возвращает список
+    нарушений (пусто = ок): сортировка/смежность, неотрицательные длительности,
+    в пределах [0, D], broll-сегмент имеет индекс, покрытие [0, D] без дыр."""
+    errors: list[str] = []
+    if not plan:
+        return ["план пуст"]
+    D = float(avatar_duration)
+    prev_end = 0.0
+    for i, seg in enumerate(plan):
+        s, e = seg.get("start"), seg.get("end")
+        if s is None or e is None:
+            errors.append(f"seg[{i}]: нет start/end"); continue
+        if e <= s:
+            errors.append(f"seg[{i}]: неположительная длительность ({s}→{e})")
+        if s < -0.02 or e > D + 0.05:
+            errors.append(f"seg[{i}]: вне [0,{D}] ({s}→{e})")
+        if abs(s - prev_end) > 0.05:
+            errors.append(f"seg[{i}]: разрыв/перехлёст (пред.конец {prev_end}, старт {s})")
+        if seg.get("layout") in ("split", "broll_full") and seg.get("broll_index") is None:
+            errors.append(f"seg[{i}]: B-roll-сегмент без broll_index")
+        bi = seg.get("broll_index")
+        if bi is not None and n_broll is not None and not (0 <= bi < n_broll):
+            errors.append(f"seg[{i}]: broll_index {bi} вне [0,{n_broll})")
+        prev_end = e
+    if abs(plan[0].get("start", 0) - 0.0) > 0.02:
+        errors.append("план не начинается с 0")
+    if abs(prev_end - D) > 0.05:
+        errors.append(f"план не покрывает до конца ({prev_end} vs {D})")
+    return errors
+
+
+def _normalize_insert_window(center: float, beat_dur: float, D: float,
+                             min_d: float, target_d: float, max_d: float,
+                             pre: float, post: float) -> tuple[float, float]:
+    """Окно вставки вокруг центра beat'а: нормализованная длина (min/target/max,
+    GPT-5 §6), не выходит за [0, D]. Короткий beat → расширяем до min; длинный →
+    не раздуваем больше max (HF-клип ~5с)."""
+    if beat_dur > 0:
+        dur = max(min_d, min(max_d, beat_dur + pre + post))
+    else:
+        dur = target_d
+    start = max(0.0, min(center - dur / 2, D - min_d))
+    end = min(start + dur, D)
+    return start, end
+
+
+def build_content_aligned_hf_plan(
+    avatar_duration: float,
+    scenes: list[dict],
+    selfie_words: list[dict],
+    *,
+    min_insert_dur: float = 2.2,
+    target_insert_dur: float = 3.8,
+    max_insert_dur: float = 5.2,
+    min_gap: float = 0.35,
+    pre_roll: float = 0.25,
+    post_roll: float = 0.4,
+    fallback_ratio: float = 0.55,
+) -> tuple[list[dict] | None, dict]:
+    """Content-aligned монтажный план: каждая HF-сцена ставится на таймкод, КОГДА
+    произносится её script_beat (B-roll sync P0, CTO+GPT-5 ревью 23.06).
+
+    Возвращает (plan | None, report). None → caller откатывается на bookend
+    (matched_ratio < fallback_ratio). broll_index = порядковый индекс сцены
+    (caller гарантирует, что клипы лежат в том же порядке).
+
+    Несматченные сцены (редко — beat'ы у нас почти дословны) ставятся
+    пропорционально их позиции в раскадровке (частичный фолбэк, не all-or-nothing).
+    Слой: scene_01 (хук) и final_cta → broll_full, остальное → split (P0;
+    таблица по архетипам — P1).
+    """
+    import hyperframes_alignment as _al
+    D = float(avatar_duration)
+    n = len(scenes)
+    if n == 0 or not selfie_words:
+        return None, {"reason": "no scenes or words", "decision": "fallback_bookend"}
+
+    res = _al.align_storyboard_to_words(scenes, selfie_words)
+    timings = res["timings"]
+    report = dict(res["report"])
+    if report["matched_ratio"] < fallback_ratio:
+        report["decision"] = "fallback_bookend"
+        return None, report
+
+    # кандидаты-вставки для всех сцен
+    cands: list[dict] = []
+    for idx, (sc, t) in enumerate(zip(scenes, timings)):
+        archetype = sc.get("business_archetype", "")
+        if t["status"] in ("aligned", "low_confidence") and t["time_start"] is not None:
+            center = (t["time_start"] + t["time_end"]) / 2
+            beat_dur = t["time_end"] - t["time_start"]
+            method = t["status"]
+        else:
+            center = (idx + 0.5) / n * D       # пропорциональный фолбэк для сцены
+            beat_dur = 0.0
+            method = "proportional"
+        s, e = _normalize_insert_window(center, beat_dur, D, min_insert_dur,
+                                        target_insert_dur, max_insert_dur, pre_roll, post_roll)
+        layout = "broll_full" if (idx == 0 or idx == n - 1 or archetype == "final_cta") else "split"
+        cands.append({"start": s, "end": e, "layout": layout,
+                      "broll_index": idx, "_method": method})
+
+    # разрешение пересечений: по возрастанию старта, сдвигаем последующий вперёд
+    # на min_gap; если места < 1с — клип выпадает (редко).
+    cands.sort(key=lambda c: c["start"])
+    placed: list[dict] = []
+    for c in cands:
+        if placed:
+            floor = placed[-1]["end"] + min_gap
+            if c["start"] < floor:
+                c["start"] = floor
+        if c["start"] >= D - 0.5 or (c["end"] - c["start"]) < 1.0:
+            continue  # нет места → клип не используем
+        c["end"] = min(c["end"], D)
+        if c["end"] - c["start"] < 1.0:
+            continue
+        placed.append(c)
+
+    # сборка непрерывного плана: avatar_full заполняет хук/разрывы/CTA-хвост
+    plan: list[dict] = []
+    t = 0.0
+    for c in placed:
+        if c["start"] > t + 0.05:
+            plan.append({"start": round(t, 3), "end": round(c["start"], 3),
+                         "layout": "avatar_full", "broll_index": None})
+        plan.append({"start": round(c["start"], 3), "end": round(c["end"], 3),
+                     "layout": c["layout"], "broll_index": c["broll_index"]})
+        t = c["end"]
+    if t < D - 0.05:
+        plan.append({"start": round(t, 3), "end": round(D, 3),
+                     "layout": "avatar_full", "broll_index": None})
+
+    report["placed"] = len(placed)
+    report["dropped"] = n - len(placed)
+    report["decision"] = "content_aligned"
+    return plan, report
 
 
 def assemble_auto_montage(

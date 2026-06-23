@@ -274,7 +274,7 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # (selfie_words → ре-транскрибация), флага готового ролика (selfie_finished).
 PERSISTENT_SELFIE_KEYS = (
     "notion_page_id", "notion_url", "card_data", "selfie_draft_card",
-    "selfie_finished", "selfie_words",
+    "selfie_finished", "selfie_words", "selfie_hf_scenes",
 )
 
 
@@ -1551,6 +1551,22 @@ async def handle_broll_callback(
                 kind="video", source=Path(clip), label=f"[HF] {Path(clip).stem}",
             ))
         added = len(added_clips)
+        # B-roll sync (P0): сохранить раскадровку (id+beat+архетип в порядке клипов)
+        # — content-aligned монтаж поставит каждую сцену на таймкод её фразы.
+        # Клипы добавлены в порядке сцен → scene i ↔ HF-item i. Если добавлены НЕ
+        # все сцены (усечение по лимиту) — храним только под добавленные.
+        try:
+            import json as _json
+            _sb = _json.loads((gen_dir / "storyboard.json").read_text(encoding="utf-8"))
+            _scenes = (_sb.get("scenes") or [])[:added]
+            cur["selfie_hf_scenes"] = [
+                {"id": s.get("id"), "script_beat": s.get("script_beat", ""),
+                 "business_archetype": s.get("business_archetype", "")}
+                for s in _scenes
+            ]
+        except Exception as _e:
+            _LOGGER.warning(f"[selfie/hf] раскадровка не сохранена для sync: {_e}")
+            cur.pop("selfie_hf_scenes", None)
         cur.pop("selfie_hf_job_id", None)
         _SAVE_PENDING(_PENDING)
         # Превью сгенерированных сцен — иначе в пикере только имена [HF] hf_NN,
@@ -2077,6 +2093,7 @@ async def _run_broll_assembly_and_proceed(
 
         from video_assembler import (
             assemble_auto_montage, build_bookend_montage_plan, _probe_duration,
+            montage_brand_name,
         )
 
         # 2. Для Про-монтажа / ИИ-монтажа (layout="pro") нужен montage_plan.
@@ -2084,7 +2101,20 @@ async def _run_broll_assembly_and_proceed(
         if layout == "pro":
             avatar_dur = await asyncio.to_thread(_probe_duration, clean_selfie)
             n_broll = len(items)
-            if is_ai:
+            # B-roll sync (P0, CTO+GPT-5 23.06): если B-roll — ЧИСТЫЕ HF-клипы
+            # (все [HF], в порядке сцен) и есть word-таймкоды → content-aligned:
+            # каждую сцену ставим на таймкод КОГДА произносится её script_beat.
+            # Иначе (микс/нет таймкодов/низкий matched_ratio → None) — AI/bookend.
+            hf_scenes = data.get("selfie_hf_scenes")
+            words = data.get("selfie_words")
+            all_hf = bool(items) and all(
+                str(getattr(it, "label", "")).startswith("[HF]") for it in items)
+            if hf_scenes and words and all_hf and len(items) == len(hf_scenes):
+                from video_assembler import build_content_aligned_hf_plan
+                montage_plan, _sync_rep = await asyncio.to_thread(
+                    build_content_aligned_hf_plan, avatar_dur, hf_scenes, words)
+                _LOGGER.info(f"[selfie/sync] content-aligned: {_sync_rep}")
+            if montage_plan is None and is_ai:
                 await query.edit_message_text(
                     f"{fmt_name}: Claude строит план по сценарию… ~10-20 сек."
                 )
@@ -2097,7 +2127,7 @@ async def _run_broll_assembly_and_proceed(
                 montage_plan = await asyncio.to_thread(
                     generate_montage_plan, script_text, descs, avatar_dur, _has_photo,
                 )
-            else:
+            elif montage_plan is None:
                 montage_plan = await asyncio.to_thread(
                     build_bookend_montage_plan, avatar_dur, n_broll,
                 )
@@ -2116,7 +2146,10 @@ async def _run_broll_assembly_and_proceed(
             subtitles=True,
             subtitle_words=(data.get("selfie_words") or None),
             broll_mode="real",
-            brand_name="maksim",
+            # brand_name выводится из активного тенанта (panferov→свой, maksim→
+            # maksim, default→default), а не жёстко "maksim": иначе panferov
+            # получал Максимову геометрию аватара (crop_y fallback 260 вместо 280).
+            brand_name=montage_brand_name(),
         )
         # P0 #6: валидация выхода — ffmpeg мог завершиться rc=0, но отдать
         # пустой/битый файл. Лучше явно упасть (→ ретрай с сохранёнными клипами,
