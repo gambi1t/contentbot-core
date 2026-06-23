@@ -14,6 +14,7 @@ from pathlib import Path
 import requests
 
 import paths
+import tenant  # per-tenant публичный домен (23.06: redirect/media были захардкожены на maksim-bot)
 from requests_toolbelt import MultipartEncoder
 from dotenv import load_dotenv
 
@@ -26,7 +27,9 @@ logger = logging.getLogger("content_bot.crosspost")
 # ──────────────────────────────────────────────
 YOUTUBE_CLIENT_ID = os.getenv("YOUTUBE_CLIENT_ID")
 YOUTUBE_CLIENT_SECRET = os.getenv("YOUTUBE_CLIENT_SECRET")
-YOUTUBE_REDIRECT_URI = "https://maksim-bot.panferov-ai.ru/oauth/callback"
+# per-tenant домен (env BOT_PUBLIC_DOMAIN): panferov→bot.panferov-ai.ru,
+# Максим→maksim-bot... Иначе OAuth-колбэк уходил на сервер Максима (регрессия).
+YOUTUBE_REDIRECT_URI = f"https://{tenant.public_domain()}/oauth/callback"
 YOUTUBE_TOKEN_FILE = Path(__file__).parent / "youtube_token.json"
 
 # Meta / Instagram (auth goes through Facebook OAuth)
@@ -1004,9 +1007,16 @@ async def telegram_post_to_channel(
 #  FILE HOSTING HELPER (for Instagram)
 # ══════════════════════════════════════════════
 
-_MEDIA_DIR = Path(os.getenv("MAKSIM_MEDIA_DIR", "/srv/bot-media-maksim"))
+# per-tenant папка медиа (куда nginx смотрит на /media): panferov→/srv/bot-media
+# (alias из nginx-конфига), Максим→/srv/bot-media-maksim. env MAKSIM_MEDIA_DIR —
+# опциональный override. Иначе видео panferov легло бы в папку Максима.
+_MEDIA_DIR = Path(os.getenv("MAKSIM_MEDIA_DIR") or
+                  ("/srv/bot-media" if tenant.active_tenant_id() == "panferov"
+                   else "/srv/bot-media-maksim"))
+# per-tenant дефолт: Instagram тянет video_url по этому URL → должен быть домен
+# ЭТОГО сервера (panferov: bot.panferov-ai.ru/media), иначе Meta тянет с Максима.
 _MEDIA_BASE_URL = os.getenv(
-    "MAKSIM_MEDIA_BASE_URL", "https://maksim-bot.panferov-ai.ru/media"
+    "MAKSIM_MEDIA_BASE_URL", f"https://{tenant.public_domain()}/media"
 ).rstrip("/")
 
 
@@ -1206,7 +1216,7 @@ def vk_is_connected() -> bool:
     return data is not None and bool(data.get("access_token"))
 
 
-VK_REDIRECT_URI = "https://maksim-bot.panferov-ai.ru/oauth/vk/callback"
+VK_REDIRECT_URI = f"https://{tenant.public_domain()}/oauth/vk/callback"
 VK_PKCE_FILE = Path(__file__).parent / "vk_pkce_verifier.txt"
 
 

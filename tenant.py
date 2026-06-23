@@ -289,6 +289,33 @@ def active_tenant_id() -> str:
         return "default"
 
 
+# Публичный домен per-tenant (OAuth-redirect + media/covers-URL). Маппинг по
+# tenant_id, чтобы panferov НЕ утекал на домен Максима даже без env-override
+# (CTO+GPT-5 ревью 23.06: silent fallback на Максима — главный риск). Максим/
+# прочие → дефолт maksim-bot. Третий тенант — добавить сюда строку.
+_TENANT_PUBLIC_DOMAIN = {"panferov": "bot.panferov-ai.ru"}
+_DEFAULT_PUBLIC_DOMAIN = "maksim-bot.panferov-ai.ru"
+
+
+def public_domain() -> str:
+    """Публичный домен этого деплоя — для OAuth-redirect и media/covers-URL.
+
+    Приоритет: env ``BOT_PUBLIC_DOMAIN`` (override) → маппинг по
+    ``active_tenant_id()`` (panferov→bot.panferov-ai.ru) → дефолт maksim-bot.
+
+    Контекст (23.06): redirect-URI и media-base были ЗАХАРДКОЖЕНЫ на maksim-bot
+    при форке в общее ядро (регрессия) → OAuth-колбэк panferov уходил на сервер
+    Максима, Instagram тянул video_url с домена Максима → YouTube/Instagram падали.
+    Оригинальный content-bot использовал bot.panferov-ai.ru. Привязка к tenant_id
+    исключает тихий fallback panferov на чужой домен (без правки .env)."""
+    env = (os.getenv("BOT_PUBLIC_DOMAIN") or "").strip().lower()
+    if env:
+        if "/" in env or ":" in env or " " in env:
+            raise ValueError(f"BOT_PUBLIC_DOMAIN должен быть голым доменом, а не {env!r}")
+        return env
+    return _TENANT_PUBLIC_DOMAIN.get(active_tenant_id(), _DEFAULT_PUBLIC_DOMAIN)
+
+
 def _cli() -> int:
     """CLI-доктор для runbook (CTO-ревью N1): проверка tenant.json ДО
     `systemctl start` в Phase 3-cutover. НЕ импортирует bot.py (иначе занял бы
