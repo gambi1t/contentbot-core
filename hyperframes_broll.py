@@ -1664,6 +1664,48 @@ LAYOUT_INSPECTOR = "hf_inspect_layout.mjs"
 LAYOUT_INSPECT_TIMEOUT = 30
 
 
+# ── D Step 1 (GPT-5 review): инфраструктура layout-gate ──────────────────────
+# Сам blocking-режим включится позже (Step 4). Сейчас: безопасный резолв пути
+# (раньше код искал inspector в HF_PROJECT, и при чистке HF_PROJECT критик молча
+# отдавал [] = «no issues», False sense of quality); env-флаг режима
+# (off/advisory/strict), preflight на старте генерации.
+
+def _layout_inspector_path() -> Path:
+    """Путь к hf_inspect_layout.mjs от РЕПО (не от HF_PROJECT).
+
+    Раньше: `HF_PROJECT / "hf_inspect_layout.mjs"` — на новом сервере или после
+    чистки HF_PROJECT файла нет → `[]` issues → тихая деградация качества (Critical
+    1 из CTO-ревью GPT-5 2026-06-23). Теперь резолв от __file__, как render_scene.mjs."""
+    return Path(__file__).resolve().parent / "tools" / LAYOUT_INSPECTOR
+
+
+def _layout_gate_mode() -> str:
+    """Режим layout-gate из env `HF_LAYOUT_GATE`: off / advisory / strict.
+
+    Дефолт = 'advisory' (текущее поведение: логируем findings, не блокируем).
+    'strict' — Step 4+ включит блокировку. Мусор → дефолт (safe)."""
+    mode = (os.getenv("HF_LAYOUT_GATE", "advisory") or "advisory").strip().lower()
+    return mode if mode in ("off", "advisory", "strict") else "advisory"
+
+
+def _layout_gate_preflight() -> tuple[bool, dict]:
+    """Проверяет инфру layout-критика. → (всё-ок, детали по компонентам).
+
+    Для режима 'strict': если не ок — нужно либо fail-closed (job-fail), либо
+    предупредить и упасть до render. Для 'advisory' — лог + продолжаем.
+    Сам вызов делается из generate_hyperframes_broll, до фазы 1."""
+    import shutil as _sh
+    inspector = _layout_inspector_path()
+    detail = {
+        "inspector_exists": inspector.exists(),
+        "inspector_path": str(inspector),
+        "node_available": _sh.which("node") is not None,
+        "browser_path_set": bool(os.getenv("HYPERFRAMES_BROWSER_PATH")),
+    }
+    ok = all((detail["inspector_exists"], detail["node_available"], detail["browser_path_set"]))
+    return ok, detail
+
+
 def _inspect_layout(scene_file: str) -> list[dict]:
     """Гоняет node-детектор на одной сцене → список layout-issues.
 
@@ -1674,9 +1716,11 @@ def _inspect_layout(scene_file: str) -> list[dict]:
     Детектор exit-коды: 0=ok, 1=есть issues, 2=ошибка запуска. stdout —
     JSON в случаях 0/1.
     """
-    inspector = HF_PROJECT / LAYOUT_INSPECTOR
+    # Резолв от репо (D Step 1): раньше искали в HF_PROJECT и при чистке проекта
+    # критик молча отдавал [] — тихая потеря качества (GPT-5 review Critical 1).
+    inspector = _layout_inspector_path()
     if not inspector.exists():
-        logger.warning(f"[hf_broll] детектор {LAYOUT_INSPECTOR} не найден — пропускаю layout-проверку")
+        logger.warning(f"[hf_broll] детектор {inspector} не найден — пропускаю layout-проверку")
         return []
     try:
         proc = subprocess.run(
