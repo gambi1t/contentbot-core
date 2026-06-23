@@ -1688,6 +1688,42 @@ def _layout_gate_mode() -> str:
     return mode if mode in ("off", "advisory", "strict") else "advisory"
 
 
+def _blocking_layout_subset(layout_by_scene: dict | None) -> dict[str, list[dict]]:
+    """GPT-5 Step 4: оставить только BLOCKING-issues из выхода детектора.
+
+    Контракт детектора (Step 2-3): каждое issue имеет `severity` ('blocking' /
+    'advisory'). Решения по severity приняты в .mjs (см. role, hard-overlap formula,
+    decor). Здесь — простой фильтр + дроп сцен без blocking.
+
+    Чистая функция (unit-tested) — НЕ читает env."""
+    if not layout_by_scene:
+        return {}
+    out: dict[str, list[dict]] = {}
+    for scene_file, issues in layout_by_scene.items():
+        blocking = [
+            i for i in (issues or [])
+            if isinstance(i, dict) and i.get("severity") == "blocking"
+        ]
+        if blocking:
+            out[scene_file] = blocking
+    return out
+
+
+def _needs_fix_round(layout_by_scene: dict | None, render_errors: list[str]) -> bool:
+    """Триггерить ли fix-round.
+
+    Раньше: только render-errors. GPT-5 review High 1: добавить blocking-layout
+    в условие, но УВАЖАТЬ env `HF_LAYOUT_GATE`:
+      - off       → только render-errors (как раньше)
+      - advisory  → только render-errors + лог blocking (текущий дефолт)
+      - strict    → render-errors ИЛИ blocking-layout"""
+    if render_errors:
+        return True
+    if _layout_gate_mode() != "strict":
+        return False
+    return bool(_blocking_layout_subset(layout_by_scene))
+
+
 def _layout_gate_preflight() -> tuple[bool, dict]:
     """Проверяет инфру layout-критика. → (всё-ок, детали по компонентам).
 
@@ -1780,6 +1816,14 @@ def _format_layout_issues(by_scene: dict) -> str:
                 lines.append(
                     f"  • «{it.get('a')}» и «{it.get('b')}» слишком ТЕСНО "
                     f"(зазор {it.get('gapPx')}px). Увеличь вертикальный отступ до ≥40px."
+                )
+            elif t == "tiny_text":
+                # GPT-5 Step 3: ключевая нота — увеличить именно ЭТОТ текст, не всё.
+                lines.append(
+                    f"  • {it.get('role','текст')} «{it.get('text','')}» слишком МЕЛКИЙ "
+                    f"({it.get('px')}px, минимум {it.get('min')}px для роли "
+                    f"{it.get('role','?')}). Увеличь font-size этого блока до floor'а "
+                    f"или выше; не уменьшай остальное."
                 )
     return "\n".join(lines)
 
@@ -1905,32 +1949,51 @@ def generate_hyperframes_broll(
             # Поэтому layout-замечания ТОЛЬКО логируем, ролик отдаём. Авто-fix-
             # round — ИСКЛЮЧИТЕЛЬНО на render-ошибках (без mp4 нет видео).
             # Реальные дефекты вёрстки — ручная кнопка «перегенерировать сцену» (P1).
-            layout_by_scene = _inspect_all_scenes()
+            layout_by_scene = _inspect_all_scenes() if _layout_gate_mode() != "off" else {}
             clips, errors = _render_fn(out_dir)
 
+            # GPT-5 Step 4: BLOCKING-subset из layout-findings (если детектор включён).
+            blocking_layout = _blocking_layout_subset(layout_by_scene)
             if layout_by_scene:
                 n_layout = sum(len(v) for v in layout_by_scene.values())
+                n_block = sum(len(v) for v in blocking_layout.values())
+                mode = _layout_gate_mode()
                 logger.info(
-                    f"[hf_broll] детектор: {n_layout} layout-замечаний "
-                    f"(совещательно, без авто-доводки): "
+                    f"[hf_broll] детектор ({mode}): {n_layout} findings "
+                    f"({n_block} blocking, {n_layout - n_block} advisory): "
                     f"{ {k: len(v) for k, v in layout_by_scene.items()} }"
                 )
 
-            if not errors:
-                break  # рендер чист — отдаём (layout-советы залогированы)
+            # Триггер fix-round: render-errors ИЛИ (mode=strict И blocking-layout).
+            if not _needs_fix_round(layout_by_scene, errors):
+                break  # чисто (advisory/off лог уже сделан выше)
 
             if fix_round >= MAX_FIX_ROUNDS:
+                # GPT-5 High 3: после MAX_FIX_ROUNDS — fallback templates (Step 5, P1).
+                # Пока — хард-фейл с понятным сообщением (как было раньше).
+                reason_parts = []
+                if errors:
+                    reason_parts.append("render: " + "; ".join(e[:120] for e in errors))
+                if _layout_gate_mode() == "strict" and blocking_layout:
+                    reason_parts.append(
+                        "layout-blocking: " + ", ".join(
+                            f"{k}({len(v)})" for k, v in blocking_layout.items()))
                 raise HyperFramesBrollError(
                     f"B-roll (HyperFrames) не собрался после {MAX_FIX_ROUNDS} "
-                    f"повторов рендера. Ошибки: {'; '.join(e[:120] for e in errors)}"
+                    f"повторов. {' | '.join(reason_parts)}"
                 )
 
             fix_round += 1
-            logger.info(f"[hf_broll] fix-round {fix_round}: {len(errors)} "
-                        f"render-ошибок — перегенерирую упавшие сцены")
+            # Для fix-prompt сцены: render-errors ВСЕГДА; layout-blocking — только в strict.
+            layout_for_fix = blocking_layout if _layout_gate_mode() == "strict" else {}
+            logger.info(
+                f"[hf_broll] fix-round {fix_round}: {len(errors)} render-ошибок"
+                + (f" + {sum(len(v) for v in layout_for_fix.values())} layout-blocking"
+                   if layout_for_fix else "")
+                + " — перегенерирую проблемные сцены"
+            )
             _notify(progress_cb,
-                    f"🔧 Перерендер {fix_round}/{MAX_FIX_ROUNDS}: {len(errors)} "
-                    f"сцен не отрендерились — повторяю…")
+                    f"🔧 Перерендер {fix_round}/{MAX_FIX_ROUNDS}: повторяю проблемные сцены…")
             if legacy_build:
                 total_cost += _run_claude(
                     _build_prompt(script_text,
@@ -1938,8 +2001,7 @@ def generate_hyperframes_broll(
                 )
                 _revert_stray()
             else:
-                # перегенерация ТОЛЬКО сцен с render-ошибками
-                _fix_scenes_singleshot(storyboard, _problems_by_scene({}, errors))
+                _fix_scenes_singleshot(storyboard, _problems_by_scene(layout_for_fix, errors))
     finally:
         _GEN_LOCK.release()
 
