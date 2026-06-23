@@ -2171,6 +2171,12 @@ async def _run_broll_assembly_and_proceed(
         data["selfie_final"] = str(final_auto)
         data["selfie_montage_format"] = layout_code
         data["state"] = "selfie_music_picking"
+        # stale-state fix (23.06): раскадровка для content-aligned sync уже
+        # использована (клипы в монтаже) → сбрасываем. Иначе carry_session_keys
+        # (selfie_hf_scenes в PERSISTENT_SELFIE_KEYS) протащит её в финал, и при
+        # повторном заходе в пикер всплывёт СТАРАЯ раскадровка. Введено вместе с
+        # sync в этом же сеансе — scope persistence одним роликом.
+        data.pop("selfie_hf_scenes", None)
         _SAVE_PENDING(_PENDING)
         # U1: сборка УСПЕШНА (клипы уже в project_dir) → теперь безопасно удалить
         # tmp AI/HF-генерации. На провале (except ниже) НЕ выполнится → клипы
