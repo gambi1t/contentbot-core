@@ -650,6 +650,33 @@ def _sanitize_scene_html(html: str) -> str:
     return re.sub(r"repeat\s*:\s*-1", "repeat:0", html)
 
 
+def _scene_grounding_block(storyboard: dict) -> str:
+    """Анти-галлюцинация (Артём 23.06, GPT-5 §11): сборщик строит ОДНУ сцену
+    изолированно и выдумывает вторичный текст (пункты checklist, стадии path_map),
+    которого нет в сценарии (реальный баг: scene_02 «Контент-конвейер / Авто-монтаж
+    вертикалей / Пайплайн дистрибуции» — этого автор не говорил). Даём сборщику
+    ВЕСЬ сценарий как контекст + жёсткую факт-дисциплину. Перефраз/обобщение
+    разрешены, фабрикация конкретики — нет. Чистая функция (unit-tested)."""
+    scenes = storyboard.get("scenes") or []
+    full_script = " ".join((s.get("script_beat") or "").strip() for s in scenes).strip()
+    return (
+        "ПОЛНЫЙ СЦЕНАРИЙ РОЛИКА (контекст — весь текст озвучки; видимый текст сцены "
+        "бери ОТСЮДА, а не из головы):\n"
+        f"«{full_script}»\n\n"
+        "🔴 ФАКТ-ДИСЦИПЛИНА (анти-галлюцинация — критично): ВЕСЬ видимый на экране "
+        "текст — заголовки, ПУНКТЫ списков/чек-листов, подписи стадий/нод, числа, "
+        "метрики — обязан происходить ИЗ сценария выше.\n"
+        "- НЕ выдумывай: названия продуктов/инструментов, числа, проценты, этапы, "
+        "имена клиентов, утверждения, которых НЕТ в сценарии.\n"
+        "- Перефраз и обобщение РАЗРЕШЕНЫ (напр. primary_text «Голосовой ассистент» "
+        "для фразы «ассистента, которая ведёт дела») — но без фабрикации конкретики.\n"
+        "- Если архетип требует НЕСКОЛЬКО пунктов (checklist / stack_layers / "
+        "table_snapshot / path_map), а в script_beat этой сцены их нет — возьми "
+        "реальные пункты ИЗ СЦЕНАРИЯ выше (то, что перечисляет автор) или поставь "
+        "МЕНЬШЕ пунктов. НЕ придумывай пункты «для красоты»."
+    )
+
+
 def _build_scene_singleshot_prompt(storyboard: dict, scene_id: str,
                                    prev_html: str | None = None,
                                    issues: str | None = None) -> str:
@@ -662,6 +689,7 @@ def _build_scene_singleshot_prompt(storyboard: dict, scene_id: str,
     ref_pack, idx_sample = _load_inline_refs()
     sc = _scene_contract(storyboard, scene_id)
     theme = _tenant_theme_brief()
+    grounding = _scene_grounding_block(storyboard)
 
     fix_block = ""
     if issues:
@@ -681,6 +709,8 @@ def _build_scene_singleshot_prompt(storyboard: dict, scene_id: str,
 
 КОНТРАКТ ЭТОЙ СЦЕНЫ ({scene_id}):
 {json.dumps(sc, ensure_ascii=False, indent=1)}
+
+{grounding}
 
 ГЛАВНОЕ ПРАВИЛО АРХЕТИПА:
 Реализуй ИМЕННО business_archetype / hf_technique / visual_style /
