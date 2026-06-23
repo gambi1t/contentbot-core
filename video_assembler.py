@@ -2089,17 +2089,18 @@ def assemble_auto_montage(
         if subtitles:
             try:
                 from subtitle_burner import (
-                    add_subtitles_to_video, DEFAULT_MARGIN_V, SPLIT_MARGIN_V,
+                    add_subtitles_to_video, DEFAULT_MARGIN_V, split_margin_v,
                 )
 
                 font_dir_path = FONT_DIR if FONT_DIR.exists() else None
                 subs_out = project_dir / "final_auto_subs.mp4"
 
-                # 10 июня: субтитры НИЗКО («пониже везде» — на стыке/480 текст
-                # ложился на лицо). split ещё ниже (half-кроп головы крупнее).
-                # Значения живут в subtitle_burner (DEFAULT/SPLIT_MARGIN_V).
+                # split-позиция субтитра — per-tenant (split_margin_v): panferov →
+                # стык 50/50 (его контент-бот), maksim/default → низ (150, фидбэк
+                # Максима 10 июня). В pro-монтаже per-word адаптацию делает
+                # _margin_for_word (тоже per-tenant), здесь — флэт-split.
                 if layout == "split":
-                    sub_margin_v = SPLIT_MARGIN_V
+                    sub_margin_v = split_margin_v()
                     sub_plan = None
                 else:
                     sub_margin_v = DEFAULT_MARGIN_V

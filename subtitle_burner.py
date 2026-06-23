@@ -37,8 +37,13 @@ DEFAULT_SHADOW = 0                   # No shadow, clean look
 DEFAULT_MARGIN_V = 300
 # Split-лейаут: нижняя половина = крупный кроп головы (подбородок ~86% высоты),
 # 300 попадает на губы (проверено кадром «24»). 150 — под подбородком
-# (визуальный подбор по кадрам margin 150 vs 200, 10 июня).
+# (визуальный подбор по кадрам margin 150 vs 200, 10 июня). maksim/default.
 SPLIT_MARGIN_V = 150
+# panferov: субтитр в split встаёт на СТЫК половин 50/50 (как в исходном
+# контент-боте Артёма — там было 900). У panferov другая геометрия аватара
+# (не Максимов crop 260), поэтому стык не ложится на лицо. ТЮНИНГ: одно число —
+# если из-за head-анкора текст сядет высоко, опусти 900→ниже по кадру Артёма.
+PANFEROV_SPLIT_MARGIN_V = 900
 
 WHISPER_MODEL = "small"              # Good Russian accuracy vs speed
 POP_DURATION_MS = 80                 # Pop-in animation duration
@@ -386,22 +391,36 @@ def _ass_ts(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+def split_margin_v() -> int:
+    """MarginV субтитра в split-сегменте, per-tenant.
+
+    panferov → стык 50/50 (PANFEROV_SPLIT_MARGIN_V — как в его контент-боте);
+    maksim/default → SPLIT_MARGIN_V (низ, фидбэк Максима 10 июня). Использует
+    tenant.active_tenant_id() (как бренд-лексикон _active_canonical)."""
+    try:
+        if tenant.active_tenant_id() == "panferov":
+            return PANFEROV_SPLIT_MARGIN_V
+    except Exception:
+        pass
+    return SPLIT_MARGIN_V
+
+
 def _margin_for_word(word_start: float, montage_plan: list[dict] | None,
-                     margin_split: int = SPLIT_MARGIN_V,
+                     margin_split: int | None = None,
                      margin_default: int = DEFAULT_MARGIN_V) -> int:
     """Pick MarginV based on which montage segment the word falls into.
 
-    10 июня («субтитры пониже везде»): стык 900 для split отменён — после
-    подъёма аватара (crop 260) стык = лоб, а 300 в split = губы (half-кроп
-    головы крупнее). split → SPLIT_MARGIN_V (под подбородком),
-    остальные лейауты → DEFAULT_MARGIN_V.
+    split → split_margin_v() (per-tenant: panferov=стык, maksim/default=низ),
+    остальные лейауты → DEFAULT_MARGIN_V. margin_split=None → резолв по тенанту;
+    явное значение переопределяет (для тестов/override).
     """
     if not montage_plan:
         return 0  # 0 = use style default
+    mv_split = split_margin_v() if margin_split is None else margin_split
     for seg in montage_plan:
         if seg["start"] <= word_start < seg["end"]:
             if seg["layout"] == "split":
-                return margin_split
+                return mv_split
             else:
                 return margin_default
     return margin_default
