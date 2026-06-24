@@ -8300,6 +8300,25 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ─── Готовый ролик БЕЗ речи (/ready): контекст текстом ───
+    # State выставлен в _process_local_source, когда у finished-ролика пустой
+    # транскрипт. Текст юзера = «о чём ролик» → ложится транскриптом → название/
+    # описание из него → сразу обложка. Голосовой аналог — в process_voice.
+    if state == "awaiting_ready_context" and idea_text and not idea_text.startswith("/"):
+        data = pending.get(user_id) or {}
+        if idea_text.strip().lower() in ("отмена", "отменить", "выйти", "стоп"):
+            data["state"] = None
+            pending[user_id] = data
+            _save_pending(pending)
+            await update.message.reply_text("✖️ Отменено.")
+            return
+        pending[user_id] = selfie_handlers.apply_ready_context(data, idea_text)
+        _save_pending(pending)
+        _msg, _kb = selfie_handlers.ready_cover_prompt(
+            "✅ Принял контекст — соберу название и описание из него.")
+        await update.message.reply_text(_msg, reply_markup=_kb, parse_mode="HTML")
+        return
+
     # ─── Carousel surgical-edit intake (Pipeline #6) ───
     # State set by `carousel_surg_edit` callback. User types an instruction
     # → Sonnet edits only the requested part of the draft, re-shows preview.
@@ -10217,6 +10236,27 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 notion_url=None,
                 template=chosen_tpl,
             )
+            return
+
+        # ─── Готовый ролик БЕЗ речи (/ready): контекст голосом ───
+        # See text-path equivalent in process_idea above. Надиктовка = «о чём ролик»
+        # → транскрипт для названия/описания → сразу обложка.
+        if current_state == "awaiting_ready_context" and idea_text:
+            data = pending.get(user_id) or {}
+            if idea_text.strip().lower() in ("отмена", "отменить", "выйти", "стоп"):
+                data["state"] = None
+                pending[user_id] = data
+                _save_pending(pending)
+                try:
+                    await msg.edit_text("✖️ Отменено.")
+                except Exception:
+                    pass
+                return
+            pending[user_id] = selfie_handlers.apply_ready_context(data, idea_text)
+            _save_pending(pending)
+            _rmsg, _rkb = selfie_handlers.ready_cover_prompt(
+                f"🎤 Понял: «{idea_text.strip()}»\n\n✅ Соберу название и описание из этого.")
+            await update.message.reply_text(_rmsg, reply_markup=_rkb, parse_mode="HTML")
             return
 
         # ─── Carousel surgical-edit intake (voice) — Pipeline #6 ───

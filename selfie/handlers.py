@@ -311,6 +311,30 @@ def build_finished_pending(selfie_tmp, source_path, words, transcript: str) -> d
     }
 
 
+def apply_ready_context(pending_entry: dict, context_text: str) -> dict:
+    """Готовый ролик БЕЗ речи: контекст (текст/надиктовка) вместо транскрипта.
+
+    Для безречевого готового ролика (напр. сравнение редакторов из CapCut)
+    расшифровывать нечего — юзер сам описывает, о чём ролик. Контекст ложится
+    в роль транскрипта → из него генерятся название и описание. Чистая функция.
+    """
+    selfie_tmp = Path(pending_entry["selfie_tmp_dir"])
+    source_path = pending_entry["selfie_source"]
+    return build_finished_pending(selfie_tmp, source_path, [], context_text.strip())
+
+
+def ready_cover_prompt(intro: str):
+    """Сообщение + клавиатура выбора обложки готового ролика (реюз selfie-cover).
+    Возвращает (text, keyboard) — caller отправляет. Используется роутером
+    awaiting_ready_context (текст и голос)."""
+    msg = (
+        intro + "\n\n" + selfie_cover.build_picker_message()
+        + "\n\n⚠️ «Кадр из видео» захватит вшитые субтитры — для чистой "
+        "обложки лучше «Загрузить своё фото» или «Из библиотеки»."
+    )
+    return msg, selfie_cover.cover_picker_keyboard()
+
+
 async def _process_local_source(user_id, source_path, selfie_tmp, status_msg) -> None:
     """Общий конвейер source → audio → transcribe → шаг ревью текста.
 
@@ -351,6 +375,24 @@ async def _process_local_source(user_id, source_path, selfie_tmp, status_msg) ->
             pass
 
         if not transcript_text.strip():
+            # Готовый ролик БЕЗ речи (напр. сравнение редакторов из CapCut) — НЕ
+            # отбраковываем: спрашиваем контекст (текст/надиктовку), он ляжет как
+            # транскрипт для названия/описания. Живое selfie (не finished) — отказ
+            # остаётся (говорящая голова обязана иметь речь).
+            if finished:
+                _PENDING[user_id] = {
+                    "state": "awaiting_ready_context",
+                    "selfie_finished": True,
+                    "selfie_tmp_dir": str(selfie_tmp),
+                    "selfie_source": str(source_path),
+                }
+                _SAVE_PENDING(_PENDING)
+                await status_msg.edit_text(
+                    "🎤 В ролике нет речи. Напиши или надиктуй: о чём он и что "
+                    "подчеркнуть в описании? Это пойдёт в название и описание.\n\n"
+                    "«отмена» — выйти."
+                )
+                return
             await status_msg.edit_text(
                 "Не удалось распознать речь в видео. "
                 "Попробуй отправить другое видео с чёткой речью."
