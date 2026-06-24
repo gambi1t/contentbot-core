@@ -96,9 +96,14 @@ _SCENE_LABELS = {
 
 def _approval_keyboard(notion_url: str | None = None,
                        hf_draft_id: str | None = None,
-                       av_draft_id: str | None = None) -> InlineKeyboardMarkup:
+                       av_draft_id: str | None = None,
+                       draft_id: str | None = None) -> InlineKeyboardMarkup:
+    # Phase A: апрув в namespace b2flow:approve:<id> — несёт draft_id (робастно к
+    # рестарту) и НЕ коллизит с легаси `broll_approve` («Сохранить в Notion»,
+    # bot.py:18647), которую ранняя ветка раньше затеняла. Без draft_id — back-compat.
+    approve_cb = f"b2flow:approve:{draft_id}" if draft_id else "broll_approve"
     rows = [
-        [InlineKeyboardButton("✅ Собрать ролик", callback_data="broll_approve")],
+        [InlineKeyboardButton("✅ Собрать ролик", callback_data=approve_cb)],
     ]
     # Только для HF-only (графика): ручная пересборка одной сцены (#14).
     if hf_draft_id:
@@ -481,7 +486,7 @@ async def handle_broll_source(
             chat_id=chat_id,
             text=_build_preview(draft.script_text, [str(p) for p in clip_paths]),
             parse_mode="HTML",
-            reply_markup=_approval_keyboard(draft.notion_url),
+            reply_markup=_approval_keyboard(draft.notion_url, draft_id=draft.draft_id),
             disable_web_page_preview=True,
         )
         return
@@ -1356,7 +1361,8 @@ async def _send_hf_preview(context, chat_id, draft, draft_id: str,
         reply_markup=_approval_keyboard(
             draft.notion_url,
             hf_draft_id=draft_id if regen else None,
-            av_draft_id=draft_id if _is_av else None),
+            av_draft_id=draft_id if _is_av else None,
+            draft_id=draft_id),
         disable_web_page_preview=True)
 
 
@@ -1831,7 +1837,7 @@ async def handle_broll2_manual_cb(update: Update, context: ContextTypes.DEFAULT_
             chat_id=chat_id,
             text=_build_preview(draft.script_text, [str(p) for p in clip_paths]),
             parse_mode="HTML",
-            reply_markup=_approval_keyboard(draft.notion_url),
+            reply_markup=_approval_keyboard(draft.notion_url, draft_id=draft.draft_id),
             disable_web_page_preview=True,
         )
         return

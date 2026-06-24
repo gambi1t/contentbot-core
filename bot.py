@@ -13196,8 +13196,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_av_regen_back(update, context, query.data.split(":", 1)[1])
         return
 
-    if query.data == "broll_approve":
-        # «Собрать ролик» → сперва выбор музыки (инкремент 3), потом голос, потом сборка.
+    if query.data.startswith("b2flow:approve:"):
+        # Phase A: namespace-апрув Pipeline 2 (несёт draft_id). НЕ коллизит с легаси
+        # `broll_approve` («Сохранить в Notion»). Сборка: музыка → голос → монтаж.
         try:
             await query.answer()
             await query.edit_message_reply_markup(reply_markup=None)
@@ -13206,6 +13207,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from broll.handlers import start_broll_music_pick
         await start_broll_music_pick(update, context, chat_id=query.message.chat_id)
         return
+
+    if query.data == "broll_approve":
+        # Back-compat shim для УЖЕ отправленных Pipeline 2 сообщений (старый callback).
+        # Перехватываем ТОЛЬКО при живом контексте Pipeline 2 (broll_draft). Иначе НЕ
+        # return → fall-through к легаси `effective_action == "broll_approve"` ниже
+        # (Сохранить в Notion), которую эта ветка раньше ошибочно затеняла у panferov.
+        if context.user_data.get("broll_draft"):
+            try:
+                await query.answer()
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            from broll.handlers import start_broll_music_pick
+            await start_broll_music_pick(update, context, chat_id=query.message.chat_id)
+            return
+        # нет Pipeline 2 контекста → это легаси broll_approve, пропускаем к 18647
 
     if query.data.startswith("b2mus:"):
         # Инкремент 3: выбор фоновой музыки до развилки голоса.
