@@ -1791,7 +1791,11 @@ def _zip_project(data: dict) -> Path | None:
             if not f.is_file():
                 continue
             # Skip if any parent directory is in the skip list
-            if any(part in SKIP_DIRS for part in f.relative_to(d).parts):
+            # Пропускаем служебные папки + промежуточные кадры рендера
+            # (hyperframes/_frames_NN/, autobroll и пр. — сотни PNG, юзеру не нужны,
+            # раздувают ZIP > 48 МБ и валятся per-file спамом). 22 июня: инцидент 118 файлов.
+            if any(part in SKIP_DIRS or part.startswith("_frames")
+                   for part in f.relative_to(d).parts):
                 continue
             if f.suffix.lower() in SKIP_SUFFIXES:
                 continue
@@ -20195,10 +20199,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # терялись на больших проектах (порт M8 из legacy; служебные папки пропускаем).
             if proj_dir and proj_dir.exists():
                 _skip_dirs = {"_tmp_montage", "_raw_uploads", "__pycache__"}
+                # + промежуточные кадры рендера (_frames_NN) — иначе per-file
+                # шлёт сотни PNG в чат (инцидент 22 июня: 118 файлов, риск бана).
                 all_files = [
                     f for f in sorted(proj_dir.rglob("*"))
                     if f.is_file()
-                    and not any(p in _skip_dirs for p in f.relative_to(proj_dir).parts)
+                    and not any(p in _skip_dirs or p.startswith("_frames")
+                                for p in f.relative_to(proj_dir).parts)
                 ]
                 for f in all_files:
                     size = f.stat().st_size
