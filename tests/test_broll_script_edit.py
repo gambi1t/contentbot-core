@@ -112,7 +112,7 @@ def test_gate_keyboard(errors):
 
 def test_generate_preview_shows_gate_not_source(errors):
     print("\n[generate_broll_preview — показывает ГЕЙТ, а не меню источника]")
-    bh.generate_script = lambda claude, theme: "Сценарий из ровно пяти слов тут"  # monkeypatch
+    bh.generate_script = lambda claude, theme, **kw: "Сценарий из ровно пяти слов тут"  # monkeypatch (brand_name kw)
     ctx = _ctx()
     upd = _update()
     asyncio.run(bh.generate_broll_preview(
