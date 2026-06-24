@@ -789,6 +789,11 @@ _CALLBACK_FEATURE_MAP = {
     "b2hf": "broll_pipeline",            # b2hfre / b2hfsc / b2hfback
     "b2mus:": "broll_pipeline",
     "b2cov:": "broll_pipeline",
+    # Зонтик (Phase A): ВСЕ остальные b2*-callbacks Pipeline 2 — поздние стадии
+    # (b2vc голос / b2vop превью / b2up загрузка / b2flow апрув / b2title и будущие)
+    # тоже гейтятся, не только вход. Специфичные b2src:ai_video / b2av (→ ai_video)
+    # выше: callback_feature_blocked проверяет ВСЕ префиксы, двойной гейт жив.
+    "b2": "broll_pipeline",
 }
 
 # Per-call brand context. Set at the start of any handler that resolves a
@@ -12398,13 +12403,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"[broll] import failed: {e}", exc_info=True)
                 await query.answer(f"❌ Модуль broll не загружен: {e}", show_alert=True)
                 return
-            theme = thesis or title or "контент Life Drive"
+            theme = thesis or title or "контент"
             await query.answer("🎞 Стартую B-roll ролик…")
             await generate_broll_preview(
                 update, context, claude,
                 theme=theme,
                 chat_id=query.message.chat_id,
                 notion_url=notion_url or None,
+                brand_name=_get_active_brand_name(),
             )
             return
 
@@ -13007,11 +13013,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pseudo = _ForkUpdate(query.message, query.from_user)
 
         if choice == "broll":
+            # Phase A: гейт входа (раньше idea_fork:broll генерил карточку + Sonnet-
+            # токены БЕЗ проверки фичи, в отличие от idea_pipeline:broll). Закрываем
+            # до траты на generate_broll_preview.
+            if _tenant.feature_blocked(_ACTIVE_TENANT, "broll_pipeline"):
+                await context.bot.send_message(
+                    query.message.chat_id,
+                    "🎬 B-roll монтаж пока не подключён для этого бота.")
+                return
             from broll.handlers import generate_broll_preview
             await generate_broll_preview(
                 pseudo, context, claude, theme=idea_text,
                 chat_id=query.message.chat_id,
                 notion_card_fn=create_notion_card,  # своя идея → карточка на Kanban
+                brand_name=_get_active_brand_name(),
             )
         else:  # avatar (дефолт)
             await _generate_script(pseudo, context, idea_text)
@@ -13372,7 +13387,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await regenerate_broll_preview(update, context, claude)
+        await regenerate_broll_preview(update, context, claude, brand_name=_get_active_brand_name())
         return
 
     if query.data == "broll_cancel":

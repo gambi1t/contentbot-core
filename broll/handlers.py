@@ -284,6 +284,7 @@ async def generate_broll_preview(
     chat_id: int | None = None,
     notion_url: str | None = None,
     notion_card_fn=None,
+    brand_name: str = "default",
 ) -> None:
     """Фаза 1: сгенерить сценарий + выбрать клипы, показать preview.
 
@@ -308,7 +309,7 @@ async def generate_broll_preview(
 
     # Сценарий
     try:
-        script = await asyncio.to_thread(generate_script, claude, theme)
+        script = await asyncio.to_thread(generate_script, claude, theme, brand_name=brand_name)
     except Exception as e:
         logger.error(f"[broll] script generation failed: {e}", exc_info=True)
         try:
@@ -2161,6 +2162,7 @@ async def regenerate_broll_preview(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     claude,
+    brand_name: str = "default",
 ) -> None:
     """Перегенерить preview с той же темой (callback broll_regen)."""
     draft = context.user_data.get("broll_draft")
@@ -2175,6 +2177,7 @@ async def regenerate_broll_preview(
         theme=draft["theme"],
         chat_id=draft.get("chat_id"),
         notion_url=draft.get("notion_url"),
+        brand_name=brand_name,
     )
 
 
