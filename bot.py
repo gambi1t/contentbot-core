@@ -4333,55 +4333,154 @@ def create_guide_page(script_text: str, title: str, feedback: str = None) -> str
     return public_url
 
 
+_NOTION_CODE_LANGS = {
+    "python", "javascript", "typescript", "bash", "shell", "json", "yaml",
+    "html", "css", "sql", "markdown", "java", "go", "c", "cpp", "plain text",
+}
+
+
+def _guide_rich_chunks(s: str, limit: int = 2000) -> list:
+    """rich_text-куски ≤limit (Notion-лимит 2000 симв/текст). Промпт НЕ режем —
+    делим на несколько text-объектов в одном блоке, чтобы скопировался целиком."""
+    if not s:
+        return [{"text": {"content": ""}}]
+    return [{"text": {"content": s[i:i + limit]}} for i in range(0, len(s), limit)]
+
+
+def _notion_code_lang(lang: str) -> str:
+    lang = (lang or "").strip().lower()
+    if lang in ("", "text", "txt"):
+        return "plain text"
+    return lang if lang in _NOTION_CODE_LANGS else "plain text"
+
+
+def _guide_table_block(rows_md: list) -> dict | None:
+    """`| a | b |`-строки → Notion table block. Пропускает разделитель |---|."""
+    rows = []
+    for ln in rows_md:
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if cells and all(set(c) <= set("-: ") for c in cells):  # |---|-разделитель
+            continue
+        rows.append(cells)
+    if not rows:
+        return None
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    return {
+        "object": "block", "type": "table",
+        "table": {
+            "table_width": width, "has_column_header": True, "has_row_header": False,
+            "children": [
+                {"object": "block", "type": "table_row",
+                 "table_row": {"cells": [[{"text": {"content": c[:2000]}}] for c in r]}}
+                for r in rows
+            ],
+        },
+    }
+
+
+def _build_guide_blocks(raw_text: str) -> list:
+    """Notion-блоки из сырого MD гайда. Реальные гайды (Seedance/Kling) содержат
+    ПРОМПТЫ в ```…```, заголовки ##/### и таблицы — их нельзя ронять в абзацы
+    (промпт подписчику нужно скопировать целиком). Поддержка: ``` → code,
+    # → h2, ##/### → h3, | a | b | → table, -/• → bullets, 1. → numbered, else
+    → paragraph. Чистая функция (без Notion) — тестируема."""
+    children: list = []
+    lines = raw_text.strip().split("\n")
+    i, n = 0, len(lines)
+    para_buf: list = []
+
+    def _para(t):
+        return {"object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": _guide_rich_chunks(t[:1800])}}
+
+    def _head(level, t):
+        ht = "heading_2" if level == 2 else "heading_3"
+        return {"object": "block", "type": ht,
+                ht: {"rich_text": [{"text": {"content": t[:1800]}}]}}
+
+    def _bullet(t):
+        return {"object": "block", "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [{"text": {"content": t[:1800]}}]}}
+
+    def _num(t):
+        return {"object": "block", "type": "numbered_list_item",
+                "numbered_list_item": {"rich_text": [{"text": {"content": t[:1800]}}]}}
+
+    def flush_para():
+        nonlocal para_buf
+        text = "\n".join(para_buf).strip()
+        para_buf = []
+        if not text:
+            return
+        for block in [b.strip() for b in re.split(r"\n\s*\n", text) if b.strip()]:
+            bl = block.splitlines()
+            first = bl[0].strip()
+            if first.startswith("### ") or first.startswith("## "):
+                children.append(_head(3, first.lstrip("#").strip()))
+                rest = "\n".join(bl[1:]).strip()
+                if rest:
+                    children.append(_para(rest))
+            elif first.startswith("# "):
+                children.append(_head(2, first[2:].strip()))
+                rest = "\n".join(bl[1:]).strip()
+                if rest:
+                    children.append(_para(rest))
+            elif all(ln.strip().startswith(("- ", "• ")) for ln in bl if ln.strip()):
+                for ln in bl:
+                    t = ln.strip().lstrip("-• ").strip()
+                    if t:
+                        children.append(_bullet(t))
+            elif all(re.match(r"^\d+[.)]\s", ln.strip()) for ln in bl if ln.strip()):
+                for ln in bl:
+                    t = re.sub(r"^\d+[.)]\s*", "", ln.strip())
+                    if t:
+                        children.append(_num(t))
+            else:
+                children.append(_para(block))
+
+    while i < n:
+        stripped = lines[i].lstrip()
+        if stripped.startswith("```"):
+            flush_para()
+            lang = _notion_code_lang(stripped[3:])
+            code_lines = []
+            i += 1
+            while i < n and not lines[i].lstrip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            i += 1  # закрывающий fence
+            children.append({
+                "object": "block", "type": "code",
+                "code": {"language": lang,
+                         "rich_text": _guide_rich_chunks("\n".join(code_lines))},
+            })
+        elif stripped.startswith("|") and stripped.rstrip().endswith("|"):
+            flush_para()
+            tbl_lines = []
+            while i < n and lines[i].lstrip().startswith("|"):
+                tbl_lines.append(lines[i])
+                i += 1
+            tbl = _guide_table_block(tbl_lines)
+            if tbl:
+                children.append(tbl)
+        else:
+            para_buf.append(lines[i])
+            i += 1
+    flush_para()
+    return children
+
+
 def create_guide_page_from_raw(raw_text: str, title: str) -> str:
     """Create a guide page from the user's raw text (no LLM rewrite).
 
-    Splits input on blank lines into paragraphs. Lines that start with
-    '# ' become headings, '- ' become bullets, '1. ' become numbered list.
+    Блоки строит _build_guide_blocks (код-блоки/##-###/таблицы/списки/абзацы).
     Always appends the author callout at the end.
     """
     if not NOTION_GUIDES_DB:
         raise ValueError("NOTION_GUIDES_DB_ID not configured")
 
-    children = []
-    # Split into blocks by blank lines to preserve paragraph structure
-    blocks = [b.strip() for b in re.split(r"\n\s*\n", raw_text.strip()) if b.strip()]
-    for block in blocks:
-        lines = block.splitlines()
-        first = lines[0].strip()
-        if first.startswith("# "):
-            children.append({
-                "object": "block", "type": "heading_2",
-                "heading_2": {"rich_text": [{"text": {"content": first[2:].strip()[:1800]}}]},
-            })
-            # Remaining lines go as a paragraph
-            rest = "\n".join(lines[1:]).strip()
-            if rest:
-                children.append({
-                    "object": "block", "type": "paragraph",
-                    "paragraph": {"rich_text": [{"text": {"content": rest[:1800]}}]},
-                })
-        elif all(ln.strip().startswith(("- ", "• ")) for ln in lines if ln.strip()):
-            for ln in lines:
-                t = ln.strip().lstrip("-• ").strip()
-                if t:
-                    children.append({
-                        "object": "block", "type": "bulleted_list_item",
-                        "bulleted_list_item": {"rich_text": [{"text": {"content": t[:1800]}}]},
-                    })
-        elif all(re.match(r"^\d+[.)]\s", ln.strip()) for ln in lines if ln.strip()):
-            for ln in lines:
-                t = re.sub(r"^\d+[.)]\s*", "", ln.strip())
-                if t:
-                    children.append({
-                        "object": "block", "type": "numbered_list_item",
-                        "numbered_list_item": {"rich_text": [{"text": {"content": t[:1800]}}]},
-                    })
-        else:
-            children.append({
-                "object": "block", "type": "paragraph",
-                "paragraph": {"rich_text": [{"text": {"content": block[:1800]}}]},
-            })
+    children = _build_guide_blocks(raw_text)
 
     if not children:
         raise ValueError("Пустой текст гайда")
