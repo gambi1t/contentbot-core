@@ -43,20 +43,22 @@ bootstrap один раз.
 Рекомендация — maksim остаётся в `D:\AI\maksim-bot` (так зашито в памяти и
 деплой-скиллах; меньше переделок путей), panferov уезжает в новое дерево.
 
-## Bootstrap нового дерева (один раз)
+## Bootstrap нового дерева (один раз) — детальный runbook + проверки: `WORKTREE_BOOTSTRAP.md`
 
 ```powershell
 # из основного дерева:
 git worktree add D:\AI\maksim-bot-panferov -b work/panferov maksim-prod
 cd D:\AI\maksim-bot-panferov
-python -m venv .venv ; .\.venv\Scripts\pip install -r requirements.txt
-npm install            # Remotion-зависимости (gitignored, в дерево не копируются)
-# скопировать gitignored секреты/.env, которых нет в git, из основного дерева
+npm install   # node_modules (puppeteer/pixelmatch/pngjs) — gitignored, per-dir
+# Python: venv НЕ нужен — рабочее дерево на ГЛОБАЛЬНОМ Python 3.12, депы глобальны
+#   (сверено 24.06). Депа отсутствует → pip install -r requirements.txt (глобально).
+# .env: только для локального запуска бота — СВОЙ panferov .env (не копировать чужой).
 ```
 
 ⚠️ **НЕ симлинкать/junction'ить `node_modules` на Windows** — npm плодит junctions,
 Node-резолв спотыкается, ветки расходятся по версиям пакетов. Только отдельная
-установка. (Стоит вынести в `scripts/setup-worktree.ps1` — идемпотентный bootstrap.)
+установка. Полный bootstrap + проверки (страж-тест, panferov-резолв стиля,
+puppeteer) — в `docs/WORKTREE_BOOTSTRAP.md`.
 
 ## Дневной git-флоу
 
