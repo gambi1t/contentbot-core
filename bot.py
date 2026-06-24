@@ -1771,40 +1771,6 @@ async def _save_ready_video(
     return True, f"✓ Видео сохранено как {target_name} ({size_mb:.1f} МБ){trim_note}{lib_note}"
 
 
-def _zip_project(data: dict) -> Path | None:
-    """Create a ZIP archive of the project directory — recursively, with
-    subfolders (photos/, etc.) included. Excludes assembler scratch dirs
-    (_tmp_montage/) and raw-upload originals (_raw_uploads/) — those are
-    huge and only useful server-side for re-cutting.
-    """
-    import zipfile
-    d = _project_dir(data)
-    if not d or not d.exists():
-        return None
-
-    SKIP_DIRS = {"_tmp_montage", "_raw_uploads", "__pycache__"}
-    SKIP_SUFFIXES = (".bak",)
-
-    zip_path = PROJECTS_DIR / f"{d.name}.zip"
-    with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in sorted(d.rglob("*")):
-            if not f.is_file():
-                continue
-            # Skip if any parent directory is in the skip list
-            # Пропускаем служебные папки + промежуточные кадры рендера
-            # (hyperframes/_frames_NN/, autobroll и пр. — сотни PNG, юзеру не нужны,
-            # раздувают ZIP > 48 МБ и валятся per-file спамом). 22 июня: инцидент 118 файлов.
-            if any(part in SKIP_DIRS or part.startswith("_frames")
-                   for part in f.relative_to(d).parts):
-                continue
-            if f.suffix.lower() in SKIP_SUFFIXES:
-                continue
-            # Preserve subfolder structure (photos/foo.jpg, broll_01.mp4, …)
-            arcname = str(f.relative_to(d))
-            zf.write(str(f), arcname)
-    return zip_path
-
-
 # --- Transliteration for ElevenLabs ---
 # NOTE: For ElevenLabs Russian voices, use explicit stress marks (combining acute U+0301
 # after a vowel: а́ е́ и́ о́ у́ ы́ э́ ю́ я́) and separate English abbreviations with spaces
@@ -4752,6 +4718,29 @@ def _find_thumbnail_for_card(data: dict) -> str | None:
             logger.debug(f"Could not fetch Notion cover: {e}")
     # 3. No fallback — better no cover than wrong cover from another card
     return None
+
+
+def _resolve_download_materials(data: dict) -> dict:
+    """3 материала «📥 Скачать материалы»: ролик, обложка, описание.
+
+    Артём: кнопка отдаёт РОВНО эти три, НЕ дамп всей папки (аватар 84-157МБ
+    раздувал ZIP >48МБ → per-file → сотни файлов в чат, инцидент 22 июня).
+    Реюз резолверов кросспоста (final-видео + обложка из папки проекта).
+    Описание: data["description"] → иначе proj/description.txt. None — если нет.
+    """
+    video = _find_video_for_card(data)
+    cover = _find_thumbnail_for_card(data)
+    desc = (data.get("description") or "").strip() or None
+    if not desc:
+        proj = _project_dir(data)
+        if proj and proj.exists():
+            dtxt = proj / "description.txt"
+            if dtxt.exists():
+                try:
+                    desc = dtxt.read_text(encoding="utf-8").strip() or None
+                except Exception:
+                    desc = None
+    return {"video": video, "cover": cover, "description": desc}
 
 
 def _prepend_cover_to_video(video_path: str, cover_path: str, duration: float = 1.0) -> str | None:
@@ -20054,248 +20043,69 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "download_project":
-        # Strategy: package everything into a single ZIP (photos/, videos,
-        # avatar, final, script — all in one file). If the ZIP fits under
-        # Telegram's 48MB-effective upload ceiling, send it. Otherwise fall
-        # back to the old file-by-file mode so user still gets everything.
+        # Артём: «📥 Скачать материалы» = РОВНО 3 вещи — готовый ролик + обложка +
+        # описание. НЕ дамп всей папки: аватар 84-157МБ раздувал ZIP >48МБ →
+        # per-file → сотни файлов в чат (инцидент 22 июня, 118 файлов). Резолверы
+        # кросспоста реюзим (_resolve_download_materials).
         chat_id = query.message.chat_id
-        MAX_BOT_UPLOAD = 48 * 1024 * 1024  # 48MB safety margin under 50MB
-
-        # Billing — charge on download (idempotent). The zip path counts
-        # as download_zip; file-by-file fallback also charges (same trigger
-        # since end result is the same: client got the materials).
-        _full_video_id = (
-            (data if isinstance(data, dict) else {}).get("notion_page_id")
-        )
-        await _billing_charge_if_needed(
-            user_id, _full_video_id, trigger="download_zip",
-        )
-
-        status_msg = None
-        try:
-            status_msg = await context.bot.send_message(
-                chat_id=chat_id, text="📥 Упаковываю в ZIP..."
-            )
-        except Exception as e:
-            logger.warning(f"download_project: status send failed: {e}")
-
-        # ── Try ZIP first ──
+        MAX_BOT_UPLOAD = 48 * 1024 * 1024  # лимит Telegram Bot API
         data_local = data if isinstance(data, dict) else {}
+
+        # Биллинг (идемпотентный) — оставляем как было (тот же trigger).
+        await _billing_charge_if_needed(
+            user_id, data_local.get("notion_page_id"), trigger="download_zip",
+        )
+
         title = (data_local.get("card_data") or {}).get("title") or data_local.get("idea") or "project"
         safe_title = re.sub(r'[<>:"/\\|?*]', '', str(title))[:40].strip() or "project"
 
-        zip_path = None
+        mats = _resolve_download_materials(data_local)
+        sent = 0
         try:
-            zip_path = await asyncio.to_thread(_zip_project, data_local)
-        except Exception as e:
-            logger.warning(f"download_project: zip build failed: {e}")
-
-        if zip_path and zip_path.exists():
-            zip_size = zip_path.stat().st_size
-            zip_mb = zip_size / (1024 * 1024)
-            logger.info(f"download_project: zip built {zip_path.name} ({zip_mb:.1f} MB)")
-            # Empty ZIP = 22 bytes (end-of-central-directory only). Anything
-            # under ~500 bytes means _project_dir() got a mismatched title and
-            # mkdir'd an empty folder. Don't ship that archive — try to find
-            # the real folder by card id prefix instead.
-            if zip_size < 500:
-                logger.warning(
-                    f"download_project: zip is empty ({zip_size} bytes). "
-                    "Title mismatch — trying prefix fallback."
-                )
-                try:
-                    zip_path.unlink()
-                except Exception:
-                    pass
-                zip_path = None
-                card_id = data_local.get("notion_page_id") or ""
-                fallback_dir = None
-                if card_id:
-                    try:
-                        fallback_dir = _project_dir_by_prefix(card_id[:8])
-                    except Exception as e:
-                        logger.warning(f"download_project: prefix lookup raised: {e}")
-                if fallback_dir and fallback_dir.exists():
-                    logger.info(f"download_project: fallback folder found: {fallback_dir}")
-                    try:
-                        # Rebuild zip from the real folder.
-                        import zipfile
-                        alt_zip = ASSETS_DIR / f"{safe_title}_fallback.zip"
-                        with zipfile.ZipFile(alt_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                            for f in fallback_dir.rglob("*"):
-                                if f.is_file():
-                                    zf.write(f, f.relative_to(fallback_dir))
-                        if alt_zip.stat().st_size > 500:
-                            zip_path = alt_zip
-                            zip_size = zip_path.stat().st_size
-                            zip_mb = zip_size / (1024 * 1024)
-                            logger.info(f"download_project: fallback zip built ({zip_mb:.1f} MB)")
-                    except Exception as e:
-                        logger.error(f"download_project: fallback zip failed: {e}")
-                if not zip_path:
-                    # Still nothing — tell user honestly, don't send 22-byte archive.
-                    if status_msg:
-                        try:
-                            await status_msg.edit_text(
-                                "❌ Материалы этой карточки не найдены на сервере.\n\n"
-                                "Скорее всего, карточка старая или папка была перемещена. "
-                                "Можно запросить материалы напрямую из Notion — там должны "
-                                "быть сохранены все ссылки.",
-                                reply_markup=InlineKeyboardMarkup([[
-                                    InlineKeyboardButton("◀️ К карточке",
-                                        callback_data=f"notion_card:{(data_local.get('notion_page_id') or '')[:8]}"),
-                                ]]),
-                            )
-                        except Exception:
-                            pass
-                    return
-            if zip_size <= MAX_BOT_UPLOAD:
-                try:
-                    with open(zip_path, "rb") as fh:
+            # 1. Готовый ролик
+            video = mats.get("video")
+            if video and Path(video).exists():
+                vsize = Path(video).stat().st_size
+                if vsize <= MAX_BOT_UPLOAD:
+                    with open(video, "rb") as fh:
                         await context.bot.send_document(
-                            chat_id=chat_id,
-                            document=fh,
-                            filename=f"{safe_title}.zip",
-                            caption=f"📦 Все материалы одним архивом ({zip_mb:.1f} МБ)",
-                        )
-                    if status_msg:
-                        try:
-                            await status_msg.delete()
-                        except Exception:
-                            pass
-                    # Clean up server-side zip
-                    try:
-                        zip_path.unlink()
-                    except Exception:
-                        pass
-                    return
-                except Exception as e:
-                    logger.warning(f"download_project: zip upload failed ({e}), falling back to per-file")
-            else:
-                # Too big — warn and fall through to per-file mode below
-                logger.info(f"download_project: zip too big ({zip_mb:.1f}MB > 48MB), per-file fallback")
-                try:
-                    if status_msg:
-                        await status_msg.edit_text(
-                            f"ZIP получился {zip_mb:.1f} МБ — больше лимита Telegram (48 МБ).\n"
-                            "Отправляю материалы по одному..."
-                        )
-                except Exception:
-                    pass
-                try:
-                    zip_path.unlink()
-                except Exception:
-                    pass
-
-        try:
-            data_local = data if isinstance(data, dict) else {}
-            if not data_local:
-                logger.warning(f"download_project: pending data empty for user {user_id}")
-
-            title = (data_local.get("card_data") or {}).get("title") or data_local.get("idea") or "project"
-            safe_title = re.sub(r'[<>:"/\\|?*]', '', str(title))[:40].strip() or "project"
-
-            proj_dir = _project_dir(data_local) if data_local else None
-            logger.info(
-                f"download_project: user={user_id} title='{safe_title}' "
-                f"proj_dir={proj_dir} has_script={bool(data_local.get('script'))}"
-            )
-
-            sent_count = 0
-            skipped_big = []  # [(name, size_mb)]
-
-            # 1. Script as separate text file
-            script = data_local.get("script")
-            if script:
-                try:
-                    script_bytes = script.encode("utf-8")
-                    await context.bot.send_document(
+                            chat_id=chat_id, document=fh,
+                            filename=f"{safe_title}.mp4", caption="🎬 Готовый ролик")
+                    sent += 1
+                else:
+                    await context.bot.send_message(
                         chat_id=chat_id,
-                        document=BytesIO(script_bytes),
-                        filename=f"{safe_title}_script.txt",
-                        caption="📝 Сценарий",
-                    )
-                    sent_count += 1
-                except Exception as e:
-                    logger.warning(f"download_project: script send failed: {e}")
+                        text=f"🎬 Ролик {vsize / (1024 * 1024):.0f} МБ — больше лимита "
+                             "Telegram (48 МБ). Забери его из Notion-карточки.")
 
-            # 2. Cover image
-            cover_path = ASSETS_DIR / "last_cover.jpg"
-            if cover_path.exists():
-                try:
-                    with open(cover_path, "rb") as fh:
-                        await context.bot.send_document(
-                            chat_id=chat_id,
-                            document=fh,
-                            filename=f"{safe_title}_cover.jpg",
-                            caption="🖼 Обложка",
-                        )
-                    sent_count += 1
-                except Exception as e:
-                    logger.warning(f"download_project: cover send failed: {e}")
+            # 2. Обложка
+            cover = mats.get("cover")
+            if cover and Path(cover).exists():
+                with open(cover, "rb") as fh:
+                    await context.bot.send_document(
+                        chat_id=chat_id, document=fh,
+                        filename=f"{safe_title}_cover.jpg", caption="🖼 Обложка")
+                sent += 1
 
-            # 3. Project dir files (РЕКУРСИВНО — заходим в photos/ и пр. подпапки),
-            # лёгкие первыми. Раньше iterdir() видел только корень → фото из photos/
-            # терялись на больших проектах (порт M8 из legacy; служебные папки пропускаем).
-            if proj_dir and proj_dir.exists():
-                _skip_dirs = {"_tmp_montage", "_raw_uploads", "__pycache__"}
-                # + промежуточные кадры рендера (_frames_NN) — иначе per-file
-                # шлёт сотни PNG в чат (инцидент 22 июня: 118 файлов, риск бана).
-                all_files = [
-                    f for f in sorted(proj_dir.rglob("*"))
-                    if f.is_file()
-                    and not any(p in _skip_dirs or p.startswith("_frames")
-                                for p in f.relative_to(proj_dir).parts)
-                ]
-                for f in all_files:
-                    size = f.stat().st_size
-                    size_mb = size / (1024 * 1024)
-                    rel = str(f.relative_to(proj_dir)).replace("\\", "/")
-                    if size > MAX_BOT_UPLOAD:
-                        skipped_big.append((rel, round(size_mb, 1)))
-                        logger.info(f"download_project: skip big file {rel} ({size_mb:.1f}MB)")
-                        continue
-                    try:
-                        with open(f, "rb") as fh:
-                            await context.bot.send_document(
-                                chat_id=chat_id,
-                                document=fh,
-                                filename=f.name,
-                                caption=f"📎 {rel} ({size_mb:.1f} МБ)",
-                            )
-                        sent_count += 1
-                    except Exception as fe:
-                        logger.warning(f"download_project: skip {rel}: {fe}")
+            # 3. Описание (текстом — удобно копировать, не .txt)
+            desc = mats.get("description")
+            if desc:
+                await context.bot.send_message(
+                    chat_id=chat_id, text=f"📝 Описание для публикации:\n\n{desc}")
+                sent += 1
 
-            logger.info(f"download_project: sent {sent_count} files, skipped {len(skipped_big)} big")
-
-            # Final summary
-            if sent_count > 0:
-                summary = f"✅ Отправлено {sent_count} файлов."
-                if skipped_big:
-                    big_list = "\n".join(f"  • {n} ({mb} МБ)" for n, mb in skipped_big)
-                    summary += (
-                        f"\n\n⚠️ Пропущено {len(skipped_big)} файлов > 48 МБ "
-                        f"(лимит Telegram Bot API):\n{big_list}"
-                    )
-                if status_msg:
-                    try:
-                        await status_msg.edit_text(summary)
-                    except Exception:
-                        await context.bot.send_message(chat_id=chat_id, text=summary)
-                else:
-                    await context.bot.send_message(chat_id=chat_id, text=summary)
-            else:
-                msg = "📂 Пока нет материалов. Сначала создай сценарий и обложку."
-                if status_msg:
-                    try:
-                        await status_msg.edit_text(msg)
-                    except Exception:
-                        await context.bot.send_message(chat_id=chat_id, text=msg)
-                else:
-                    await context.bot.send_message(chat_id=chat_id, text=msg)
+            # Итог / подсказка
+            if sent == 0:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="📂 Материалы не найдены. Сначала собери ролик.")
+            elif not desc:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="📝 Описания пока нет — нажми «📝 Описание для публикации» "
+                         "на финальном экране.")
         except Exception as e:
-            logger.error(f"Download project error: {e}", exc_info=True)
+            logger.error(f"download_project: {e}", exc_info=True)
             try:
                 await context.bot.send_message(chat_id=chat_id, text=f"❌ Ошибка отправки: {e}")
             except Exception:
