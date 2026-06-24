@@ -2,7 +2,7 @@
 
 Фаза 1 (preview):  тема → Claude пишет закадровый сценарий → selector
                    выбирает клипы → текстовый preview + кнопки.
-Фаза 2 (assemble): approve → озвучка голосом Максима → ffmpeg-монтаж →
+Фаза 2 (assemble): approve → озвучка ИИ-голосом (per-brand) → ffmpeg-монтаж →
                    субтитры → отправка MP4.
 
 Озвучка и тяжёлый ffmpeg запускаются ТОЛЬКО после approve — на preview
@@ -32,7 +32,7 @@ from telegram.ext import ContextTypes
 
 from .assembler import MontageError, assemble_broll_montage
 from .llm import generate_script
-from .selector import SelectorError, select_clips
+from .selector import SelectorError, select_clips, DEFAULT_CLIPS_ROOT
 from .draft import (
     BrollItem, BrollDraft, Status, SourceMode,
     save_draft, load_draft, new_draft_id, cleanup_expired,
@@ -94,6 +94,29 @@ _SCENE_LABELS = {
 }
 
 
+def _voiced_by_phrase() -> str:
+    """«голосом Максима» (тенант maksim) / «ИИ-голосом» (иначе) для UI-текстов.
+    Per-tenant: имя бренда не хардкодим в строках (закон core/style)."""
+    try:
+        import tenant
+        if tenant.active_tenant_id() == "maksim":
+            return "голосом Максима"
+    except Exception:
+        pass
+    return "ИИ-голосом"
+
+
+def _ai_voice_choice_label() -> str:
+    """Подпись кнопки ИИ-озвучки (b2vc:ai) per-tenant."""
+    try:
+        import tenant
+        if tenant.active_tenant_id() == "maksim":
+            return "🤖 Голос Максима (ИИ-клон)"
+    except Exception:
+        pass
+    return "🤖 ИИ-голос (клон)"
+
+
 def _approval_keyboard(notion_url: str | None = None,
                        hf_draft_id: str | None = None,
                        av_draft_id: str | None = None,
@@ -150,7 +173,7 @@ def _build_preview(script: str, clip_paths: list[str]) -> str:
     )
     return (
         f"🎞 <b>B-roll ролик</b> — закадровый голос + видеоряд, без аватара\n\n"
-        f"<b>Сценарий (озвучка голосом Максима):</b>\n"
+        f"<b>Сценарий (озвучка {_voiced_by_phrase()}):</b>\n"
         f"<i>{esc(script)}</i>\n\n"
         f"🎬 <b>Видеоряд:</b> {len(clip_paths)} клипов — {esc(breakdown)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
@@ -242,13 +265,19 @@ async def bridge_broll_to_publication(draft: dict, *, uid: int, tg_post_fn=None)
         except Exception as e:
             logger.warning(f"[broll.pub] генерация TG-поста не удалась (не критично): {e}")
     # merge-seed pending — НЕ слепое присваивание (CTO-ревью): сохраняем живой state.
+    # Phase A High 2: канонический card_brand (brand-ключ) + tenant_id раздельно.
+    # Раньше хардкод "brand":"maksim" → panferov-ролик нёс чужой бренд. maksim-тенант
+    # == бренд maksim; panferov Pipeline 2 работает в дефолтном бренде.
+    import tenant as _tenant_mod
+    _tid = _tenant_mod.active_tenant_id()
     state = _bot_pending.setdefault(uid, {})
     state.update({
         "notion_page_id": nid,
         "card_data": {"title": title},
         "script": draft.get("script", ""),
         "crosspost_card_id": nid[:20],
-        "brand": "maksim",
+        "card_brand": "maksim" if _tid == "maksim" else "default",
+        "tenant_id": _tid,
         "pipeline": "broll",
     })
     if tg_post:
@@ -354,7 +383,7 @@ async def generate_broll_preview(
         chat_id=chat_id,
         text=(
             f"🎞 <b>B-roll ролик</b> — закадровый голос + видеоряд, без аватара\n\n"
-            f"<b>Сценарий (озвучка голосом Максима):</b>\n"
+            f"<b>Сценарий (озвучка {_voiced_by_phrase()}):</b>\n"
             f"<i>{html_mod.escape(script)}</i>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
             f"Проверь сценарий: <b>«✏️ Править»</b> — поправить текст, "
@@ -452,13 +481,22 @@ async def handle_broll_source(
         return
 
     if mode == SourceMode.AUTO:
+        # Phase A: clips_root per-tenant (раньше хардкод clips/maksim → panferov читал
+        # бы клипы Максима). _brand_base резолвит <LIBRARY_CLIPS_DIR>/<tenant>.
+        from selfie.broll_picker import _brand_base
+        clips_root = _brand_base("video") or DEFAULT_CLIPS_ROOT
         status = await context.bot.send_message(chat_id, "🤖 Подбираю клипы под сценарий…")
         try:
-            clip_paths = await asyncio.to_thread(select_clips, draft.script_text, claude)
+            clip_paths = await asyncio.to_thread(
+                select_clips, draft.script_text, claude, clips_root=clips_root)
         except SelectorError as e:
-            logger.error(f"[broll] auto clip selection failed: {e}")
-            await status.edit_text(f"❌ Архив B-roll клипов недоступен.\n\n<code>{e}</code>",
-                                   parse_mode="HTML")
+            # Пустая/отсутствующая библиотека тенанта → graceful: вернуть меню
+            # источника, а не тупик (у panferov библиотеки пока нет; UPLOAD/HF/AI-видео
+            # работают без неё).
+            logger.warning(f"[broll] AUTO пустой архив ({clips_root}): {e}")
+            await status.edit_text(
+                "📭 Библиотека клипов пуста. Выбери другой источник видеоряда:",
+                reply_markup=source_menu_keyboard(draft_id, enabled_modes=_ENABLED_MODES))
             return
         except Exception as e:
             logger.error(f"[broll] auto clip selection failed: {e}", exc_info=True)
@@ -569,9 +607,12 @@ async def handle_broll_source(
         clips = await _generate_hf_clips(context, chat_id, draft, draft_id,
                                          SourceMode.AUTO_HF, allow_live_fallback=True)
         hf_items = hf_items_from_clips(clips) if clips else []
-        # Библиотечные клипы (реюз AUTO).
+        # Библиотечные клипы (реюз AUTO) — clips_root per-tenant (как в AUTO).
+        from selfie.broll_picker import _brand_base
+        _lib_root = _brand_base("video") or DEFAULT_CLIPS_ROOT
         try:
-            lib_paths = await asyncio.to_thread(select_clips, draft.script_text, claude)
+            lib_paths = await asyncio.to_thread(
+                select_clips, draft.script_text, claude, clips_root=_lib_root)
         except Exception as e:
             logger.warning(f"[broll] AUTO_HF select_clips: {e}")
             lib_paths = []
@@ -867,7 +908,7 @@ async def handle_broll_music_cb(update: Update, context: ContextTypes.DEFAULT_TY
 def _voice_choice_keyboard() -> InlineKeyboardMarkup:
     """Развилка озвучки: ИИ-клон Максима ИЛИ свой записанный голос."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 Голос Максима (ИИ-клон)", callback_data="b2vc:ai")],
+        [InlineKeyboardButton(_ai_voice_choice_label(), callback_data="b2vc:ai")],
         [InlineKeyboardButton("🎤 Запишу сам (свой голос)", callback_data="b2vc:own")],
         [InlineKeyboardButton("❌ Отмена", callback_data="broll_cancel")],
     ])
@@ -903,7 +944,7 @@ async def prompt_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_message(
         chat_id,
         "🎙 <b>Каким голосом озвучить?</b>\n\n"
-        "🤖 <b>ИИ-клон Максима</b> — мгновенно, но клон голоса пока не идеален.\n"
+        f"🤖 <b>{_ai_voice_choice_label()[2:]}</b> — мгновенно, голос-клон.\n"
         "🎤 <b>Свой голос</b> — пришлёшь голосовое с прочитанным сценарием, "
         "соберу ролик на нём (субтитры лягут автоматом).",
         parse_mode="HTML", reply_markup=_voice_choice_keyboard())
@@ -952,7 +993,7 @@ async def preview_broll_voiceover(
     mp3 = _ai_voice_path(uid)
     status = await context.bot.send_message(
         chat_id=chat_id,
-        text="🎙 Озвучиваю сценарий голосом Максима…\n<i>~10-30 сек</i>",
+        text=f"🎙 Озвучиваю сценарий {_voiced_by_phrase()}…\n<i>~10-30 сек</i>",
         parse_mode="HTML",
     )
     try:
@@ -976,7 +1017,7 @@ async def preview_broll_voiceover(
         await context.bot.send_audio(
             chat_id=chat_id,
             audio=af,
-            title="Озвучка (ИИ-голос Максима)",
+            title="Озвучка (ИИ-голос)",
             caption="🎧 Послушай озвучку. Ок → «Собрать ролик». Не нравится → "
                     "«Перегенерировать» (новая генерация) или «Записать свой голос».",
             reply_markup=_voiceover_gate_keyboard(),
@@ -2077,7 +2118,7 @@ async def assemble_broll_from_draft(
             pass
         caption = (
             f"✅ <b>B-roll ролик готов</b>\n\n"
-            f"Закадровый голос Максима + видеоряд из архива + субтитры. "
+            f"Закадровый ИИ-голос + видеоряд + субтитры. "
             f"Без аватара.\n\n"
             f"<i>Можно публиковать в Reels / TikTok / Shorts.</i>"
         )

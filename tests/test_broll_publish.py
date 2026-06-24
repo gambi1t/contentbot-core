@@ -141,7 +141,14 @@ def test_bridge_merge_seeds_pending(errors):
     _assert(st.get("card_data", {}).get("title") == bh._publication_title(draft["theme"]), "seed card_data.title", errors)
     _assert(st.get("script") == draft["script"], "seed script", errors)
     _assert(st.get("crosspost_card_id") == NID[:20], "seed crosspost_card_id = nid[:20]", errors)
-    _assert(st.get("brand") == "maksim", "seed brand=maksim (защита от мультибренда)", errors)
+    # Phase A High 2: канонический card_brand + tenant_id (раньше был мёртвый
+    # хардкод "brand":"maksim" — ревью предписал параметризовать по тенанту).
+    import tenant as _t
+    _tid = _t.active_tenant_id()
+    _assert(st.get("tenant_id") == _tid, "seed tenant_id = активный тенант (раздельно)", errors)
+    _assert(st.get("card_brand") == ("maksim" if _tid == "maksim" else "default"),
+            "seed card_brand канонический (не мёртвый brand-хардкод)", errors)
+    _assert("brand" not in st, "мёртвый ключ \"brand\" больше не пишется", errors)
     _assert(st.get("pipeline") == "broll", "seed pipeline=broll (маркер/диагностика)", errors)
     _assert(st.get("selfie_tg_post", "").startswith("<b>"), "seed selfie_tg_post (нормальный пост, не транскрипт)", errors)
     _assert(saved["n"] >= 1, "save_pending вызван", errors)
