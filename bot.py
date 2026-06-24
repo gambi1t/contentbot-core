@@ -421,6 +421,8 @@ HEYGEN_LOOKS = {
     # look9 "Белая рубашка" removed Apr 15 2026 — same issue as Чёрный свитер
     # under Avatar 3 (stiff face, only lip-sync).
     "look10": {"id": "f09aba54e96b4b7184c51b54d3b30260", "name": "Фиолетовый свитшот"},
+    "look11": {"id": "2cca63dbc8e0440cb8c875f6b852eff3", "name": "Стена с улыбкой"},
+    "look12": {"id": "c60d690f95ca41d18f0bb0284dc4c9fe", "name": "Улица с улыбкой"},
 }
 
 # --- Brand profiles ---
@@ -19049,12 +19051,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # v4 → /v3/videos = настоящий Avatar IV с жестами рук.
                 [InlineKeyboardButton("⚡ Avatar 3 — мягкое движение, дешевле", callback_data="heygen_ver:v3")],
                 [InlineKeyboardButton("✨ Avatar 4 — жесты рук, мимика", callback_data="heygen_ver:v4")],
+                # Парити с maksim (24 июня): пайплайны panferov = Максима, разница
+                # только в стиле. Хендлер heygen_selfvoice не гейтнут — был скрыт
+                # лишь UI-перекосом. Модель (3/IV) выбирается на след. шаге.
+                [InlineKeyboardButton("🎤 Озвучить своим голосом", callback_data="heygen_selfvoice")],
                 [InlineKeyboardButton("◀️ Назад к лукам", callback_data="heygen_looks")],
             ]
             ver_text = (
                 f"👤 Лук: {look_name}\n\n"
                 f"Avatar 3 — базовая модель, ~0.5 кредита/мин\n"
                 f"Avatar 4 — улучшенная мимика, жесты рук, ~1 кредит/10сек\n\n"
+                f"🎤 Своим голосом — пришлёшь голосовое, аватар озвучит им (версию выберешь дальше).\n\n"
                 f"Выбери версию:"
             )
         await query.edit_message_text(
