@@ -20238,13 +20238,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data == "finish":
-        # Auto-move to "Подбор скринкаст" if card exists
-        notion_page_id = data.get("notion_page_id")
-        if notion_page_id:
-            try:
-                await asyncio.to_thread(update_notion_status, notion_page_id, "Подбор скринкаст")
-            except Exception:
-                logger.warning("Не удалось обновить статус при завершении")
+        # НЕ трогаем статус Notion: корректный статус уже выставлен пайплайном
+        # (finalize → «Готово к публикации»; crosspost_go → «Опубликовано» после
+        # реальной публикации). «Готово» = закрыть меню, она НЕ должна откатывать
+        # канбан назад в промежуточный In-progress статус (был легаси-баг: затирала
+        # «Готово к публикации» у готового ролика).
 
         # Build full "what's next" menu instead of dead-end
         buttons = []
@@ -20287,7 +20285,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # приходится скроллить чат, и он думает, что кнопка не сработала.
         try:
             await query.edit_message_text(
-                "✅ Готово — карточка переведена в «Подбор скринкаст»."
+                "✅ Готово."
             )
         except Exception:
             pass
