@@ -64,6 +64,7 @@ _SELFIE_FINALIZE = None  # legacy bot.py finalizer
 _TITLE_PICKER = None  # optional override of the default first-sentence title UI
 _COVER_TEXT_STEP = None  # optional «текст на обложку?» step before title picker
 _SELFIE_DRAFT_CARD = None  # optional: создать черновик Notion-карточки на «ОК»
+_COVER_POOL_DIR_FN = None  # optional: () -> Path папка обложек активного бренда (бренд-aware)
 
 
 def init(
@@ -75,6 +76,7 @@ def init(
     title_picker=None,
     cover_text_step=None,
     draft_card=None,
+    cover_pool_dir_fn=None,
 ) -> None:
     """Inject bot.py dependencies. Call once at startup.
 
@@ -92,7 +94,7 @@ def init(
             cover-pick goes straight to title_picker (no text overlay step).
     """
     global _PENDING, _SAVE_PENDING, _ASSETS_DIR, _LOGGER, _SELFIE_FINALIZE
-    global _TITLE_PICKER, _COVER_TEXT_STEP, _SELFIE_DRAFT_CARD
+    global _TITLE_PICKER, _COVER_TEXT_STEP, _SELFIE_DRAFT_CARD, _COVER_POOL_DIR_FN
     _PENDING = pending
     _SAVE_PENDING = save_pending
     _ASSETS_DIR = assets_dir
@@ -101,6 +103,7 @@ def init(
     _TITLE_PICKER = title_picker
     _COVER_TEXT_STEP = cover_text_step
     _SELFIE_DRAFT_CARD = draft_card
+    _COVER_POOL_DIR_FN = cover_pool_dir_fn
 
 
 # ── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -2508,7 +2511,8 @@ async def _show_library(query, context, user_id: int, reroll: bool) -> None:
     shown = data.get("selfie_cover_shown_lib_ids", [])
     exclude = shown if reroll else None
     sample = await asyncio.to_thread(
-        selfie_cover.list_library_sample, 6, exclude
+        selfie_cover.list_library_sample, 6, exclude,
+        pool_dir=(_COVER_POOL_DIR_FN() if _COVER_POOL_DIR_FN else None),
     )
 
     chat_id = query.message.chat_id

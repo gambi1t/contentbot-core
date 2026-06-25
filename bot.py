@@ -13414,7 +13414,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_broll_cover_cb(
                 update, context, _cov_action, _cov_did, arg=_cov_arg,
                 cover_fn=generate_cover, publish_fn=save_media_permanent,
-                notion_cover_fn=_b2_notion_cover, chat_id=query.message.chat_id)
+                notion_cover_fn=_b2_notion_cover, chat_id=query.message.chat_id,
+                cover_pool_dir=_avatars_dir_for_brand(_get_active_brand_name()))
         return
 
     if query.data.startswith("b2title:"):
@@ -22382,6 +22383,9 @@ def main():
         # Раннее сохранение: создать черновик карточки на «ОК после расшифровки»
         # (как «комбайн»), чтобы работа не терялась при сбое посередине.
         draft_card=_selfie_create_draft_card,
+        # Бренд-aware папка обложек: panferov→assets/avatars (Артём), shoes→.../shoes.
+        # Раньше cover-библиотека была бренд-слепая → panferov видел чужие обложки.
+        cover_pool_dir_fn=lambda: _avatars_dir_for_brand(_get_active_brand_name()),
     )
 
     # Менеджер B-roll библиотеки (/library): загрузка/удаление клипов и фото.

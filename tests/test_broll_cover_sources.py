@@ -139,9 +139,9 @@ def test_library_grid_and_pick(errors):
     libdir = bh.DRAFTS_DIR / "lib"; libdir.mkdir(parents=True, exist_ok=True)
     f1 = libdir / "ph_a.jpg"; f1.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2048)
     f2 = libdir / "ph_b.jpg"; f2.write_bytes(b"\xff\xd8\xff" + b"\x00" * 2048)
-    bh.list_library_sample = lambda n=6, exclude_ids=None: [
+    bh.list_library_sample = lambda n=6, exclude_ids=None, pool_dir=None: [
         {"id": "ph_a", "path": str(f1)}, {"id": "ph_b", "path": str(f2)}]
-    bh.lookup_library_path = lambda pid: str(f1) if pid == "ph_a" else None
+    bh.lookup_library_path = lambda pid, pool_dir=None: str(f1) if pid == "ph_a" else None
     ctx = _ctx(_draft())
     asyncio.run(bh.handle_broll_cover_cb(_update(), ctx, "library", DID, chat_id=42))
     _assert(len(ctx.bot.photos) >= 2, f"превью библиотеки отправлены: {len(ctx.bot.photos)}", errors)

@@ -106,32 +106,36 @@ def probe_video_duration(video_path: str | Path) -> float:
 # ── Library ─────────────────────────────────────────────────────────────────
 
 
-def _scan_library() -> list[dict]:
-    """Просканировать _LIBRARY_DIR рекурсивно и вернуть [{id, path}, ...].
+def _scan_library(pool_dir=None) -> list[dict]:
+    """Просканировать папку обложек рекурсивно → [{id, path}, ...].
 
-    id = basename без расширения (стабильный, переживает рестарты).
+    pool_dir — папка обложек АКТИВНОГО БРЕНДА (caller резолвит бренд-aware:
+    panferov/default→assets/avatars Артёма, shoes→.../shoes). None → глобальный
+    _LIBRARY_DIR (back-compat). id = basename без расширения (стабильный).
     """
-    if not _LIBRARY_DIR or not _LIBRARY_DIR.exists():
+    base = pool_dir or _LIBRARY_DIR
+    if not base or not base.exists():
         return []
     out = []
-    for p in _LIBRARY_DIR.rglob("*"):
+    for p in base.rglob("*"):
         if p.is_file() and p.suffix.lower() in _IMG_EXT:
             out.append({"id": p.stem, "path": str(p)})
     return out
 
 
-def list_library_sample(n: int = 6, exclude_ids: list[str] | None = None) -> list[dict]:
-    """Случайные n фото из библиотеки.
+def list_library_sample(n: int = 6, exclude_ids: list[str] | None = None,
+                        pool_dir=None) -> list[dict]:
+    """Случайные n фото из библиотеки обложек.
 
     Args:
         n: сколько хочется (если в библиотеке меньше — вернёт все доступные).
-        exclude_ids: id, которых не хотим (для reroll). Если после фильтра меньше n —
-            вернётся столько, сколько осталось (без дублирования exclude).
+        exclude_ids: id, которых не хотим (для reroll).
+        pool_dir: папка обложек активного бренда (бренд-aware). None → глобал.
 
     Returns:
         [{"id": str, "path": str}, ...] — пустой список если библиотеки нет.
     """
-    all_photos = _scan_library()
+    all_photos = _scan_library(pool_dir)
     if not all_photos:
         return []
     if exclude_ids:
@@ -142,12 +146,13 @@ def list_library_sample(n: int = 6, exclude_ids: list[str] | None = None) -> lis
     return random.sample(all_photos, min(n, len(all_photos)))
 
 
-def lookup_library_path(photo_id: str) -> str | None:
+def lookup_library_path(photo_id: str, pool_dir=None) -> str | None:
     """Найти путь фото по id (для callback после клика на превью).
 
+    pool_dir — папка обложек активного бренда (бренд-aware). None → глобал.
     Возвращает None если id не найден.
     """
-    for p in _scan_library():
+    for p in _scan_library(pool_dir):
         if p["id"] == photo_id:
             return p["path"]
     return None

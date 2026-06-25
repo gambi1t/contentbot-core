@@ -1137,7 +1137,7 @@ async def start_broll_cover_pick(update, context, draft_id: str, chat_id=None) -
 
 async def handle_broll_cover_cb(update, context, action: str, draft_id: str, arg=None, *,
                                 cover_fn=None, publish_fn=None, notion_cover_fn=None,
-                                chat_id=None) -> None:
+                                chat_id=None, cover_pool_dir=None) -> None:
     """b2cov:* — кадр/skip (превью) · reject (пикер) · confirm (выбор текста) ·
     txt:on (ввод текста) · txt:off (готовая обложка без текста)."""
     draft = context.user_data.get("broll_draft")
@@ -1197,7 +1197,7 @@ async def handle_broll_cover_cb(update, context, action: str, draft_id: str, arg
 
     if action in ("library", "lib_reroll"):
         shown = draft.get("cover_lib_shown_ids", []) if action == "lib_reroll" else []
-        sample = list_library_sample(6, exclude_ids=shown)
+        sample = list_library_sample(6, exclude_ids=shown, pool_dir=cover_pool_dir)
         if not sample:
             await context.bot.send_message(
                 chat_id=chat_id, text="📚 Библиотека пуста — выбери кадр или загрузи фото.",
@@ -1219,7 +1219,7 @@ async def handle_broll_cover_cb(update, context, action: str, draft_id: str, arg
         return
 
     if action == "lib_pick":
-        path = lookup_library_path(arg) if arg else None
+        path = lookup_library_path(arg, pool_dir=cover_pool_dir) if arg else None
         if not path or not Path(path).is_file():
             await context.bot.send_message(
                 chat_id=chat_id, text="⚠️ Фото не найдено — выбери другое.",
