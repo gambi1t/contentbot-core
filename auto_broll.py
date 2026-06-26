@@ -41,6 +41,35 @@ class AutoBrollError(Exception):
     """Не удалось сгенерировать B-roll даже после повторов."""
 
 
+# ── Палитра и контекст активного тенанта (de-Maksim, срез C) ──────────
+def _palette_line() -> str:
+    """Палитра активного тенанта из style_contract (panferov → Nox Dark azure,
+    иначе → дефолт-оранж Максима). Цвет НЕ хардкодим в коде — приходит из
+    контракта (страж tests/test_core_no_brand_leak)."""
+    try:
+        from style_contract import load_style_contract
+        p = load_style_contract()["palette"]
+        return (
+            f"Палитра бренда (строго эти цвета): фон {p['bg_primary']}, "
+            f"подложка {p['bg_secondary']}, accent {p['accent']}, "
+            f"текст {p['text_primary']} основной / {p['text_muted']} подписи."
+        )
+    except Exception as e:
+        logger.warning(f"[auto_broll] палитра из контракта недоступна, generic-фолбэк: {e}")
+        return "Палитра бренда: тёмный фон, один яркий accent, светлый текст."
+
+
+def _business_context() -> str:
+    """Контекст автора активного тенанта (panferov → Артём/AI, иначе → Максим).
+    Переиспользуем готовый per-tenant резолвер из ai_video_broll (Rule №2)."""
+    try:
+        from ai_video_broll import _default_persona
+        return _default_persona()
+    except Exception as e:
+        logger.warning(f"[auto_broll] контекст автора недоступен: {e}")
+        return ""
+
+
 # ── Anthropic-ключ ───────────────────────────────────────────────────
 def _anthropic_key() -> str:
     key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -67,11 +96,13 @@ def _build_prompt(script_text: str, fix_error: str | None = None) -> str:
             "рендерился. Не меняй другие файлы. Сохрани 6 экспортов "
             "Auto1…Auto6."
         )
+    palette = _palette_line()
+    _ctx = _business_context()
+    ctx_block = f"\nКОНТЕКСТ АВТОРА: {_ctx}\n" if _ctx else ""
     return f"""Ты — моушн-дизайнер студии Постулат. Перепиши ЦЕЛИКОМ файл
 `src/scenes/AutoBroll.tsx` — 6 коротких графических B-roll-вставок под
-сценарий ролика для Telegram-канала предпринимателя (картинг + глэмпинг
-Life Drive, Тюмень).
-
+сценарий ролика для Telegram-канала.
+{ctx_block}
 СЦЕНАРИЙ (озвучка аватара, ~30 секунд):
 ─────────────────────────────────────
 {script_text}
@@ -92,7 +123,7 @@ Life Drive, Тюмень).
   через helper Band. Ничего не выносить за полосу.
 - Полный визуал вставки выходит за ~1 секунду (≈кадр 30) и дальше
   держится — сегмент монтажа короткий.
-- Стиль Постулат-dark: фон #0a0a0a, accent #ff5722, шрифт Inter Tight.
+- {palette} Шрифт Inter Tight.
   Импорт: import {{ interTight, jetBrainsMono, colors }} from "../fonts".
 - Только графика и моушн-дизайн: счётчики, графики, диаграммы, карточки,
   чек-листы. НЕ изображать людей, лица, руки, силуэты.

@@ -767,6 +767,7 @@ _CALLBACK_FEATURE_MAP = {
     "launch_approve:": "launch_monitor",
     "launch_retry:": "launch_monitor",
     "card_autobroll": "remotion",
+    "card_codescreen": "remotion",      # «💻 Экран кода» = screen_broll (Path B), тот же Remotion-флаг
     "card_hfbroll": "hyperframes",
     "card_aivideo": "ai_video",
     # Seedance (ai_video) — специфичные префиксы ПЕРЕД зонтиком b2src: ниже,
@@ -14134,6 +14135,66 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if query.data.startswith("card_codescreen:"):
+        # Экран кода/UI (Path B): screen_broll рендерит готовый Remotion-шаблон
+        # (AiToolDeepDive — терминал/код) с пропсами из сценария. Один клип-экран
+        # (1080×960, верхняя половина split под talking-head). Отдаём файлом.
+        card_id_prefix = query.data.split(":", 1)[1]
+        all_cards = await asyncio.to_thread(fetch_notion_cards, limit=30)
+        card = _pick_card_apply_brand(all_cards, card_id_prefix)
+        if not card:
+            await query.edit_message_text("Карточка не найдена.")
+            return
+        full_id = card["id"]
+        _cs_data = {"notion_page_id": full_id, "card_data": {"title": card["title"]}}
+        proj_dir = _project_dir(_cs_data)
+        if not proj_dir:
+            await query.edit_message_text("❌ Не удалось определить папку проекта.")
+            return
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        script_text = await asyncio.to_thread(fetch_notion_page_script, full_id)
+        if not script_text or len(script_text.strip()) < 30:
+            await query.edit_message_text(
+                "❌ В карточке нет сценария.\n\n"
+                "Сначала впиши или сгенерируй сценарий — экран строится из него."
+            )
+            return
+        await query.edit_message_text(
+            f"💻 Экран кода для «{card['title']}»\n\n"
+            f"Claude собирает пропсы из сценария, рендерю Remotion-экран. "
+            f"Это ~1-2 минуты — пришлю файл."
+        )
+        try:
+            from screen_broll import generate_screen_broll
+            clip, cost_usd = await asyncio.to_thread(
+                generate_screen_broll, script_text, proj_dir
+            )
+        except Exception as e:
+            logger.error(f"card_codescreen failed: {e}", exc_info=True)
+            await query.edit_message_text(f"⚠️ Не удалось собрать экран кода:\n{e}")
+            return
+        _on_sub = bool(os.getenv("CLAUDE_CODE_OAUTH_TOKEN"))
+        _cost_line = (
+            f"💳 Claude: ~${cost_usd:.3f} из подписки Max (не реальное списание)"
+            if _on_sub else f"💵 Claude (метеред API): ${cost_usd:.3f}"
+        )
+        try:
+            with open(clip, "rb") as _vf:
+                await context.bot.send_video(
+                    chat_id=query.message.chat_id, video=_vf,
+                    caption=(
+                        f"✅ Экран кода для «{card['title']}».\n{_cost_line}\n\n"
+                        f"Верхняя половина split (1080×960) — под talking-head."
+                    ),
+                )
+            await query.edit_message_text(f"✅ Экран кода готов: «{card['title']}».")
+        except Exception as e:
+            logger.error(f"card_codescreen send failed: {e}", exc_info=True)
+            await query.edit_message_text(
+                f"✅ Экран собран, но не смог отправить файл: {e}\nЛежит в {clip}."
+            )
+        return
+
     if query.data.startswith("card_hfbroll:"):
         # Автономная графика через HyperFrames (ВТОРОЙ движок, параллельно
         # Remotion). Claude Code на сервере пишет 6 HTML-композиций и рендерит
@@ -15211,6 +15272,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"card_autobroll:{full_id[:20]}",
             )])
             buttons.append([InlineKeyboardButton(
+                "💻 Экран кода / UI (Remotion)",
+                callback_data=f"card_codescreen:{full_id[:20]}",
+            )])
+            buttons.append([InlineKeyboardButton(
                 "🎨 Графика из сценария (HyperFrames)",
                 callback_data=f"card_hfbroll:{full_id[:20]}",
             )])
@@ -16279,6 +16344,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     buttons.append([InlineKeyboardButton(
                         "🎨 Графика из сценария (Remotion)",
                         callback_data=f"card_autobroll:{_card_id_for_autobroll}",
+                    )])
+                    buttons.append([InlineKeyboardButton(
+                        "💻 Экран кода / UI (Remotion)",
+                        callback_data=f"card_codescreen:{_card_id_for_autobroll}",
                     )])
                     buttons.append([InlineKeyboardButton(
                         "🎨 Графика из сценария (HyperFrames)",

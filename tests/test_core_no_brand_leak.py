@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 # Tenant-нейтральные модули ядра, которые НЕ должны нести бренд-палитру.
 # Расширять по мере выноса логики в core (каждый новый — отдельный prompt-builder).
-CORE_MODULES = ["hyperframes_broll.py"]
+CORE_MODULES = ["hyperframes_broll.py", "screen_broll.py", "auto_broll.py"]
 
 # Универсальные цвета — не бренд-подпись (бел/чёрн встречаются легитимно везде,
 # и оба тенанта делят белый текст). Их из набора стражимых исключаем.
