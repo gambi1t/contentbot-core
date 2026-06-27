@@ -44,9 +44,14 @@ class _FakeMsg:
 class _FakeBot:
     def __init__(self):
         self.texts = []
+        self.audios = 0
 
     async def send_message(self, chat_id, text=None, **kw):
         self.texts.append(text)
+        return _FakeMsg()
+
+    async def send_audio(self, chat_id, audio=None, **kw):
+        self.audios += 1
         return _FakeMsg()
 
 
@@ -135,6 +140,48 @@ def test_go_fallback_when_probe_fails(monkeypatch):
     asyncio.run(bh.handle_broll_source(
         _update(), _ctx(), None, did, SourceMode.AI_VIDEO_GO, voiceover_fn=_fake_voice))
     assert captured.get("clip_durations"), "при сбое probe всё равно передаём план (фолбэк)"
+
+
+# ── Реюз озвучки из GO в preview (нет дрейфа длины + второго TTS) ─────
+
+def _seed_voice(uid, script):
+    mp3 = bh.DRAFTS_DIR.parent / "broll_voice" / f"aivoice_{uid}.mp3"
+    mp3.parent.mkdir(parents=True, exist_ok=True)
+    mp3.write_bytes(b"\x00" * 4096)
+    mp3.with_suffix(".script.txt").write_text(script, encoding="utf-8")
+    return mp3
+
+
+def _voice_ctx(script):
+    return SimpleNamespace(bot=_FakeBot(),
+                           user_data={"broll_draft": {"script": script, "chat_id": 42}})
+
+
+def test_preview_reuses_go_voiceover():
+    _seed_voice(7, "СЦЕНАРИЙ ПРО КАРТИНГ И ДРАЙВ")
+    gen = {"n": 0}
+
+    def _voice(script, out):
+        gen["n"] += 1
+        Path(out).write_bytes(b"\x00" * 4096)
+
+    ctx = _voice_ctx("СЦЕНАРИЙ ПРО КАРТИНГ И ДРАЙВ")
+    asyncio.run(bh.preview_broll_voiceover(_update(), ctx, _voice, chat_id=42, status_fn=None))
+    assert gen["n"] == 0, "озвучка из GO должна переиспользоваться (маркер совпал), без второго TTS"
+    assert ctx.bot.audios == 1, "аудио-превью всё равно отправлено"
+
+
+def test_preview_regenerates_when_script_differs():
+    _seed_voice(7, "СТАРЫЙ СЦЕНАРИЙ")
+    gen = {"n": 0}
+
+    def _voice(script, out):
+        gen["n"] += 1
+        Path(out).write_bytes(b"\x00" * 4096)
+
+    ctx = _voice_ctx("НОВЫЙ СОВСЕМ ДРУГОЙ СЦЕНАРИЙ")
+    asyncio.run(bh.preview_broll_voiceover(_update(), ctx, _voice, chat_id=42, status_fn=None))
+    assert gen["n"] == 1, "при несовпадении сценария — генерим заново (нет ложного реюза)"
 
 
 if __name__ == "__main__":

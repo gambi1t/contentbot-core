@@ -687,11 +687,21 @@ async def handle_broll_source(
         if voiceover_fn is not None:
             try:
                 from .assembler import _probe_duration
-                sizing_voice = work / "sizing_voice.mp3"
+                # Пишем озвучку в КАНОНИЧНЫЙ путь AI-голоса (не throwaway): при выборе
+                # «AI-голос» preview_broll_voiceover переиспользует ЕЁ ЖЕ (маркер
+                # сценария) — клипы размечены ровно под ту озвучку, что идёт в сборку
+                # → нет дрейфа длины и второго TTS. Утечки sizing-файла тоже нет.
+                _av_uid = _uid_from_update(update)
+                sizing_voice = _ai_voice_path(_av_uid)
                 await context.bot.send_message(
                     chat_id, "🎙 Озвучиваю черновик, чтобы подогнать длину видео под голос…")
                 await asyncio.to_thread(voiceover_fn, draft.script_text, str(sizing_voice))
                 if sizing_voice.exists() and sizing_voice.stat().st_size > 1000:
+                    try:
+                        sizing_voice.with_suffix(".script.txt").write_text(
+                            draft.script_text, encoding="utf-8")
+                    except Exception:
+                        pass
                     dur = _probe_duration(sizing_voice)
                     if dur and dur > 0:
                         plan = ai_video_broll.fullscreen_plan_from_duration(dur)
@@ -1018,20 +1028,33 @@ async def preview_broll_voiceover(
     if chat_id is None:
         chat_id = draft.get("chat_id") or update.effective_chat.id
     mp3 = _ai_voice_path(uid)
+    # Реюз озвучки, сгенерённой на этапе AI_VIDEO_GO для замера длины (audio-first,
+    # Fix #5): тот же сценарий → не регенерим, иначе клипы сделаны под одну озвучку,
+    # а сборка режет под другую (дрейф длины) + лишний TTS. Маркер = .script.txt.
+    _marker = mp3.with_suffix(".script.txt")
+    _reuse = False
+    try:
+        if (mp3.exists() and mp3.stat().st_size > 1000 and _marker.exists()
+                and _marker.read_text(encoding="utf-8").strip()
+                == (draft.get("script") or "").strip()):
+            _reuse = True
+    except Exception:
+        _reuse = False
     status = await context.bot.send_message(
         chat_id=chat_id,
         text=f"🎙 Озвучиваю сценарий {_voiced_by_phrase()}…\n<i>~10-30 сек</i>",
         parse_mode="HTML",
     )
-    try:
-        await asyncio.to_thread(voiceover_fn, draft["script"], str(mp3))
-    except Exception as e:
-        logger.error(f"[broll] voiceover preview failed: {e}", exc_info=True)
+    if not _reuse:
         try:
-            await status.edit_text(f"❌ Озвучка не получилась: {e}")
-        except Exception:
-            pass
-        return
+            await asyncio.to_thread(voiceover_fn, draft["script"], str(mp3))
+        except Exception as e:
+            logger.error(f"[broll] voiceover preview failed: {e}", exc_info=True)
+            try:
+                await status.edit_text(f"❌ Озвучка не получилась: {e}")
+            except Exception:
+                pass
+            return
     if not mp3.exists() or mp3.stat().st_size < 1000:
         await status.edit_text("❌ Озвучка вернула пустой файл. Нажми «🔄 Перегенерировать».")
         return
