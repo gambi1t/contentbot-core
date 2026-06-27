@@ -424,6 +424,13 @@ def generate_auto_broll(
                     f"Ошибки: {'; '.join(e[:120] for e in errors)}"
                 )
         finally:
+            # AutoBroll.tsx — рантайм-скрэтч: клипы уже отрендерены, возвращаем
+            # файл к закоммиченной версии (из снимка). Иначе он остаётся грязным
+            # в дереве монорепо после каждого прогона → конфликт с гейтом чистого
+            # дерева при деплое. Эталон стиля — MaksimInserts2.tsx, не этот файл.
+            _ab_snap = snap / AUTOBROLL_REL
+            if _ab_snap.exists():
+                shutil.copy2(_ab_snap, BROLL_PROJECT / AUTOBROLL_REL)
             shutil.rmtree(snap, ignore_errors=True)
     finally:
         release_gen_flock(_flock)

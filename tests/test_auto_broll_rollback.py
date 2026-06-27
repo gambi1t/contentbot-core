@@ -62,6 +62,40 @@ def test_restore_keeps_autobroll_reverts_stray_removes_added(tmp_path, monkeypat
         shutil.rmtree(snap, ignore_errors=True)
 
 
+def test_generate_restores_autobroll_to_committed(tmp_path, monkeypatch):
+    """После генерации AutoBroll.tsx возвращается к закоммиченной версии (из
+    снимка) → дерево монорепо чистое (гейт деплоя), стрэй-правки откатаны."""
+    import claude_gen_lock
+
+    proj = tmp_path / "remotion"
+    proj.mkdir()
+    _mk_project(proj)  # AutoBroll.tsx="BASELINE auto", MaksimInserts2="REF original"
+    monkeypatch.setattr(auto_broll, "BROLL_PROJECT", proj)
+
+    def fake_claude(prompt):
+        # Claude переписывает AutoBroll.tsx (результат) + шалит в эталоне (стрэй)
+        (proj / "src" / "scenes" / "AutoBroll.tsx").write_text("GENERATED tsx", encoding="utf-8")
+        (proj / "src" / "scenes" / "MaksimInserts2.tsx").write_text("STRAY edit", encoding="utf-8")
+        return 0.0
+
+    monkeypatch.setattr(auto_broll, "_run_claude", fake_claude)
+    monkeypatch.setattr(
+        auto_broll, "_render_all",
+        lambda out_dir: ([out_dir / "autobroll" / "auto_01.mp4"], []),
+    )
+    monkeypatch.setattr(claude_gen_lock, "acquire_gen_flock", lambda name: "dummy")
+    monkeypatch.setattr(claude_gen_lock, "release_gen_flock", lambda f: None)
+
+    auto_broll.generate_auto_broll(
+        "Сценарий длиннее тридцати символов для теста точно.", tmp_path / "out"
+    )
+
+    # AutoBroll.tsx вернулся к закоммиченной версии → дерево чистое
+    assert (proj / "src" / "scenes" / "AutoBroll.tsx").read_text(encoding="utf-8") == "BASELINE auto"
+    # стрэй-правка эталона откатана
+    assert (proj / "src" / "scenes" / "MaksimInserts2.tsx").read_text(encoding="utf-8") == "REF original"
+
+
 def test_no_git_used_for_rollback():
     """auto_broll больше НЕ использует git для отката (безопасно как подпапка ядра)."""
     code = (ROOT / "auto_broll.py").read_text(encoding="utf-8")
