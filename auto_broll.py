@@ -3,8 +3,8 @@
 Цепочка: сценарий → Claude Code на сервере переписывает
 `src/scenes/AutoBroll.tsx` → компиляция/рендер 6 вставок → broll_01..06.mp4.
 
-Защита: откат лишних правок (git), повтор с передачей ошибки Клоду,
-жёсткий лимит попыток. Без участия человека.
+Защита: откат лишних правок (снимок проекта во temp, без git), повтор с
+передачей ошибки Клоду, жёсткий лимит попыток. Без участия человека.
 
 Можно запускать standalone для теста:
     python auto_broll.py "_montage_test3" < script.txt
@@ -14,8 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -196,39 +198,70 @@ def _build_prompt(script_text: str, fix_error: str | None = None) -> str:
 После записи файла — закончи. Компиляцию и рендер сделает оркестратор."""
 
 
-# ── git-базлайн и откат лишних правок ────────────────────────────────
-def _git(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args], cwd=BROLL_PROJECT,
-        capture_output=True, text=True, timeout=60,
-    )
+# ── Снимок проекта и откат лишних правок (БЕЗ git — безопасно как подпапка) ──
+# Раньше откат шёл через `git checkout` внутри BROLL_PROJECT. Если проект станет
+# подпапкой монорепо ядра, git checkout бил бы по КОРНЮ репозитория и затирал
+# несохранённые правки ядра (потеря кода). Поэтому: снимок исходников во временную
+# папку (замена git-baseline) + ручной restore. Никакого git внутри проекта.
+_SNAPSHOT_EXCLUDE = {"node_modules", "out", ".git", ".remotion", "__pycache__"}
 
 
-def ensure_git_baseline() -> None:
-    """Инициализирует git в проекте Remotion (один раз), чтобы можно
-    было откатывать лишние правки Клода."""
-    if (BROLL_PROJECT / ".git").exists():
-        return
-    _git(["init"])
-    _git(["config", "user.email", "bot@maksim-bot"])
-    _git(["config", "user.name", "maksim-bot"])
-    _git(["add", "-A"])
-    _git(["commit", "-m", "baseline"])
-    logger.info("[auto_broll] git baseline создан")
+def _snapshot_project() -> Path:
+    """Снимок исходников проекта (кроме тяжёлых/сборочных папок) во временную
+    директорию. Делается ОДИН раз перед генерацией; переиспользуется каждым
+    _restore_stray. Вызывающий обязан удалить (shutil.rmtree) в finally."""
+    snap = Path(tempfile.mkdtemp(prefix="broll_snap_"))
+    for item in BROLL_PROJECT.iterdir():
+        if item.name in _SNAPSHOT_EXCLUDE:
+            continue
+        dst = snap / item.name
+        if item.is_dir():
+            shutil.copytree(
+                item, dst, ignore=shutil.ignore_patterns(*_SNAPSHOT_EXCLUDE)
+            )
+        else:
+            shutil.copy2(item, dst)
+    return snap
 
 
-def _revert_stray() -> None:
-    """Откатывает все правки Клода КРОМЕ AutoBroll.tsx."""
-    if not (BROLL_PROJECT / ".git").exists():
-        return
-    changed = _git(["diff", "--name-only"]).stdout.split()
-    stray = [f for f in changed if f != AUTOBROLL_REL]
-    if stray:
-        _git(["checkout", "--", *stray])
-        logger.warning(f"[auto_broll] откатил лишние правки: {stray}")
-    # снимок AutoBroll.tsx — текущая версия становится новым базлайном
-    _git(["add", AUTOBROLL_REL])
-    _git(["commit", "-m", "autobroll update", "--allow-empty"])
+def _restore_stray(snap: Path) -> None:
+    """Возвращает проект к состоянию снимка КРОМЕ AutoBroll.tsx: откатывает лишние
+    правки Claude (изменённые/удалённые файлы) и удаляет добавленные им файлы.
+    AutoBroll.tsx сохраняется (это результат генерации). Замена git `_revert_stray`
+    — без git, безопасно даже если проект внутри монорепо ядра (все операции
+    укоренены строго в BROLL_PROJECT, ничего вне него).
+
+    Допущения (как и у старого git-механизма): проект НЕ использует симлинки в src
+    и значимые пустые директории (git их тоже не отслеживал). Путь к AutoBroll.tsx
+    сверяется по относительному пути регистронезависимо — переживает его удаление."""
+    autobroll_key = AUTOBROLL_REL.replace("\\", "/").lower()
+    reverted: list[str] = []
+    # 1. Восстановить изменённые/удалённые файлы из снимка (кроме AutoBroll.tsx).
+    for src in snap.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(snap)
+        if rel.as_posix().lower() == autobroll_key:
+            continue
+        dst = BROLL_PROJECT / rel
+        if not dst.exists() or dst.read_bytes() != src.read_bytes():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            reverted.append(str(rel))
+    # 2. Удалить файлы, которые Claude ДОБАВИЛ (есть в проекте, нет в снимке).
+    #    os.walk с обрезкой тяжёлых папок — не ходим в node_modules/out.
+    for root, dirs, files in os.walk(BROLL_PROJECT):
+        dirs[:] = [d for d in dirs if d not in _SNAPSHOT_EXCLUDE]
+        for f in files:
+            cur = Path(root) / f
+            rel = cur.relative_to(BROLL_PROJECT)
+            if rel.as_posix().lower() == autobroll_key:
+                continue
+            if not (snap / rel).exists():
+                cur.unlink()
+                reverted.append(f"-{rel}")
+    if reverted:
+        logger.warning(f"[auto_broll] откатил лишние правки Claude: {reverted}")
 
 
 # ── Claude Code ──────────────────────────────────────────────────────
@@ -361,31 +394,33 @@ def generate_auto_broll(
         raise AutoBrollError(str(e))
     total_cost = 0.0
     try:
-        ensure_git_baseline()
+        snap = _snapshot_project()
+        try:
+            logger.info("[auto_broll] Claude Code генерирует AutoBroll.tsx…")
+            total_cost += _run_claude(_build_prompt(script_text))
+            _restore_stray(snap)
 
-        logger.info("[auto_broll] Claude Code генерирует AutoBroll.tsx…")
-        total_cost += _run_claude(_build_prompt(script_text))
-        _revert_stray()
-
-        clips, errors = _render_all(out_dir)
-
-        fix_round = 0
-        while errors and fix_round < MAX_FIX_ROUNDS:
-            fix_round += 1
-            logger.info(
-                f"[auto_broll] чиню (попытка {fix_round}): {len(errors)} ошибок"
-            )
-            total_cost += _run_claude(
-                _build_prompt(script_text, fix_error="\n".join(errors))
-            )
-            _revert_stray()
             clips, errors = _render_all(out_dir)
 
-        if errors:
-            raise AutoBrollError(
-                f"B-roll не собрался после {MAX_FIX_ROUNDS} повторов. "
-                f"Ошибки: {'; '.join(e[:120] for e in errors)}"
-            )
+            fix_round = 0
+            while errors and fix_round < MAX_FIX_ROUNDS:
+                fix_round += 1
+                logger.info(
+                    f"[auto_broll] чиню (попытка {fix_round}): {len(errors)} ошибок"
+                )
+                total_cost += _run_claude(
+                    _build_prompt(script_text, fix_error="\n".join(errors))
+                )
+                _restore_stray(snap)
+                clips, errors = _render_all(out_dir)
+
+            if errors:
+                raise AutoBrollError(
+                    f"B-roll не собрался после {MAX_FIX_ROUNDS} повторов. "
+                    f"Ошибки: {'; '.join(e[:120] for e in errors)}"
+                )
+        finally:
+            shutil.rmtree(snap, ignore_errors=True)
     finally:
         release_gen_flock(_flock)
         _GEN_LOCK.release()
