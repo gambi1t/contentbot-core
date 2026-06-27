@@ -189,6 +189,9 @@ from publish_helpers import (
     extract_video_topic,
 )
 from selfie import handlers as selfie_handlers
+# Реюз 3-трекового пикера селфи/B-roll для пайплайна карточки/аватара (Fix #2,
+# SMM 25.06): тот же pick_n_tracks, что уже шарят selfie и broll/handlers.
+from selfie.music import pick_n_tracks as _card_pick_n_tracks
 import library_manager
 from assemble_helpers import music_button_label
 from fal_handlers import (
@@ -3989,6 +3992,31 @@ async def _broll_tg_post(script: str, description: str, topic: str) -> str:
     пост, а не сырой транскрипт (Артём: «нормальный пост везде»)."""
     return await asyncio.to_thread(
         tg_post_writer.rewrite_for_telegram, script, description, topic, claude)
+
+
+async def _broll_notion_attach(card_id: str, video_path: str) -> None:
+    """Прикрепить ссылку на финальный B-roll-ролик к карточке Notion — DI-хелпер
+    для broll.handlers (Fix #4, SMM 25.06). Паттерн селфи/аватара (bot.py ~15000):
+    save_media_permanent (постоянный nginx-URL) → notion.blocks.children.append
+    (paragraph rich_text со ссылкой). Прокинут параметром, т.к. notion-клиент и
+    save_media_permanent живут в bot.py — broll.handlers их импортировать не может
+    (циклический импорт)."""
+    if not card_id or not video_path:
+        return
+    final_url = await asyncio.to_thread(save_media_permanent, str(video_path), "broll_final")
+    await asyncio.to_thread(
+        notion.blocks.children.append,
+        block_id=card_id,
+        children=[{
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [
+                {"type": "text", "text": {"content": "🎬 Финальный B-roll ролик: "}},
+                {"type": "text", "text": {"content": final_url, "link": {"url": final_url}}},
+            ]},
+        }],
+    )
+    logger.info(f"[broll] ссылка на финал добавлена в карточку: {final_url}")
 
 
 # --- Notion helpers ---
@@ -10030,7 +10058,7 @@ async def _consume_broll_ownvoice(update: Update, context: ContextTypes.DEFAULT_
         update, context, _own_voiceover, chat_id=update.effective_chat.id,
         status_fn=update_notion_status, deliver_fn=_bdeliver,
         register_fn=_broll_register_video, charge_fn=_billing_charge_if_needed,
-        tg_post_fn=_broll_tg_post)
+        tg_post_fn=_broll_tg_post, notion_attach_fn=_broll_notion_attach)
 
 
 async def _consume_selfvoice_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11766,6 +11794,66 @@ def _compose_publication_descriptions(script_text: str) -> tuple[list[str], str]
     return variants, extracted_cta
 
 
+async def _send_card_music_previews(context, chat_id, cat, card_prefix, data) -> None:
+    """3 АУДИО-превью трека для пайплайна карточки/аватара (Fix #2, SMM 25.06).
+
+    Раньше `music_cat:` показывал ТЕКСТ-кнопки «🎵 Трек N (45с)» без прослушки.
+    Теперь — как в селфи (`_send_track_previews`) и B-roll (`_send_broll_music_previews`):
+    каждый трек = отдельное audio-сообщение с кнопкой «✅ Выбрать этот»
+    (`music_apply:<id>:<prefix>` — формат не меняется, мукс в `music_apply:`
+    остаётся как был). Показанные id копятся в `data` для исключения на reroll.
+    """
+    import music_mixer
+    shown = (data or {}).get("music_shown_ids") or []
+    tracks = _card_pick_n_tracks(cat, n=3, exclude_ids=shown)
+    if not tracks:  # все уже показаны — сброс и заново
+        shown = []
+        tracks = _card_pick_n_tracks(cat, n=3, exclude_ids=[])
+    if not tracks:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Нет треков в этой категории.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")]]),
+        )
+        return
+    meta = (music_mixer.list_categories() or {}).get(cat, {})
+    cat_label = meta.get("label", cat)
+    if data is not None:
+        data["music_shown_ids"] = list({*shown, *(t["id"] for t in tracks)})
+        try:
+            _save_pending(pending)
+        except Exception:
+            pass
+    # 3 аудио с кнопкой «✅ Выбрать этот» под каждым.
+    for i, t in enumerate(tracks, 1):
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton(
+                f"✅ Выбрать этот ({t['id']})",
+                callback_data=f"music_apply:{t['id']}:{card_prefix}",
+            )]])
+            with open(t["file"], "rb") as af:
+                await context.bot.send_audio(
+                    chat_id=chat_id, audio=af,
+                    title=f"{i}. {t['id']}", performer=cat_label,
+                    duration=int(t.get("duration", 0)), reply_markup=kb,
+                )
+        except Exception as e:
+            logger.error(f"[music] send_audio failed for {t.get('id')}: {e}")
+    # Footer-сообщение с управлением — остаётся последним в ленте.
+    footer_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔀 Другие треки", callback_data=f"music_cat:{cat}:{card_prefix}")],
+        [InlineKeyboardButton("⬅️ Сменить категорию", callback_data=f"music_pick:{card_prefix}")],
+        [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")],
+    ])
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=("☝️ Послушай 3 трека выше и нажми «✅» под нужным.\n\n"
+              "Музыка наложится на финал с автоприглушением под голосом."),
+        reply_markup=footer_kb,
+    )
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button presses."""
     query = update.callback_query
@@ -13498,7 +13586,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update, context, chat_id=query.message.chat_id,
             status_fn=update_notion_status, deliver_fn=_bdeliver,
             register_fn=_broll_register_video, charge_fn=_billing_charge_if_needed,
-            tg_post_fn=_broll_tg_post)
+            tg_post_fn=_broll_tg_post, notion_attach_fn=_broll_notion_attach)
         return
 
     if query.data == "b2vop:regen":
@@ -16588,6 +16676,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Жми «Опубликовать» → выбери соцсети.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📢 Опубликовать в соцсети", callback_data=f"crosspost:{_cid}")],
+                # Вход в 3-трековый аудио-пикер (final_video.mp4 уже готов) — Fix #2.
+                [InlineKeyboardButton("🎵 Добавить музыку", callback_data=f"music_pick:{_cid}")],
                 [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{_cid}")],
             ]),
         )
@@ -20070,33 +20160,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("music_cat:"):
-        # Show 3 random tracks from category
+        # 3 АУДИО-превью (не текст-кнопки) — Fix #2 (SMM 25.06). Реюз пикера селфи
+        # через хелпер _send_card_music_previews.
         import music_mixer
         parts = query.data.split(":", 2)
         cat = parts[1]
         card_prefix = parts[2] if len(parts) > 2 else ""
-        tracks = music_mixer.list_tracks(cat)
-        if not tracks:
-            await query.answer("Нет треков в этой категории", show_alert=True)
-            return
-        import random as _rnd
-        sample = _rnd.sample(tracks, min(3, len(tracks)))
-        buttons = []
-        for i, t in enumerate(sample, 1):
-            label = f"🎵 Трек {i} ({t['duration']:.0f}с)"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"music_apply:{t['id']}:{card_prefix}")])
-        buttons.append([InlineKeyboardButton("🔀 Другие треки", callback_data=f"music_cat:{cat}:{card_prefix}")])
-        buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"music_pick:{card_prefix}")])
-
-        cats = music_mixer.list_categories()
-        meta = cats.get(cat, {})
-        await query.edit_message_text(
-            f"{meta.get('emoji', '🎵')} <b>{meta.get('label', cat)}</b>\n"
-            f"<i>{meta.get('desc', '')}</i>\n\n"
-            "Выбери один из трёх вариантов:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        meta = (music_mixer.list_categories() or {}).get(cat, {})
+        # Гасим кнопки исходного сообщения (категория / прошлый footer) коротким
+        # интро — текст всегда меняется относительно прежнего, без "not modified".
+        try:
+            await query.edit_message_text(
+                f"{meta.get('emoji', '🎵')} <b>{meta.get('label', cat)}</b> — подбираю треки...",
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            logger.debug(f"[music] intro edit skipped: {e}")
+        await _send_card_music_previews(context, query.message.chat_id, cat, card_prefix, data)
         return
 
     if query.data.startswith("music_apply:"):

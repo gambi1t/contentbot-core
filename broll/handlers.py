@@ -1033,6 +1033,7 @@ async def accept_broll_voiceover(
     register_fn=None,
     charge_fn=None,
     tg_post_fn=None,
+    notion_attach_fn=None,
 ) -> None:
     """b2vop:accept → озвучка принята: собрать ролик, ПЕРЕИСПОЛЬЗУЯ уже
     сгенерённый mp3 через voiceover_fn-шим (copyfile) — как own-voice. assemble
@@ -1054,7 +1055,7 @@ async def accept_broll_voiceover(
     await assemble_broll_from_draft(
         update, context, _reuse_voiceover, chat_id=chat_id, status_fn=status_fn,
         deliver_fn=deliver_fn, register_fn=register_fn, charge_fn=charge_fn,
-        tg_post_fn=tg_post_fn)
+        tg_post_fn=tg_post_fn, notion_attach_fn=notion_attach_fn)
 
 
 async def regen_broll_voiceover(
@@ -2014,6 +2015,7 @@ async def assemble_broll_from_draft(
     register_fn=None,
     charge_fn=None,
     tg_post_fn=None,
+    notion_attach_fn=None,
 ) -> None:
     """Фаза 2: озвучка → ffmpeg-монтаж → субтитры → отправка MP4.
 
@@ -2168,6 +2170,15 @@ async def assemble_broll_from_draft(
                     register_fn=register_fn, charge_fn=charge_fn)
             pub_ready = await bridge_broll_to_publication(
                 draft, uid=_uid, tg_post_fn=tg_post_fn)
+            # Fix #4 (SMM 25.06): прикрепить ссылку на финал к карточке Notion —
+            # как селфи/аватар (раньше B-roll ссылку не писал). DI: notion-клиент и
+            # save_media_permanent живут в bot.py → прокинуты как notion_attach_fn.
+            # Один choke point → покрывает AUTO/HF/UPLOAD/MANUAL/AI_VIDEO.
+            if notion_attach_fn:
+                try:
+                    await notion_attach_fn(notion_page_id, draft["final_path"])
+                except Exception as e:
+                    logger.warning(f"[broll] ссылка на финал в карточку не добавлена: {e}")
 
         action_rows = []
         # Инкремент 4: обложка — первый пост-сборочный шаг (если монтаж сохранён).
