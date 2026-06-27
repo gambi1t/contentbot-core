@@ -31,6 +31,12 @@ def test_callback_sets_surgical_state():
     assert '"script_surgical_wait"' in SRC, "нет состояния ожидания инструкции"
 
 
+def test_noop_rearms_surgical_state():
+    # state «script_surgical_wait» ВЫСТАВЛЯЕТСЯ дважды: в callback и в no-op-ветке
+    # (восстановление режима — иначе подсказка «переформулируй» не работает).
+    assert SRC.count('= "script_surgical_wait"') >= 2, "no-op не восстанавливает surgical-режим"
+
+
 def test_text_and_voice_handlers_call_apply():
     # _apply_surgical_edit: определение + вызов из text-хендлера + из voice-хендлера
     assert SRC.count("_apply_surgical_edit") >= 3, "точечная правка не подключена в text+voice"

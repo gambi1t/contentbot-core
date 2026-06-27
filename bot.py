@@ -10583,7 +10583,15 @@ async def _apply_surgical_edit(user_id: int, instruction: str, msg) -> None:
             surgical_edit_script, claude, script, instruction
         )
     except SurgicalNoOp as e:
-        preview = f"📝 СЦЕНАРИЙ:\n\n{script}\n\n———\n⚠️ {e}"
+        # Правка не применилась — НЕ сбрасываем surgical-режим: даём
+        # переформулировать следующим сообщением (как карусель), иначе подсказка
+        # «переформулируй» вводит в заблуждение.
+        pending[user_id]["state"] = "script_surgical_wait"
+        _save_pending(pending)
+        preview = (
+            f"📝 СЦЕНАРИЙ:\n\n{script}\n\n———\n"
+            f"📊 {len(script)} символов\n⚠️ {e}"
+        )
         await msg.edit_text(preview, reply_markup=_script_preview_keyboard())
         return
     except Exception as e:

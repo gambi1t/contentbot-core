@@ -62,6 +62,14 @@ def test_noop_whitespace_insensitive():
         ss.surgical_edit_script(_FakeClaude(noisy), SCRIPT, "убери лишнюю точку")
 
 
+def test_noop_when_script_starts_with_scenario_prefix():
+    """Сценарий сам начинается с «СЦЕНАРИЙ» и Sonnet вернул его дословно (no-op):
+    срез префикса НЕ должен маскировать no-op (иначе вернётся усечённый текст)."""
+    script_pref = "СЦЕНАРИЙ:\nПривет. Тело сценария про ИИ и автоматизацию."
+    with pytest.raises(ss.SurgicalNoOp):
+        ss.surgical_edit_script(_FakeClaude(script_pref), script_pref, "поправь что-нибудь")
+
+
 def test_strips_scenario_prefix():
     edited = "СЦЕНАРИЙ:\nПривет. Сегодня покажу, как ИИ снимает рутину. Это меняет мир."
     out = ss.surgical_edit_script(_FakeClaude(edited), SCRIPT, "всё → мир")

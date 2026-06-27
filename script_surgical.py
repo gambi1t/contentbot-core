@@ -60,11 +60,14 @@ def surgical_edit_script(
         system=_SURG_SCRIPT_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
-    edited = (resp.content[0].text if resp.content else "").strip()
+    raw = (resp.content[0].text if resp.content else "").strip()
+    edited = raw
     if edited.upper().startswith("СЦЕНАРИЙ"):
         edited = edited.split("\n", 1)[-1].strip()
 
-    if not edited or _norm(edited) == _norm(script):
+    # No-op: Sonnet вернул то же. Сравниваем И сырой ответ — на случай, если
+    # сам сценарий начинался с «СЦЕНАРИЙ» и срез выше создал бы ложную «правку».
+    if not edited or _norm(edited) == _norm(script) or _norm(raw) == _norm(script):
         rp = _extract_replace_pattern(instruction)
         hint = f" Не нашёл в тексте: «{rp[0]}»." if rp else ""
         raise SurgicalNoOp(
