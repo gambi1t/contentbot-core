@@ -32,19 +32,47 @@ def _prompt_for(tenant_id, monkeypatch):
     return auto_broll._build_prompt(SCRIPT)
 
 
-def test_panferov_prompt_is_azure_and_de_maksim(monkeypatch):
+def test_prompt_forbids_hex_and_mandates_colors(monkeypatch):
+    """Option B: промпт велит использовать env-driven colors.*, ЗАПРЕЩАЕТ hex-литералы
+    (иначе env-инъекция палитры обходится). Палитра в промпте больше НЕ зашита."""
     p = _prompt_for("panferov", monkeypatch)
-    assert "#2E9BE0" in p, "нет azure-акцента panferov в промпте"
-    assert "#ff5722" not in p.lower(), "оранж Максима протёк в промпт panferov"
+    assert "colors.accent" in p, "нет правила использовать env-driven colors.*"
+    assert "не вписывай hex" in p.lower(), "нет запрета хардкодить hex-литералы"
+    assert "#2e9be0" not in p.lower() and "#ff5722" not in p.lower(), (
+        "в промпте остался зашитый hex — палитра должна приходить из env"
+    )
+
+
+def test_panferov_prompt_de_maksim_persona(monkeypatch):
+    p = _prompt_for("panferov", monkeypatch)
     assert "картинг" not in p.lower(), "бизнес Максима (картинг) в промпте panferov"
     assert "life drive" not in p.lower(), "бренд Максима (Life Drive) в промпте panferov"
     assert ("Артём" in p) or ("Панфёров" in p), "нет персоны Артёма"
 
 
-def test_default_prompt_keeps_maksim_orange(monkeypatch):
+def test_default_prompt_keeps_maksim_persona(monkeypatch):
     p = _prompt_for(None, monkeypatch)
-    assert "#FF5722" in p.upper(), "дефолт-контракт (Максим) потерял оранж"
     assert "Максим" in p, "нет персоны Максима в дефолте"
+
+
+def test_palette_env_panferov_is_azure(monkeypatch):
+    monkeypatch.setenv("TENANT_ID_EXPECTED", "panferov")
+    env = auto_broll._palette_env()
+    assert env["REMOTION_ACCENT"] == "#2E9BE0", "panferov accent не azure в env"
+    assert env["REMOTION_BG"] == "#0F172A", "panferov bg не navy в env"
+    assert env.get("REMOTION_ACCENT_DIM"), "нет производного accentDim"
+
+
+def test_palette_env_default_is_maksim_orange(monkeypatch):
+    monkeypatch.delenv("TENANT_ID_EXPECTED", raising=False)
+    env = auto_broll._palette_env()
+    assert env.get("REMOTION_ACCENT", "").upper() == "#FF5722", "дефолт не оранж Максима"
+
+
+def test_darken_produces_darker_hex():
+    d = auto_broll._darken("#2E9BE0")
+    assert d.startswith("#") and len(d) == 7, f"плохой hex: {d}"
+    assert d.upper() != "#2E9BE0", "не затемнил"
 
 
 def test_no_brand_hex_literal_in_code():

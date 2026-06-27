@@ -43,20 +43,17 @@ class AutoBrollError(Exception):
 
 # ── Палитра и контекст активного тенанта (de-Maksim, срез C) ──────────
 def _palette_line() -> str:
-    """Палитра активного тенанта из style_contract (panferov → Nox Dark azure,
-    иначе → дефолт-оранж Максима). Цвет НЕ хардкодим в коде — приходит из
-    контракта (страж tests/test_core_no_brand_leak)."""
-    try:
-        from style_contract import load_style_contract
-        p = load_style_contract()["palette"]
-        return (
-            f"Палитра бренда (строго эти цвета): фон {p['bg_primary']}, "
-            f"подложка {p['bg_secondary']}, accent {p['accent']}, "
-            f"текст {p['text_primary']} основной / {p['text_muted']} подписи."
-        )
-    except Exception as e:
-        logger.warning(f"[auto_broll] палитра из контракта недоступна, generic-фолбэк: {e}")
-        return "Палитра бренда: тёмный фон, один яркий accent, светлый текст."
+    """Инструкция по палитре для Claude (Option B): цвета — ТОЛЬКО через
+    env-driven токен colors.* из ../fonts; hex-литералы ЗАПРЕЩЕНЫ, иначе
+    per-tenant env-инъекция при рендере обходится (panferov получит оранж
+    вместо azure). Палитра впрыскивается per-tenant через REMOTION_*-env
+    (см. _palette_env), поэтому здесь — правило, а не конкретные цвета."""
+    return (
+        "ВСЕ цвета — ТОЛЬКО через colors.* из ../fonts (colors.bg / colors.card / "
+        "colors.accent / colors.accentDim / colors.text / colors.textDim / "
+        "colors.border). НЕ вписывай hex-литералы цветов (#rrggbb) — палитра "
+        "приходит per-tenant из env при рендере; зашитый hex её перебьёт."
+    )
 
 
 def _business_context() -> str:
@@ -68,6 +65,57 @@ def _business_context() -> str:
     except Exception as e:
         logger.warning(f"[auto_broll] контекст автора недоступен: {e}")
         return ""
+
+
+def _darken(hex_color: str, factor: float = 0.72) -> str:
+    """Затемнить hex (для accentDim, которого нет в контракте)."""
+    h = (hex_color or "").lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return hex_color
+    return "#%02X%02X%02X" % (int(r * factor), int(g * factor), int(b * factor))
+
+
+def _lighten(hex_color: str, amt: int = 0x18) -> str:
+    """Осветлить hex аддитивно (для border — рамка видимо светлее фона/подложки)."""
+    h = (hex_color or "").lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return hex_color
+    return "#%02X%02X%02X" % (min(255, r + amt), min(255, g + amt), min(255, b + amt))
+
+
+def _palette_env() -> dict:
+    """REMOTION_*-env с палитрой активного тенанта — впрыскивается в рендер
+    ОБЩЕГО Node-проекта (Option B: один проект, палитра per-tenant из
+    style_contract, как HyperFrames). Заполняется для ЛЮБОГО тенанта с
+    контрактом: default → style_contract.json (оранж Максима), panferov →
+    style_contract.panferov.json (Nox Dark azure). Пусто ТОЛЬКО если контракт-
+    файла нет — тогда Node берёт дефолты токенов (тоже оранж).
+    accentDim/border нет в контракте → производные (затемнённый accent /
+    осветлённая подложка, чтобы рамка не сливалась с фоном)."""
+    try:
+        from style_contract import load_style_contract
+        p = load_style_contract()["palette"]
+        accent = p["accent"]
+        return {
+            "REMOTION_BG": p["bg_primary"],
+            "REMOTION_CARD": p["bg_secondary"],
+            "REMOTION_ACCENT": accent,
+            "REMOTION_ACCENT_DIM": _darken(accent),
+            "REMOTION_TEXT": p["text_primary"],
+            "REMOTION_TEXT_DIM": p["text_muted"],
+            "REMOTION_BORDER": _lighten(p["bg_secondary"]),
+        }
+    except Exception as e:
+        logger.warning(f"[broll] palette-env недоступна, дефолт проекта: {e}")
+        return {}
 
 
 # ── Anthropic-ключ ───────────────────────────────────────────────────
@@ -243,6 +291,7 @@ def _render(comp_id: str, out_path: Path) -> tuple[bool, str]:
                 "npx", "remotion", "render", comp_id, str(out_path),
             ],
             cwd=BROLL_PROJECT,
+            env={**os.environ, **_palette_env()},  # палитра тенанта в общий проект
             capture_output=True, text=True, timeout=RENDER_TIMEOUT,
         )
     except subprocess.TimeoutExpired:

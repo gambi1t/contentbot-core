@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 # Переиспользуем единый источник пути проекта и ключа (не плодим свой).
-from auto_broll import BROLL_PROJECT, _anthropic_key  # noqa: E402
+from auto_broll import BROLL_PROJECT, _anthropic_key, _palette_env  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +175,7 @@ def _render_screen(comp_id: str, props_path: Path, out_path: Path) -> tuple[bool
     try:
         proc = subprocess.run(
             cmd, cwd=BROLL_PROJECT,
+            env={**os.environ, **_palette_env()},  # палитра тенанта в общий проект
             capture_output=True, text=True, timeout=RENDER_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
