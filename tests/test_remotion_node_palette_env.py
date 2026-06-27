@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-NODE = Path(os.getenv("BROLL_PROJECT_DIR") or (ROOT.parent / "panferov-broll"))
+NODE = Path(os.getenv("BROLL_PROJECT_DIR") or (ROOT / "remotion"))
 
 TOKEN_FILES = [NODE / "src" / "fonts.ts", NODE / "src" / "design-tokens.ts"]
 TEMPLATE_FILES = [

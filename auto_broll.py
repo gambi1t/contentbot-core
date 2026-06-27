@@ -28,8 +28,12 @@ logger = logging.getLogger(__name__)
 _GEN_LOCK = threading.Lock()
 
 # ── Пути и константы ─────────────────────────────────────────────────
+# Монорепо: Remotion-проект — подпапка `remotion/` рядом с ботом (в любом
+# воркри́се: maksim-bot-panferov/remotion, maksim-bot/remotion; на сервере —
+# <core>/remotion). Имя НЕ `broll` — там Python-пакет B-roll Pipeline 2.
+# Env BROLL_PROJECT_DIR переопределяет (легаси/нестандартный деплой).
 BROLL_PROJECT = Path(
-    os.getenv("BROLL_PROJECT_DIR", "/home/maksim-bot/panferov-broll")
+    os.getenv("BROLL_PROJECT_DIR", str(Path(__file__).resolve().parent / "remotion"))
 )
 AUTOBROLL_REL = "src/scenes/AutoBroll.tsx"
 N_INSERTS = 6
