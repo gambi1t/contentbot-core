@@ -684,6 +684,7 @@ async def handle_broll_source(
         # Озвучка дёшева относительно Kling; финальную (AI/свой голос) сделает
         # обычный voice-флоу позже. Фолбэк на оценку слов, если озвучка не вышла.
         plan = None
+        _probed_dur = None
         if voiceover_fn is not None:
             try:
                 from .assembler import _probe_duration
@@ -704,6 +705,7 @@ async def handle_broll_source(
                         pass
                     dur = _probe_duration(sizing_voice)
                     if dur and dur > 0:
+                        _probed_dur = dur
                         plan = ai_video_broll.fullscreen_plan_from_duration(dur)
                         logger.info(f"[broll] audio-first: озвучка {dur:.1f}с → "
                                     f"клипы {plan['durations']} (={plan['total_sec']}с)")
@@ -714,6 +716,17 @@ async def handle_broll_source(
             plan = {"n_clips": wp["n_clips"], "durations": [wp["clip_len"]] * wp["n_clips"],
                     "total_sec": wp["n_clips"] * wp["clip_len"], "est_sec": wp["est_sec"],
                     "cost": wp["cost"]}
+        # C3 (CTO-ревью): если план НЕ покрывает озвучку (cost-cap обрезал длинную
+        # озвучку) — НЕ платим за Kling, который заведомо упадёт на сборке (видео
+        # короче речи). Отказываем понятно ДО оплаты, а не после.
+        if _probed_dur and plan["total_sec"] + 1.0 < _probed_dur:
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ Озвучка вышла ~{_probed_dur:.0f}с — длиннее лимита AI-видео "
+                f"({ai_video_broll.AI_VIDEO_MAX_DURATION_SEC}с/ролик). Сократи сценарий и "
+                f"запусти заново (иначе пришлось бы платить за клипы, которых не хватит "
+                f"на всю озвучку).")
+            return
         draft.source_mode = SourceMode.AI_VIDEO
         draft.status = Status.HF_RUNNING
         draft.work_dir = str(work)
@@ -2226,7 +2239,10 @@ async def assemble_broll_from_draft(
             # Один choke point → покрывает AUTO/HF/UPLOAD/MANUAL/AI_VIDEO.
             if notion_attach_fn:
                 try:
-                    await notion_attach_fn(notion_page_id, draft["final_path"])
+                    # H3 (CTO-ревью): timeout — Notion/upload не должны подвесить хвост
+                    # (доставка ролика уже прошла выше; ссылка вторична).
+                    await asyncio.wait_for(
+                        notion_attach_fn(notion_page_id, draft["final_path"]), timeout=15)
                 except Exception as e:
                     logger.warning(f"[broll] ссылка на финал в карточку не добавлена: {e}")
 

@@ -112,6 +112,58 @@ def test_generate_per_clip_persists_durations(monkeypatch, tmp_path):
     assert plan["clips"][1]["duration"] == 5     # per-clip длина сохранена для regen
 
 
+def test_generate_pads_when_director_returns_fewer(monkeypatch, tmp_path):
+    # C2: режиссёр вернул 2 плана, а длин 3 → паддинг до 3 ДО оплаты (нет недобора).
+    calls = []
+
+    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
+        calls.append(duration)
+        Path(dest).write_bytes(b"x")
+        return str(dest)
+
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(A.fal_media, "generate_kling_video", fake_kling)
+    monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [
+        {"beat": "a", "prompt": "Multiple shots. p1", "negative_prompt": "t"},
+        {"beat": "b", "prompt": "Multiple shots. p2", "negative_prompt": "t"}])  # 2 плана
+
+    paths, cost = A.generate_ai_broll("сц", tmp_path, claude=object(), clip_durations=[10, 10, 5])
+    assert calls == [10, 10, 5], f"паддинг до 3 клипов с верными длинами: {calls}"
+    assert len(paths) == 3
+
+
+def test_generate_trims_when_director_returns_more(monkeypatch, tmp_path):
+    # C2: режиссёр вернул 4 плана, а длин 2 → обрезаем до 2 (не платим за лишнее).
+    calls = []
+
+    def fake_kling(prompt, dest, duration=5, aspect="9:16", negative_prompt=None, errors_out=None):
+        calls.append(duration)
+        Path(dest).write_bytes(b"x")
+        return str(dest)
+
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(A.fal_media, "generate_kling_video", fake_kling)
+    monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [
+        {"beat": x, "prompt": f"Multiple shots. {x}", "negative_prompt": "t"} for x in "abcd"])  # 4
+
+    paths, cost = A.generate_ai_broll("сц", tmp_path, claude=object(), clip_durations=[10, 5])
+    assert calls == [10, 5], f"обрезано до 2 клипов (не платим за лишние): {calls}"
+    assert len(paths) == 2
+
+
+def test_generate_raises_if_plan_empty_before_paying(monkeypatch, tmp_path):
+    # C2: пустой план → raise ДО любого платного Kling-вызова.
+    calls = []
+    monkeypatch.setattr(A.fal_media, "kling_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(A.fal_media, "generate_kling_video",
+                        lambda *a, **k: calls.append(1) or "x")
+    monkeypatch.setattr(A, "plan_clips", lambda *a, **k: [])  # режиссёр вернул 0
+
+    with pytest.raises(A.AiVideoError):
+        A.generate_ai_broll("сц", tmp_path, claude=object(), clip_durations=[10, 5])
+    assert calls == [], "ни одного платного Kling-вызова при пустом плане"
+
+
 def test_backward_compat_uniform_unchanged(monkeypatch, tmp_path):
     # без clip_durations — старое поведение (единый duration), как зовёт селфи
     calls = []

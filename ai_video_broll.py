@@ -393,6 +393,27 @@ def _default_claude():
     return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 
+def _normalize_plan_count(plans, required_n: int) -> list:
+    """C2 (CTO-ревью): привести число планов к required_n ДО оплаты.
+
+    >N → обрезаем (не платим за лишние клипы). <N → дополняем continuation-
+    промптом (повтор последнего бита — визуальное продолжение), БЕЗ нового вызова
+    режиссёра и БЕЗ лишних платных секунд (длины уже спланированы). Пустой план
+    остаётся пустым → вызывающий обязан поднять ошибку до Kling."""
+    plans = list(plans)
+    if len(plans) > required_n:
+        return plans[:required_n]
+    if 0 < len(plans) < required_n:
+        base = plans[-1]
+        while len(plans) < required_n:
+            plans.append({
+                "prompt": base.get("prompt", ""),
+                "negative_prompt": base.get("negative_prompt"),
+                "beat": "continuation",
+            })
+    return plans
+
+
 def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb=None,
                       max_clips=MAX_CLIPS, target_clips=None, business_context=None,
                       clip_durations=None):
@@ -424,6 +445,15 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
     # Cost-guard + per-clip длины. Любой путь входа не сгенерит > AI_VIDEO_MAX_DURATION_SEC
     # секунд видео за прогон — защита от money-leak fal.ai на длинных сценариях.
     if clip_durations:
+        # C2 (CTO-ревью): план ОБЯЗАН иметь ровно столько промптов, сколько длин,
+        # ДО первого платного Kling-вызова. Иначе zip ниже молча недокроет/обрежет
+        # → платный недобор на сборке. >N → trim; <N → pad continuation-промптом
+        # (без нового вызова режиссёра, без лишних платных секунд — длины уже есть).
+        plans = _normalize_plan_count(plans, len(clip_durations))
+        if len(plans) != len(clip_durations):
+            raise AiVideoError(
+                "не удалось собрать полный план клипов под озвучку — пересоберите",
+                category="technical")
         # Audio-first: сопоставляем планы и длины, режем по СУММЕ секунд.
         kept: list = []
         total = 0

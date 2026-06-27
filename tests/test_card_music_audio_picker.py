@@ -193,6 +193,71 @@ def test_apply_card_music_no_edit_on_audio(monkeypatch, tmp_path):
     assert len(ctx.bot.videos) == 1, "смикшированный ролик отправлен"
 
 
+def test_apply_card_music_double_click_single_mix(monkeypatch, tmp_path):
+    """H1: двойной клик/повторный callback → РОВНО один мукс (lock), второй —
+    «уже микширую»."""
+    if not _DUMMY_MP3.exists():
+        _DUMMY_MP3.write_bytes(b"\x00" * 4096)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "final_video.mp4").write_bytes(b"\x00" * 200)
+    monkeypatch.setattr(bot, "_project_dir", lambda data: proj)
+    monkeypatch.setattr(music_mixer, "list_categories", lambda: {"chill": {"label": "Chill"}})
+    monkeypatch.setattr(music_mixer, "list_tracks",
+                        lambda cat: [{"id": "chill_1", "file": str(_DUMMY_MP3), "duration": 90}])
+    mix = {"n": 0}
+
+    def _slow_mix(src, track, out):
+        mix["n"] += 1
+        Path(out).write_bytes(b"\x00" * 300)
+        return True
+
+    monkeypatch.setattr(music_mixer, "mix_music_into_video", _slow_mix)
+    answers = []
+
+    class _Q:
+        def __init__(self):
+            self.message = SimpleNamespace(chat_id=42)
+            self.from_user = SimpleNamespace(id=7)
+
+        async def answer(self, *a, **k):
+            answers.append(a[0] if a else "")
+
+    ctx = _ctx()
+
+    async def _both():
+        import asyncio as _aio
+        await _aio.gather(
+            bot._apply_card_music(ctx, _Q(), {"x": 1}, "chill_1", "CARD20"),
+            bot._apply_card_music(ctx, _Q(), {"x": 1}, "chill_1", "CARD20"),
+        )
+
+    asyncio.run(_both())
+    assert mix["n"] == 1, f"при double-click должен быть РОВНО один мукс: {mix['n']}"
+    assert any("же микши" in (a or "") for a in answers), f"второй клик → «уже микширую»: {answers}"
+
+
+def test_callback_64_byte_guard():
+    # H4: для разумных id callback ≤ 64 байт; гард на переполнение есть в источнике.
+    card_prefix = "X" * 20
+    assert len(f"music_apply:chill_corporate_01:{card_prefix}".encode("utf-8")) <= 64
+    assert "len(_cb.encode" in SRC and "> 64" in SRC, "нет 64-байт гарда в пикере"
+
+
+def test_overlong_callback_track_skipped():
+    # H4: трек с переполняющим callback (длинный id) пропускается, не падает на send.
+    if not _DUMMY_MP3.exists():
+        _DUMMY_MP3.write_bytes(b"\x00" * 4096)
+    import music_mixer as _mm
+    _mm.list_categories = lambda: {"chill": {"label": "Chill"}}
+    bot._save_pending = lambda *a, **k: None
+    bot._card_pick_n_tracks = lambda cat, n=3, exclude_ids=None: [
+        {"id": "x" * 80, "file": str(_DUMMY_MP3), "duration": 90}]
+    ctx = _ctx()
+    asyncio.run(bot._send_card_music_previews(ctx, 42, "chill", "X" * 20, {}))
+    assert len(ctx.bot.audios) == 0, "трек с >64-байт callback не должен отправляться"
+
+
 def test_music_apply_handler_delegates_to_helper():
     assert "_apply_card_music" in SRC, "music_apply: не вынесен в хелпер"
     # в новом music_apply: нет прямого query.edit_message_text (он в старом коде ломал аудио)

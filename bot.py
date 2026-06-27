@@ -11828,10 +11828,16 @@ async def _send_card_music_previews(context, chat_id, cat, card_prefix, data) ->
     # 3 аудио с кнопкой «✅ Выбрать этот» под каждым.
     sent = 0
     for i, t in enumerate(tracks, 1):
+        # H4 (CTO-ревью): callback_data Telegram ≤ 64 байт. Длинный/не-ASCII id
+        # трека переполнил бы кнопку → пропускаем такой трек (а не падаем на send).
+        _cb = f"music_apply:{t['id']}:{card_prefix}"
+        if len(_cb.encode("utf-8")) > 64:
+            logger.warning(f"[music] трек {t.get('id')} пропущен: callback {len(_cb.encode('utf-8'))} > 64 байт")
+            continue
         try:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
                 f"✅ Выбрать этот ({t['id']})",
-                callback_data=f"music_apply:{t['id']}:{card_prefix}",
+                callback_data=_cb,
             )]])
             with open(t["file"], "rb") as af:
                 await context.bot.send_audio(
@@ -11866,7 +11872,26 @@ async def _send_card_music_previews(context, chat_id, cat, card_prefix, data) ->
     )
 
 
+_MUSIC_MIX_INFLIGHT: set = set()
+
+
 async def _apply_card_music(context, query, data, track_id: str, card_prefix: str) -> None:
+    """H1 (CTO-ревью): защита от double-click. Пока трек микшируется (30-60с),
+    повторный клик/повторная доставка callback не запускает второй ffmpeg в тот же
+    final_video_with_music.mp4 (гонка/порча). Тело — в _apply_card_music_impl."""
+    _uid = getattr(getattr(query, "from_user", None), "id", None)
+    _lock_key = (_uid, card_prefix, track_id)
+    if _lock_key in _MUSIC_MIX_INFLIGHT:
+        await query.answer("Уже микширую этот трек, подожди…")
+        return
+    _MUSIC_MIX_INFLIGHT.add(_lock_key)
+    try:
+        await _apply_card_music_impl(context, query, data, track_id, card_prefix)
+    finally:
+        _MUSIC_MIX_INFLIGHT.discard(_lock_key)
+
+
+async def _apply_card_music_impl(context, query, data, track_id: str, card_prefix: str) -> None:
     """Применить выбранный трек к финалу (мукс) и отдать результат (Fix #2).
 
     Кнопка music_apply: висит на АУДИО-сообщении (у него нет текста) → НЕ

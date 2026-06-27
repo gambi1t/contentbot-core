@@ -161,6 +161,29 @@ def test_backward_compat_attach_fn_optional():
         _restore_assemble_deps(orig)
 
 
+def test_attach_failure_does_not_block_delivery():
+    # H3: сбой/таймаут Notion-attach не должен валить флоу — ролик уже доставлен.
+    async def _attach(card_id, video_path):
+        raise RuntimeError("notion down")
+
+    orig = _patch_assemble_deps()
+    try:
+        ctx = _ctx(_draft(notion_page_id="PAGE123"))
+        asyncio.run(bh.assemble_broll_from_draft(
+            _update(), ctx, _fake_voiceover, chat_id=42, status_fn=None,
+            notion_attach_fn=_attach))
+        assert ctx.bot.videos, "ролик доставлен несмотря на сбой Notion-attach"
+    finally:
+        _restore_assemble_deps(orig)
+
+
+def test_attach_wrapped_in_timeout():
+    # H3: вызов attach обёрнут в asyncio.wait_for (не подвесит хвост).
+    src = (ROOT / "broll" / "handlers.py").read_text(encoding="utf-8")
+    import re as _re
+    assert _re.search(r"wait_for\(\s*notion_attach_fn", src), "attach не обёрнут в wait_for(timeout)"
+
+
 def test_accept_voiceover_forwards_attach():
     # accept_broll_voiceover (ai-голос) должен прокидывать notion_attach_fn в assemble
     forwarded = {}

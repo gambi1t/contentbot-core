@@ -128,6 +128,24 @@ def test_go_fallback_to_wordcount_without_voiceover(monkeypatch):
     )
 
 
+def test_go_refuses_when_plan_undercovers_voiceover(monkeypatch):
+    # C3: озвучка 200с > cap 60 → план обрежется до 60 < 200 → отказ ДО оплаты Kling.
+    captured = {}
+    _common_patches(monkeypatch, captured)
+    monkeypatch.setattr(basm, "_probe_duration", lambda p: 200.0)
+
+    def _fake_voice(script, out_path):
+        Path(out_path).write_bytes(b"\x00" * 4096)
+
+    did = _make_draft("broll_7_undercover")
+    ctx = _ctx()
+    asyncio.run(bh.handle_broll_source(
+        _update(), ctx, None, did, SourceMode.AI_VIDEO_GO, voiceover_fn=_fake_voice))
+    assert "clip_durations" not in captured, "generate_ai_broll НЕ должен вызываться (не платим за недопокрытие)"
+    txt = " ".join(t or "" for t in ctx.bot.texts).lower()
+    assert "длиннее" in txt or "лимит" in txt or "сократи" in txt, f"нет понятного отказа юзеру: {txt}"
+
+
 def test_go_fallback_when_probe_fails(monkeypatch):
     captured = {}
     _common_patches(monkeypatch, captured)
