@@ -39,16 +39,30 @@ def _cbs(markup):
     return [getattr(b, "callback_data", None) for row in markup.inline_keyboard for b in row]
 
 
+class _FakeStatusMsg:
+    def __init__(self):
+        self.edits = []
+
+    async def edit_text(self, text, **kw):
+        self.edits.append(text)
+
+
 class _FakeBot:
     def __init__(self):
         self.audios = []
         self.sends = []
+        self.videos = []
 
     async def send_audio(self, chat_id, audio=None, reply_markup=None, **kw):
         self.audios.append({"chat_id": chat_id, "reply_markup": reply_markup, "kw": kw})
 
     async def send_message(self, chat_id, text=None, reply_markup=None, **kw):
         self.sends.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        return _FakeStatusMsg()
+
+    async def send_video(self, chat_id, video=None, **kw):
+        self.videos.append({"chat_id": chat_id})
+        return _FakeStatusMsg()
 
 
 def _ctx():
@@ -117,6 +131,73 @@ def test_shown_ids_stored():
     assert len(data.get("music_shown_ids") or []) == 3, (
         f"3 показанных id запомнены: {data.get('music_shown_ids')}"
     )
+
+
+def test_no_audio_sent_shows_error_not_footer():
+    # все файлы не открылись (папка отмонтирована) → ошибка, НЕ «послушай выше»
+    if not _DUMMY_MP3.exists():
+        _DUMMY_MP3.write_bytes(b"\x00" * 4096)
+    missing = "/nonexistent/dir/ghost.mp3"
+    bot._card_pick_n_tracks = lambda cat, n=3, exclude_ids=None: [
+        {"id": "g1", "file": missing, "duration": 80}]
+    import music_mixer
+    music_mixer.list_categories = lambda: {"chill": {"label": "Chill"}}
+    bot._save_pending = lambda *a, **k: None
+    ctx = _ctx()
+    asyncio.run(bot._send_card_music_previews(ctx, 42, "chill", "CARD20", {}))
+    assert len(ctx.bot.audios) == 0
+    texts = " ".join(s["text"] or "" for s in ctx.bot.sends)
+    assert "Не удалось загрузить" in texts, f"должно быть сообщение об ошибке: {texts}"
+    assert "Послушай" not in texts, "не должно быть футера «послушай» без аудио"
+
+
+# ── HIGH-фикс: music_apply: НЕ редактирует аудио-сообщение ────────────
+
+def test_apply_card_music_no_edit_on_audio(monkeypatch, tmp_path):
+    """Кнопка music_apply: висит на АУДИО-сообщении (нет текста) → хелпер не
+    должен звать query.edit_message_text (упало бы 400); мукс должен выполниться."""
+    if not _DUMMY_MP3.exists():
+        _DUMMY_MP3.write_bytes(b"\x00" * 4096)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "final_video.mp4").write_bytes(b"\x00" * 200)
+    monkeypatch.setattr(bot, "_project_dir", lambda data: proj)
+    monkeypatch.setattr(music_mixer, "list_categories", lambda: {"chill": {"label": "Chill"}})
+    monkeypatch.setattr(music_mixer, "list_tracks",
+                        lambda cat: [{"id": "chill_1", "file": str(_DUMMY_MP3), "duration": 90}])
+    mixed = {}
+
+    def _mix(src, track, out):
+        mixed["called"] = True
+        Path(out).write_bytes(b"\x00" * 300)
+        return True
+
+    monkeypatch.setattr(music_mixer, "mix_music_into_video", _mix)
+
+    edited = {"audio_edit": 0}
+
+    class _AudioQuery:
+        def __init__(self):
+            self.message = SimpleNamespace(chat_id=42)  # АУДИО: нет .text
+
+        async def edit_message_text(self, *a, **k):
+            edited["audio_edit"] += 1  # НЕ должно вызываться
+
+        async def answer(self, *a, **k):
+            pass
+
+    ctx = _ctx()
+    asyncio.run(bot._apply_card_music(ctx, _AudioQuery(), {"x": 1}, "chill_1", "CARD20"))
+    assert mixed.get("called"), "мукс выбранного трека должен выполниться (happy path)"
+    assert edited["audio_edit"] == 0, "НЕ редактируем аудио-сообщение (query.edit_message_text)"
+    assert len(ctx.bot.videos) == 1, "смикшированный ролик отправлен"
+
+
+def test_music_apply_handler_delegates_to_helper():
+    assert "_apply_card_music" in SRC, "music_apply: не вынесен в хелпер"
+    # в новом music_apply: нет прямого query.edit_message_text (он в старом коде ломал аудио)
+    apply_block = SRC.split('if query.data.startswith("music_apply:")', 1)[-1][:400]
+    assert "query.edit_message_text" not in apply_block, "music_apply: всё ещё редактирует сообщение-кнопку"
 
 
 def test_reroll_excludes_shown():

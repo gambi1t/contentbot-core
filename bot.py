@@ -11826,6 +11826,7 @@ async def _send_card_music_previews(context, chat_id, cat, card_prefix, data) ->
         except Exception:
             pass
     # 3 аудио с кнопкой «✅ Выбрать этот» под каждым.
+    sent = 0
     for i, t in enumerate(tracks, 1):
         try:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton(
@@ -11838,8 +11839,19 @@ async def _send_card_music_previews(context, chat_id, cat, card_prefix, data) ->
                     title=f"{i}. {t['id']}", performer=cat_label,
                     duration=int(t.get("duration", 0)), reply_markup=kb,
                 )
+            sent += 1
         except Exception as e:
             logger.error(f"[music] send_audio failed for {t.get('id')}: {e}")
+    if sent == 0:
+        # Манифест ещё перечисляет треки, но ни один файл не открылся (напр.
+        # музыкальная папка отмонтирована) — не вешаем «послушай выше» в пустоту.
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Не удалось загрузить треки — проверь музыкальную библиотеку.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")]]),
+        )
+        return
     # Footer-сообщение с управлением — остаётся последним в ленте.
     footer_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔀 Другие треки", callback_data=f"music_cat:{cat}:{card_prefix}")],
@@ -11848,10 +11860,88 @@ async def _send_card_music_previews(context, chat_id, cat, card_prefix, data) ->
     ])
     await context.bot.send_message(
         chat_id=chat_id,
-        text=("☝️ Послушай 3 трека выше и нажми «✅» под нужным.\n\n"
+        text=(f"☝️ Послушай {sent} трека выше и нажми «✅» под нужным.\n\n"
               "Музыка наложится на финал с автоприглушением под голосом."),
         reply_markup=footer_kb,
     )
+
+
+async def _apply_card_music(context, query, data, track_id: str, card_prefix: str) -> None:
+    """Применить выбранный трек к финалу (мукс) и отдать результат (Fix #2).
+
+    Кнопка music_apply: висит на АУДИО-сообщении (у него нет текста) → НЕ
+    редактируем его (query.edit_message_text упал бы '400: no text to edit').
+    Шлём НОВОЕ статус-сообщение и редактируем ЕГО — как селфи _mix_picked_track.
+    """
+    import music_mixer
+    track_file = None
+    track_cat = None
+    for cat_name in music_mixer.list_categories().keys():
+        for t in music_mixer.list_tracks(cat_name):
+            if t["id"] == track_id:
+                track_file = t["file"]
+                track_cat = cat_name
+                break
+        if track_file:
+            break
+    if not track_file:
+        await query.answer("Трек не найден", show_alert=True)
+        return
+    proj = _project_dir(data)
+    if not proj:
+        await query.answer("Нет проекта", show_alert=True)
+        return
+    chat_id = query.message.chat_id
+    # Предпочитаем загруженный final_video.mp4, иначе авто-финал.
+    source_video = proj / "final_video.mp4"
+    if not source_video.exists():
+        source_video = proj / "final_auto.mp4"
+    if not source_video.exists():
+        await context.bot.send_message(
+            chat_id=chat_id, text="❌ Нет финального ролика для микса.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")]]),
+        )
+        return
+    output_path = proj / "final_video_with_music.mp4"
+    # НОВОЕ статус-сообщение (текст) — его и редактируем, не аудио-кнопку.
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"🎵 Микширую музыку ({track_cat})...\nЭто занимает 30-60 секунд.",
+    )
+    success = await asyncio.to_thread(
+        music_mixer.mix_music_into_video, str(source_video), track_file, str(output_path),
+    )
+    if success and output_path.exists():
+        size_mb = output_path.stat().st_size / 1024 / 1024
+        try:
+            with open(output_path, "rb") as vf:
+                await context.bot.send_video(
+                    chat_id=chat_id, video=vf,
+                    caption=f"🎵 Ролик с музыкой ({track_cat}, {size_mb:.1f}МБ)",
+                    supports_streaming=True,
+                )
+        except Exception as e:
+            logger.error(f"music send failed: {e}")
+        try:
+            await status_msg.edit_text(
+                "✅ Готово! Файл сохранён: <code>final_video_with_music.mp4</code>\n\n"
+                "Теперь этот вариант будет использоваться при кросс-постинге.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")]]),
+            )
+        except Exception as e:
+            logger.warning(f"music status edit failed: {e}")
+    else:
+        try:
+            await status_msg.edit_text(
+                "❌ Не удалось смикшировать. Проверь логи.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")]]),
+            )
+        except Exception as e:
+            logger.warning(f"music status edit failed: {e}")
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -20184,90 +20274,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if query.data.startswith("music_apply:"):
-        # Apply selected track to final video
-        import music_mixer
+        # Применить выбранный трек к финалу. Логика вынесена в _apply_card_music —
+        # она шлёт НОВЫЕ сообщения (кнопка на аудио, edit упал бы). Fix #2.
         parts = query.data.split(":", 2)
         track_id = parts[1]
         card_prefix = parts[2] if len(parts) > 2 else ""
-
-        # Find the track file
-        track_file = None
-        track_cat = None
-        for cat_name in music_mixer.list_categories().keys():
-            for t in music_mixer.list_tracks(cat_name):
-                if t["id"] == track_id:
-                    track_file = t["file"]
-                    track_cat = cat_name
-                    break
-            if track_file:
-                break
-        if not track_file:
-            await query.answer("Трек не найден", show_alert=True)
-            return
-
-        proj = _project_dir(data)
-        if not proj:
-            await query.answer("Нет проекта", show_alert=True)
-            return
-
-        # Prefer uploaded final_video.mp4, fallback to final_auto.mp4
-        source_video = proj / "final_video.mp4"
-        if not source_video.exists():
-            source_video = proj / "final_auto.mp4"
-        if not source_video.exists():
-            await query.edit_message_text(
-                "❌ Нет финального ролика для микса.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")
-                ]]),
-            )
-            return
-
-        output_path = proj / "final_video_with_music.mp4"
-
-        await query.edit_message_text(
-            f"🎵 Микширую музыку ({track_cat})...\nЭто занимает 30-60 секунд."
-        )
-
-        # Run in thread to not block
-        success = await asyncio.to_thread(
-            music_mixer.mix_music_into_video,
-            str(source_video),
-            track_file,
-            str(output_path),
-        )
-
-        if success and output_path.exists():
-            size_mb = output_path.stat().st_size / 1024 / 1024
-            # Send the mixed video back to user
-            try:
-                with open(output_path, "rb") as vf:
-                    await context.bot.send_video(
-                        chat_id=query.message.chat_id,
-                        video=vf,
-                        caption=f"🎵 Ролик с музыкой ({track_cat}, {size_mb:.1f}МБ)",
-                        supports_streaming=True,
-                    )
-            except Exception as e:
-                logger.error(f"music send failed: {e}")
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text=(
-                    f"✅ Готово! Файл сохранён: <code>final_video_with_music.mp4</code>\n\n"
-                    "Теперь этот вариант будет использоваться при кросс-постинге."
-                ),
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")
-                ]]),
-            )
-        else:
-            await query.edit_message_text(
-                "❌ Не удалось смикшировать. Проверь логи.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card_prefix}")
-                ]]),
-            )
+        await _apply_card_music(context, query, data, track_id, card_prefix)
         return
 
     if query.data == "download_project":
