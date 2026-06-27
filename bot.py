@@ -181,6 +181,7 @@ from tg_post_handlers import (
     is_tgpost_state,
 )
 import tg_post_writer
+from script_surgical import surgical_edit_script, SurgicalNoOp
 from publish_helpers import (
     needs_description,
     build_ig_caption,
@@ -8533,18 +8534,7 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"———\n"
                 f"📊 {char_count} символов\n"
             )
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                    InlineKeyboardButton("🔄 Переписать", callback_data="rewrite"),
-                ],
-                [
-                    InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                    InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-                ],
-                [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
-            ])
+            keyboard = _script_preview_keyboard()
             await msg.edit_text(preview, reply_markup=keyboard)
         except Exception as e:
             logger.error(f"Ошибка /script: {e}", exc_info=True)
@@ -8694,22 +8684,7 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 {char_count} символов\n"
         )
 
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                    InlineKeyboardButton("🔄 Переписать", callback_data="rewrite"),
-                ],
-                [
-                    InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                    InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-                ],
-                [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                [
-                    InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-                ],
-            ]
-        )
+        keyboard = _script_preview_keyboard()
         await update.message.reply_text(preview, reply_markup=keyboard)
         return
 
@@ -8874,6 +8849,16 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         msg = await update.message.reply_text("✍️ Применяю правку...")
         await _apply_script_instruction(user_id, instruction, msg)
+        return
+
+    # Точечная правка сценария (текст) — меняет только запрошенное, без регенерации.
+    if user_id in pending and pending[user_id].get("state") == "script_surgical_wait":
+        instruction = (update.message.text or "").strip()
+        if not instruction:
+            await update.message.reply_text("Напиши, что точечно изменить, или пришли голосовое.")
+            return
+        msg = await update.message.reply_text("✂️ Применяю точечную правку...")
+        await _apply_surgical_edit(user_id, instruction, msg)
         return
 
     # Handle script edit
@@ -10433,6 +10418,16 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _apply_script_instruction(user_id, instruction, msg)
             return
 
+        # Точечная правка сценария (голос) — меняет только запрошенное, без регенерации.
+        if current_state == "script_surgical_wait":
+            instruction = (idea_text or "").strip()
+            if not instruction:
+                await msg.edit_text("Пустое голосовое — попробуй ещё раз.")
+                return
+            await msg.edit_text(f"🎤 Расшифровка:\n«{instruction}»\n\n✂️ Применяю точечную правку...")
+            await _apply_surgical_edit(user_id, instruction, msg)
+            return
+
         # If user is in edit mode, treat voice as edit instruction
         if current_state == "editing":
             pending[user_id]["state"] = None
@@ -10472,14 +10467,7 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 char_count = len(script_text)
                 preview = f"📝 СЦЕНАРИЙ (готовый):\n\n{script_text}\n\n———\n📊 {char_count} символов\n"
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                     InlineKeyboardButton("🔄 Переписать", callback_data="rewrite")],
-                    [InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                     InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook")],
-                    [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                    [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
-                ])
+                keyboard = _script_preview_keyboard()
                 await msg.edit_text(preview, reply_markup=keyboard)
             except Exception as e:
                 logger.error(f"Ошибка /script voice: {e}", exc_info=True)
@@ -10557,6 +10545,59 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_pipeline_fork(update, context, idea_text, edit_msg=msg)
     finally:
         os.unlink(tmp_path)
+
+
+def _script_preview_keyboard(rewrite_label: str = "🔄 Переписать") -> InlineKeyboardMarkup:
+    """Единая клавиатура превью сценария в пайплайне (был дубль в ~9 местах).
+    Кнопка «✂️ Точечная правка» (surgical_edit) добавляется здесь ОДИН раз — не
+    разъезжается и не оставляет «пустых» мест с другого угла."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
+            InlineKeyboardButton(rewrite_label, callback_data="rewrite"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
+            InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
+        ],
+        [InlineKeyboardButton("✂️ Точечная правка", callback_data="surgical_edit")],
+        [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+    ])
+
+
+async def _apply_surgical_edit(user_id: int, instruction: str, msg) -> None:
+    """ТОЧЕЧНАЯ правка сценария-черновика пайплайна (data['script']) — меняет
+    ТОЛЬКО запрошенное (слово/знак), без регенерации (в отличие от edit_mode).
+    No-op (Sonnet не нашёл/не применил) → показываем неизменённый сценарий и
+    просим переформулировать."""
+    data = pending.get(user_id, {}) or {}
+    script = (data.get("script") or "").strip()
+    if not script:
+        await msg.edit_text("Нет сценария для точечной правки.")
+        return
+    pending[user_id]["state"] = None
+    _save_pending(pending)
+    try:
+        edited = await asyncio.to_thread(
+            surgical_edit_script, claude, script, instruction
+        )
+    except SurgicalNoOp as e:
+        preview = f"📝 СЦЕНАРИЙ:\n\n{script}\n\n———\n⚠️ {e}"
+        await msg.edit_text(preview, reply_markup=_script_preview_keyboard())
+        return
+    except Exception as e:
+        logger.error(f"surgical_edit failed: {e}", exc_info=True)
+        await msg.edit_text(f"Ошибка точечной правки: {e}")
+        return
+    data["script"] = edited
+    pending[user_id] = data
+    _save_pending(pending)
+    preview = (
+        f"📝 СЦЕНАРИЙ (точечная правка):\n\n{edited}\n\n———\n"
+        f"📊 {len(edited)} символов\n✂️ Правка: «{instruction[:120]}»"
+    )
+    await msg.edit_text(preview, reply_markup=_script_preview_keyboard())
 
 
 async def _apply_script_instruction(user_id: int, instruction: str, msg) -> None:
@@ -11051,22 +11092,7 @@ async def _edit_script(
             f"📊 {char_count} символов\n"
         )
 
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                    InlineKeyboardButton("🔄 Переписать", callback_data="rewrite"),
-                ],
-                [
-                    InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                    InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-                ],
-                [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                [
-                    InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-                ],
-            ]
-        )
+        keyboard = _script_preview_keyboard()
         await status_msg.edit_text(preview, reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Ошибка: {e}", exc_info=True)
@@ -11308,22 +11334,7 @@ async def _generate_script(
         f"📊 {char_count} символов\n"
     )
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                InlineKeyboardButton("🔄 Переписать", callback_data="rewrite"),
-            ],
-            [
-                InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-            ],
-            [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-            [
-                InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-            ],
-        ]
-    )
+    keyboard = _script_preview_keyboard()
 
     await status_msg.edit_text(preview, reply_markup=keyboard)
 
@@ -13710,18 +13721,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"———\n"
                 f"📊 {char_count} символов\n"
             )
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                    InlineKeyboardButton("🔄 Переписать", callback_data="rewrite"),
-                ],
-                [
-                    InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                    InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-                ],
-                [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
-            ])
+            keyboard = _script_preview_keyboard()
             await query.edit_message_text(preview, reply_markup=keyboard)
         except Exception as e:
             logger.error(f"Ошибка card_continue: {e}", exc_info=True)
@@ -15611,6 +15611,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if query.data == "surgical_edit":
+        data["state"] = "script_surgical_wait"
+        _save_pending(pending)
+        script_preview = data.get("script", "")
+        await query.edit_message_text(
+            f"📝 Текущий сценарий:\n\n{script_preview}\n\n———\n"
+            f"✂️ Что точечно изменить? Напиши или наговори: «слово X → Y», "
+            f"«убери лишнюю запятую», «исправь опечатку в Z». Меняю ТОЛЬКО это, "
+            f"без перегенерации.",
+        )
+        return
+
     if query.data == "rewrite":
         await query.edit_message_text("Переписываю сценарий...")
         # Re-generate with instruction to write differently
@@ -15643,22 +15655,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📊 {char_count} символов\n"
                     )
 
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                        InlineKeyboardButton("🔄 Ещё раз", callback_data="rewrite"),
-                    ],
-                    [
-                        InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                        InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-                    ],
-                    [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                    [
-                        InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-                    ],
-                ]
-            )
+            keyboard = _script_preview_keyboard(rewrite_label="🔄 Ещё раз")
             await query.edit_message_text(preview, reply_markup=keyboard)
         except Exception as e:
             logger.error(f"Ошибка: {e}", exc_info=True)
@@ -15744,22 +15741,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📊 {char_count} символов\n"
             )
 
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                        InlineKeyboardButton("🔄 Переписать", callback_data="rewrite"),
-                    ],
-                    [
-                        InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                        InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-                    ],
-                    [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                    [
-                        InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-                    ],
-                ]
-            )
+            keyboard = _script_preview_keyboard()
             await query.edit_message_text(preview, reply_markup=keyboard)
         return
 
@@ -15779,22 +15761,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 {char_count} символов\n"
         )
 
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("✅ Утвердить → обложка", callback_data="approve"),
-                    InlineKeyboardButton("🔄 Переписать", callback_data="rewrite"),
-                ],
-                [
-                    InlineKeyboardButton("✏️ Внести правки", callback_data="edit_mode"),
-                    InlineKeyboardButton("✏️ Другой хук", callback_data="new_hook"),
-                ],
-                [InlineKeyboardButton("💾 Отложить как идею", callback_data="save_to_notion")],
-                [
-                    InlineKeyboardButton("❌ Отмена", callback_data="cancel"),
-                ],
-            ]
-        )
+        keyboard = _script_preview_keyboard()
         await query.edit_message_text(preview, reply_markup=keyboard)
         return
 
