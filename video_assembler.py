@@ -101,6 +101,45 @@ def _crop_y_from_head_fraction(head_top_frac: float) -> int:
     return max(0, min(cy, scaled_h - HALF_H))           # clamp [0, 1008]
 
 
+def _grabcut_subject_top(img, fx: int, fy: int, fw: int, fh: int) -> int | None:
+    """Верх СУБЪЕКТА (кепка/шапка/волосы) через GrabCut, засеянный лицом.
+
+    Лицо = sure-foreground seed; rect — широкая колонка субъекта от верха кадра до
+    низа торса. Возвращает строку (px) самого верхнего ряда переднего плана достаточной
+    ширины (фильтр шума) или None при сбое. Нужно потому, что Haar находит ЛИЦО, а
+    высокий головной убор торчит выше — face+lift его недооценивает и режет."""
+    try:
+        import cv2
+        import numpy as np
+        h, w = img.shape[:2]
+        mask = np.zeros((h, w), np.uint8)
+        rx0 = max(0, fx - int(0.8 * fw))
+        rx1 = min(w, fx + fw + int(0.8 * fw))
+        rect = (rx0, 0, rx1 - rx0, min(h, fy + int(6 * fh)))
+        mask[fy:fy + fh, fx:fx + fw] = cv2.GC_FGD          # лицо — точно передний план
+        bgd = np.zeros((1, 65), np.float64)
+        fgd = np.zeros((1, 65), np.float64)
+        cv2.grabCut(img, mask, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
+        fg = ((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)).astype(np.uint8)
+        rows = np.where(fg.sum(axis=1) > int(0.06 * w))[0]  # ширина-фильтр от шума
+        return int(rows[0]) if len(rows) else None
+    except Exception as e:
+        logger.info(f"[assembler] grabcut subject-top skipped: {e}")
+        return None
+
+
+def _pick_head_top(gc_top: "int | None", face_lift_top: int, fy: int, fh: int) -> int:
+    """Выбрать верх головы. Доверяем GrabCut-верху субъекта (ловит кепку/шапку), если
+    он ВЫШЕ face+lift и в правдоподобном диапазоне [fy-1.5*fh .. face_lift_top]. Иначе
+    (GrabCut схватил фон/лицо или сбой) — fallback на face+lift (не хуже прежнего)."""
+    if gc_top is None:
+        return face_lift_top
+    lo = max(0, fy - int(1.5 * fh))
+    if lo <= gc_top <= face_lift_top:
+        return gc_top
+    return face_lift_top
+
+
 def _detect_head_top_fraction(avatar_path: Path, tmp_dir: Path | None = None) -> float | None:
     """Detect the top of the head as a fraction (0..1) of the avatar frame height.
 
@@ -137,7 +176,10 @@ def _detect_head_top_fraction(avatar_path: Path, tmp_dir: Path | None = None) ->
             logger.info("[assembler] head-detect: no face found")
             return None
         fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])  # largest face
-        head_top = max(0, fy - int(0.35 * fh))  # crown/hair sits above the box
+        face_lift_top = max(0, fy - int(0.35 * fh))  # crown/hair над лицом (фолбэк)
+        # Cap-aware: GrabCut ловит верх головного убора, который face+lift режет.
+        gc_top = _grabcut_subject_top(img, fx, fy, fw, fh)
+        head_top = _pick_head_top(gc_top, face_lift_top, fy, fh)
         return head_top / float(h)
     except Exception as e:
         logger.warning(f"[assembler] head-detect failed: {e}")
