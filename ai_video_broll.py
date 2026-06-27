@@ -320,6 +320,56 @@ def fullscreen_plan(script_text: str, clip_len: int = FULLSCREEN_CLIP_LEN) -> di
     return {"n_clips": n, "est_sec": est, "clip_len": clip_len, "cost": cost}
 
 
+def plan_clip_durations(target_sec: float, min_clips: int | None = None,
+                        max_total: int | None = None) -> "list[int]":
+    """Audio-first (Fix #5): набор длин клипов (5/10с) под РЕАЛЬНУЮ длину озвучки
+    с минимальным остатком. 14.6с → [10, 5] (=15, остаток 0.4), НЕ [10, 10] (=20).
+    Kling поддерживает только 5 и 10с. Заполняем 10с-клипами (раскрывают мульти-
+    шот), маленький хвост ≤5с → один 5с. Уважает MIN_CLIPS (визуальное разнообразие)
+    и cost-guard по сумме секунд (AI_VIDEO_MAX_DURATION_SEC)."""
+    if min_clips is None:
+        min_clips = MIN_CLIPS
+    if max_total is None:
+        max_total = AI_VIDEO_MAX_DURATION_SEC
+    target = max(0.0, float(target_sec))
+    durs: list[int] = []
+    covered = 0.0
+    while covered < target:
+        if (target - covered) > 5:
+            durs.append(10); covered += 10
+        else:
+            durs.append(5); covered += 5
+    # Минимум клипов (разнообразие): дробим 10→5+5, иначе добавляем 5с.
+    while len(durs) < min_clips:
+        if 10 in durs:
+            durs.remove(10); durs.extend([5, 5])
+        else:
+            durs.append(5)
+    # Cost-guard: суммарные секунды ≤ max_total (длинный сценарий не разгонит трату).
+    capped: list[int] = []
+    total = 0
+    for d in durs:
+        if total + d > max_total:
+            logger.warning(
+                f"ai_video audio-first: обрезаю план по потолку {max_total}с/прогон")
+            break
+        capped.append(d); total += d
+    if not capped:
+        capped = [5] * max(1, min_clips)
+    return capped
+
+
+def fullscreen_plan_from_duration(actual_sec: float) -> dict:
+    """Audio-first план (Fix #5): длины клипов под РЕАЛЬНУЮ длину озвучки (ffprobe),
+    а не из числа слов. Возвращает {n_clips, durations, total_sec, est_sec, cost}."""
+    durations = plan_clip_durations(actual_sec)
+    total = sum(durations)
+    return {
+        "n_clips": len(durations), "durations": durations, "total_sec": total,
+        "est_sec": float(actual_sec), "cost": total * KLING_PRICE_PER_SEC_USD,
+    }
+
+
 def _notify(progress_cb, msg: str) -> None:
     """Fire a progress message; a broken callback must never break generation."""
     if progress_cb is None:
@@ -344,7 +394,8 @@ def _default_claude():
 
 
 def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb=None,
-                      max_clips=MAX_CLIPS, target_clips=None, business_context=None):
+                      max_clips=MAX_CLIPS, target_clips=None, business_context=None,
+                      clip_durations=None):
     """Script -> cinematic Kling 3.0 Pro clips. Returns (list[Path], cost_usd).
 
     Same contract as generate_hyperframes_broll / generate_auto_broll. Clips land
@@ -361,37 +412,57 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
         raise AiVideoError(f"Видео-движок недоступен: {reason}")
     if claude is None:
         claude = _default_claude()
+    # Audio-first (Fix #5): per-clip длины (микс 5/10) задают РОВНО столько бит.
+    if clip_durations:
+        target_clips = len(clip_durations)
     clips_dir = Path(out_dir) / CLIPS_SUBDIR
 
     _notify(progress_cb, "🎬 Режиссёр придумывает раскадровку…")
     plans = plan_clips(script_text, claude, max_clips=max_clips, target_clips=target_clips,
                        business_context=business_context)
 
-    # Cost-guard backstop (срез C): любой путь входа не сгенерит > AI_VIDEO_MAX_DURATION_SEC
+    # Cost-guard + per-clip длины. Любой путь входа не сгенерит > AI_VIDEO_MAX_DURATION_SEC
     # секунд видео за прогон — защита от money-leak fal.ai на длинных сценариях.
-    budget_cap = _max_clips_for_budget(duration)
-    if len(plans) > budget_cap:
-        logger.warning(
-            f"ai_video cost-guard: {len(plans)}→{budget_cap} клипов "
-            f"(потолок {AI_VIDEO_MAX_DURATION_SEC}с/прогон при {duration}с-клипах)")
-        _notify(progress_cb,
-                f"⚠️ Лимит трат: беру {budget_cap} клипов (потолок {AI_VIDEO_MAX_DURATION_SEC}с/ролик)")
-        plans = plans[:budget_cap]
+    if clip_durations:
+        # Audio-first: сопоставляем планы и длины, режем по СУММЕ секунд.
+        kept: list = []
+        total = 0
+        for p, d in zip(plans, clip_durations):
+            if total + d > AI_VIDEO_MAX_DURATION_SEC:
+                logger.warning(
+                    f"ai_video cost-guard: обрезаю по потолку {AI_VIDEO_MAX_DURATION_SEC}с/прогон")
+                break
+            kept.append((p, int(d))); total += int(d)
+        plans = [p for p, _ in kept]
+        per_clip = [d for _, d in kept]
+    else:
+        budget_cap = _max_clips_for_budget(duration)
+        if len(plans) > budget_cap:
+            logger.warning(
+                f"ai_video cost-guard: {len(plans)}→{budget_cap} клипов "
+                f"(потолок {AI_VIDEO_MAX_DURATION_SEC}с/прогон при {duration}с-клипах)")
+            _notify(progress_cb,
+                    f"⚠️ Лимит трат: беру {budget_cap} клипов (потолок {AI_VIDEO_MAX_DURATION_SEC}с/ролик)")
+            plans = plans[:budget_cap]
+        per_clip = [int(duration)] * len(plans)
 
-    # Сохранить план рядом с клипами — чтобы ДОБРАТЬ упавший клип по тому же
-    # промпту без повторного вызова режиссёра (см. regen_ai_clips).
-    _write_plan(clips_dir, plans, duration)
+    # Сохранить план рядом с клипами (с per-clip длинами) — чтобы ДОБРАТЬ упавший
+    # клип той же длины и промптом без повторного вызова режиссёра (regen_ai_clips).
+    _write_plan(clips_dir, plans, duration, clip_durations=per_clip)
 
-    _notify(progress_cb, f"🎥 Генерю {len(plans)} кинематографичных клипа (Kling 3.0 Pro, ~{duration}с)…")
+    _notify(progress_cb,
+            f"🎥 Генерю {len(plans)} кинематографичных клипа (Kling 3.0 Pro, ~{sum(per_clip)}с видео)…")
     paths: list[Path] = []
     clip_errors: list[str] = []
+    spent_sec = 0
     for i, clip in enumerate(plans, start=1):
         dest = clips_dir / f"ai_{i:02d}.mp4"
+        d = per_clip[i - 1] if i - 1 < len(per_clip) else int(duration)
         res = fal_media.generate_kling_video(
-            clip["prompt"], dest, duration=duration,
+            clip["prompt"], dest, duration=d,
             negative_prompt=clip.get("negative_prompt"), errors_out=clip_errors)
         if res:
-            paths.append(Path(res))
+            paths.append(Path(res)); spent_sec += d
         else:
             logger.warning(f"ai_video: clip {i}/{len(plans)} failed, skipping")
 
@@ -403,20 +474,24 @@ def generate_ai_broll(script_text, out_dir, claude=None, duration=5, progress_cb
         category = "content" if "content" in clip_errors else "technical"
         raise AiVideoError("all Kling clips failed", category=category)
 
-    cost = len(paths) * duration * KLING_PRICE_PER_SEC_USD
-    logger.info(f"ai_video: {len(paths)}/{len(plans)} clips ready, est cost ${cost:.2f}")
+    cost = spent_sec * KLING_PRICE_PER_SEC_USD
+    logger.info(f"ai_video: {len(paths)}/{len(plans)} clips ready ({spent_sec}с), est cost ${cost:.2f}")
     return paths, cost
 
 
-def _write_plan(clips_dir, plans, duration) -> None:
+def _write_plan(clips_dir, plans, duration, clip_durations=None) -> None:
     """Сохранить план клипов (plan.json) рядом с ними. Нужно, чтобы добрать
-    упавший на скачивании клип по ТОМУ ЖЕ промпту, не вызывая режиссёра заново."""
+    упавший на скачивании клип по ТОМУ ЖЕ промпту (и той же длине), не вызывая
+    режиссёра заново. clip_durations — per-clip длины (audio-first микс 5/10);
+    при None у каждого клипа длина = общий duration."""
     try:
         clips_dir = Path(clips_dir)
         clips_dir.mkdir(parents=True, exist_ok=True)
         data = {"duration": int(duration), "clips": [
             {"i": i, "prompt": c.get("prompt", ""),
-             "negative_prompt": c.get("negative_prompt"), "beat": c.get("beat", "")}
+             "negative_prompt": c.get("negative_prompt"), "beat": c.get("beat", ""),
+             "duration": int(clip_durations[i - 1])
+             if clip_durations and i - 1 < len(clip_durations) else int(duration)}
             for i, c in enumerate(plans, start=1)]}
         (clips_dir / "plan.json").write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -464,21 +539,24 @@ def regen_ai_clips(out_dir, indices=None, progress_cb=None):
     if not indices:
         return [], 0.0
 
-    _notify(progress_cb, f"🎥 Добираю {len(indices)} клип(ов) (Kling 3.0 Pro, ~{duration}с)…")
+    _notify(progress_cb, f"🎥 Добираю {len(indices)} клип(ов) (Kling 3.0 Pro)…")
     new_paths: list[Path] = []
+    spent_sec = 0
     for i in indices:
         clip = by_index.get(i)
         if not clip or not clip.get("prompt"):
             continue
+        # per-clip длина (audio-first); fallback на общий duration плана.
+        d = int(clip.get("duration", duration))
         dest = clips_dir / f"ai_{i:02d}.mp4"
         res = fal_media.generate_kling_video(
-            clip["prompt"], dest, duration=duration,
+            clip["prompt"], dest, duration=d,
             negative_prompt=clip.get("negative_prompt"))
         if res:
-            new_paths.append(Path(res))
+            new_paths.append(Path(res)); spent_sec += d
         else:
             logger.warning(f"ai_video regen: clip {i} failed again")
-    cost = len(new_paths) * duration * KLING_PRICE_PER_SEC_USD
+    cost = spent_sec * KLING_PRICE_PER_SEC_USD
     logger.info(f"ai_video regen: {len(new_paths)}/{len(indices)} clips filled, est cost ${cost:.2f}")
     return new_paths, cost
 

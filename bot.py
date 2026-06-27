@@ -13345,7 +13345,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"[broll] import failed in source: {e}", exc_info=True)
             await query.message.reply_text(f"❌ Модуль B-roll не загружен: {e}")
             return
-        await handle_broll_source(update, context, claude, draft_id, mode)
+        # voiceover_fn (generate_voiceover) прокинут для audio-first AI-видео
+        # (Fix #5): на запуске генерим озвучку-черновик → меряем длину → клипы
+        # под факт. broll.handlers не импортирует generate_voiceover (цикл-импорт).
+        await handle_broll_source(
+            update, context, claude, draft_id, mode, voiceover_fn=generate_voiceover)
         return
 
     if query.data.startswith("b2hfre:"):

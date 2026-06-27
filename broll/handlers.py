@@ -459,6 +459,7 @@ async def handle_broll_source(
     claude,
     draft_id: str,
     mode: str,
+    voiceover_fn=None,
 ) -> None:
     """Обработка выбора источника видеоряда (callback b2src:<mode>:<draft_id>).
 
@@ -647,8 +648,9 @@ async def handle_broll_source(
         plan = ai_video_broll.fullscreen_plan(draft.script_text)
         await q.edit_message_text(
             f"🎬 AI-видео по сценарию (Kling 3.0)\n\n"
-            f"Сценарий ~{plan['est_sec']:.0f}с → сгенерирую {plan['n_clips']} клипов "
-            f"по {plan['clip_len']}с (~${plan['cost']:.2f}).\n"
+            f"Сценарий ~{plan['est_sec']:.0f}с → ~{plan['n_clips']} клипов "
+            f"(~${plan['cost']:.2f}). Точную длину подгоню под озвучку — "
+            f"без лишних оплаченных секунд.\n"
             f"Голос (свой/AI) + субтитры + музыка — как обычно.\n\n"
             f"Несколько минут на генерацию. Запустить?",
             reply_markup=InlineKeyboardMarkup([
@@ -671,24 +673,49 @@ async def handle_broll_source(
         return
 
     if mode == SourceMode.AI_VIDEO_GO:
-        # Подтверждено — генерируем фуллскрин AI-видео (N клипов под длину).
+        # Подтверждено — генерируем фуллскрин AI-видео под длину озвучки.
         from .draft import hf_items_from_clips
         import ai_video_broll
-        plan = ai_video_broll.fullscreen_plan(draft.script_text)
         work = DRAFTS_DIR.parent / "broll_runs" / draft_id
         work.mkdir(parents=True, exist_ok=True)
+        # Audio-first (Fix #5): озвучку-ЧЕРНОВИК генерим ПЕРВОЙ → меряем реальную
+        # длину (ffprobe) → план клипов (микс 5/10с) под факт, а НЕ из числа слов
+        # (раньше 14.6с озвучки → 2×10=20с видео, ~6с оплаченного Kling впустую).
+        # Озвучка дёшева относительно Kling; финальную (AI/свой голос) сделает
+        # обычный voice-флоу позже. Фолбэк на оценку слов, если озвучка не вышла.
+        plan = None
+        if voiceover_fn is not None:
+            try:
+                from .assembler import _probe_duration
+                sizing_voice = work / "sizing_voice.mp3"
+                await context.bot.send_message(
+                    chat_id, "🎙 Озвучиваю черновик, чтобы подогнать длину видео под голос…")
+                await asyncio.to_thread(voiceover_fn, draft.script_text, str(sizing_voice))
+                if sizing_voice.exists() and sizing_voice.stat().st_size > 1000:
+                    dur = _probe_duration(sizing_voice)
+                    if dur and dur > 0:
+                        plan = ai_video_broll.fullscreen_plan_from_duration(dur)
+                        logger.info(f"[broll] audio-first: озвучка {dur:.1f}с → "
+                                    f"клипы {plan['durations']} (={plan['total_sec']}с)")
+            except Exception as e:
+                logger.warning(f"[broll] audio-first sizing не вышло, фолбэк на оценку слов: {e}")
+        if plan is None:
+            wp = ai_video_broll.fullscreen_plan(draft.script_text)
+            plan = {"n_clips": wp["n_clips"], "durations": [wp["clip_len"]] * wp["n_clips"],
+                    "total_sec": wp["n_clips"] * wp["clip_len"], "est_sec": wp["est_sec"],
+                    "cost": wp["cost"]}
         draft.source_mode = SourceMode.AI_VIDEO
         draft.status = Status.HF_RUNNING
         draft.work_dir = str(work)
         draft.touch(time.time())
         save_draft(draft, DRAFTS_DIR)
         status = await context.bot.send_message(
-            chat_id, f"🎬 Генерирую AI-видео (Kling 3.0): {plan['n_clips']} клипов по "
-                     f"{plan['clip_len']}с… Несколько минут.")
+            chat_id, f"🎬 Генерирую AI-видео (Kling 3.0): {plan['n_clips']} клипов "
+                     f"(~{plan['total_sec']}с под озвучку)… Несколько минут.")
         try:
             clips, _cost = await asyncio.to_thread(
                 ai_video_broll.generate_ai_broll, draft.script_text, work,
-                duration=plan["clip_len"], target_clips=plan["n_clips"])
+                clip_durations=plan["durations"])
         except Exception as e:
             # Категория: AiVideoError несёт .category (content/technical); любой
             # другой Exception считаем техническим (инфра/код), не виним сценарий.
