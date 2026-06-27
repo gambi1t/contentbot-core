@@ -10,8 +10,9 @@ W1 (27 May 2026): раньше AutoBroll писал в `projects/<id>/broll_NN.m
 - `broll_NN.mp4` ТОЛЬКО для реальных клипов (SMM/YouTube/прочее)
 - `_find_broll(proj, mode='real'|'ai'|'mix')` — выбор источника
 
-Стиль: без pytest, main() → 0/1.
-Запуск: python tests/test_autobroll_namespace.py
+Стиль: pytest-ассерты (`assert`). Запускается и через pytest, и standalone.
+Запуск: python -m pytest tests/test_autobroll_namespace.py
+        или python tests/test_autobroll_namespace.py
 """
 from __future__ import annotations
 
@@ -29,13 +30,9 @@ os.environ.setdefault("NOTION_DATABASE_ID", "dummy")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def _assert(cond: bool, msg: str, errors: list[str]) -> None:
+def _assert(cond: bool, msg: str) -> None:
     safe = msg.encode("ascii", "replace").decode("ascii")
-    if not cond:
-        errors.append(f"FAIL {safe}")
-        print(f"  FAIL {safe}")
-    else:
-        print(f"  OK {safe}")
+    assert cond, f"FAIL {safe}"
 
 
 def _make_video_stub(path: Path) -> None:
@@ -46,7 +43,7 @@ def _make_video_stub(path: Path) -> None:
 
 # ─── _find_broll mode-параметр ────────────────────────────────────────────
 
-def test_find_broll_mode_real(errors: list[str]) -> None:
+def test_find_broll_mode_real() -> None:
     print("\n-- _find_broll(mode='real') → только broll_*.mp4 --")
     import video_assembler as va
     tmp = Path(tempfile.mkdtemp(prefix="proj_real_"))
@@ -60,13 +57,12 @@ def test_find_broll_mode_real(errors: list[str]) -> None:
         _assert(
             names == ["broll_01.mp4", "broll_02.mp4"],
             f"real → broll_*.mp4 only ({names})",
-            errors,
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_find_broll_mode_ai(errors: list[str]) -> None:
+def test_find_broll_mode_ai() -> None:
     print("\n-- _find_broll(mode='ai') → только autobroll/auto_*.mp4 --")
     import video_assembler as va
     tmp = Path(tempfile.mkdtemp(prefix="proj_ai_"))
@@ -80,13 +76,12 @@ def test_find_broll_mode_ai(errors: list[str]) -> None:
         _assert(
             names == ["auto_01.mp4", "auto_02.mp4", "auto_03.mp4"],
             f"ai → auto_*.mp4 only ({names})",
-            errors,
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_find_broll_mode_mix(errors: list[str]) -> None:
+def test_find_broll_mode_mix() -> None:
     print("\n-- _find_broll(mode='mix') → оба источника --")
     import video_assembler as va
     tmp = Path(tempfile.mkdtemp(prefix="proj_mix_"))
@@ -99,13 +94,12 @@ def test_find_broll_mode_mix(errors: list[str]) -> None:
         _assert(
             names == ["auto_01.mp4", "broll_01.mp4", "broll_02.mp4"],
             f"mix → both sources ({names})",
-            errors,
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_find_broll_default_mode_is_mix(errors: list[str]) -> None:
+def test_find_broll_default_mode_is_mix() -> None:
     """Backward-compat: _find_broll(proj) без mode = mix."""
     print("\n-- _find_broll(proj) без mode → mix (backward-compat) --")
     import video_assembler as va
@@ -118,7 +112,6 @@ def test_find_broll_default_mode_is_mix(errors: list[str]) -> None:
         _assert(
             "broll_01.mp4" in names and "auto_01.mp4" in names,
             f"default mode includes both ({names})",
-            errors,
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -126,7 +119,7 @@ def test_find_broll_default_mode_is_mix(errors: list[str]) -> None:
 
 # ─── auto_broll._render_all пишет в подпапку ──────────────────────────────
 
-def test_render_target_path_in_autobroll_subdir(errors: list[str]) -> None:
+def test_render_target_path_in_autobroll_subdir() -> None:
     """auto_broll._render_all(out_dir) должна писать в out_dir/autobroll/auto_NN.mp4
     (не в out_dir/broll_NN.mp4 как раньше).
 
@@ -138,17 +131,16 @@ def test_render_target_path_in_autobroll_subdir(errors: list[str]) -> None:
     _assert(
         'out_dir / f"broll_{i:02d}.mp4"' not in src,
         "old broll_NN.mp4 pattern removed",
-        errors,
     )
     # Новый паттерн должен присутствовать
     has_new = (
         '/ f"auto_{i:02d}.mp4"' in src
         or 'autobroll' in src.lower() and 'auto_' in src
     )
-    _assert(has_new, "new auto_NN.mp4 pattern present in autobroll/", errors)
+    _assert(has_new, "new auto_NN.mp4 pattern present in autobroll/")
 
 
-def test_card_autobroll_handler_does_not_delete_real_broll(errors: list[str]) -> None:
+def test_card_autobroll_handler_does_not_delete_real_broll() -> None:
     """bot.py card_autobroll handler не должен удалять broll_*.mp4 (SMM-загрузки).
     Удалять только old autobroll/auto_*.mp4.
     """
@@ -160,7 +152,6 @@ def test_card_autobroll_handler_does_not_delete_real_broll(errors: list[str]) ->
     _assert(
         bad_pattern not in src,
         f"old wipe-all pattern removed ({bad_pattern!r})",
-        errors,
     )
 
 
@@ -170,18 +161,24 @@ def main() -> int:
     print("=" * 60)
     print("AutoBroll namespace separation tests (W1)")
     print("=" * 60)
-    errors: list[str] = []
-    test_find_broll_mode_real(errors)
-    test_find_broll_mode_ai(errors)
-    test_find_broll_mode_mix(errors)
-    test_find_broll_default_mode_is_mix(errors)
-    test_render_target_path_in_autobroll_subdir(errors)
-    test_card_autobroll_handler_does_not_delete_real_broll(errors)
+    tests = [
+        test_find_broll_mode_real,
+        test_find_broll_mode_ai,
+        test_find_broll_mode_mix,
+        test_find_broll_default_mode_is_mix,
+        test_render_target_path_in_autobroll_subdir,
+        test_card_autobroll_handler_does_not_delete_real_broll,
+    ]
+    failures: list[str] = []
+    for fn in tests:
+        try:
+            fn()
+        except AssertionError as exc:
+            failures.append(f"{fn.__name__}: {exc}")
+            print(f"  {fn.__name__}: {exc}")
     print("\n" + "=" * 60)
-    if errors:
-        print(f"Found {len(errors)} failure(s)")
-        for e in errors:
-            print(f"  {e}")
+    if failures:
+        print(f"Found {len(failures)} failure(s)")
         return 1
     print("OK all AutoBroll namespace tests passed")
     return 0
