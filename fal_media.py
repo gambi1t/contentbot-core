@@ -54,6 +54,14 @@ SEEDANCE_DOWNLOAD_TIMEOUT_S = 120   # socket timeout for clip download
 SEEDANCE_MIN_BYTES = 50_000         # below this the "mp4" is an error page / truncated → reject
 KLING_DOWNLOAD_RETRIES = 3          # retry transient CDN failures on clip download — render is PAID, an HTTP 500 must not lose the clip (фикс 22.06: терялся 1 из 2 клипов)
 KLING_RENDER_RETRIES = 2            # повтор САМОГО рендер-вызова на ТЕХНИЧЕСКИЕ ошибки fal (23.06: all clips failed = downstream_service_error)
+# cfg_scale (схема fal v3/pro: number 0..1, дефолт 0.5 = «насколько строго держаться
+# промпта»). Поднимаем до 0.7 → клипы точнее по режиссёрскому промпту (экшен-B-roll).
+# env-override для A/B-подбора (0.5 vs 0.7 vs 0.8). Аудит Kling-промптинга 2026-06-28.
+KLING_CFG_SCALE = float(os.getenv("KLING_CFG_SCALE", "0.7"))
+# Дефолтный negative ПРЯМО в fal_media: если caller не передал — не отдаём на слабый
+# дефолт fal («blur, distort, and low quality»), а гасим текст/UI/артефакты сами
+# (зеркало ai_video_broll.HOUSE_NEGATIVE; держим тут, чтобы не плодить цикл-импорт).
+_DEFAULT_NEGATIVE = "text, captions, watermark, logo, deformed hands, extra fingers, distorted face, blur"
 # Типы ошибок fal (док: fal.ai/docs/errors). Технические/инфра — безопасно
 # повторить (рендер не завершился → НЕ оплачен). content_policy_violation и
 # валидация (422) — финальные, повтор не поможет (и денег там нет).
@@ -476,9 +484,13 @@ def generate_kling_video(
                     "duration": str(duration),
                     "aspect_ratio": aspect,
                     "generate_audio": False,   # звук монтаж выкидывает + audio off дешевле ($0.112 vs $0.168/с)
-                    # negative_prompt: жёстко гасит текст/UI/артефакты рук/лиц (схема fal v3/pro
-                    # принимает поле; дефолт fal — "blur, distort, low quality"). Шлём только если задан.
-                    **({"negative_prompt": negative_prompt} if negative_prompt else {}),
+                    # cfg_scale: насколько строго Kling держится промпта (0..1, дефолт fal 0.5).
+                    # 0.7 → точнее по режиссёрскому промпту. env KLING_CFG_SCALE для A/B.
+                    "cfg_scale": KLING_CFG_SCALE,
+                    # negative_prompt: жёстко гасит текст/UI/артефакты рук/лиц. Если caller не
+                    # дал — шлём СВОЙ дефолт, не отдаём на слабый дефолт fal ("blur, distort,
+                    # and low quality"), который не гасит текст.
+                    "negative_prompt": negative_prompt or _DEFAULT_NEGATIVE,
                 },
                 with_logs=False,
                 start_timeout=SEEDANCE_TIMEOUT_S,

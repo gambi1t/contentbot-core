@@ -296,5 +296,57 @@ def test_revise_clip_prompt_keeps_old_on_bad_llm(tmp_path):
     assert plan["clips"][0]["prompt"] == "Multiple shots. original good prompt"   # старый цел
 
 
+# ── Улучшения качества (CTO/аудит Kling-промптинга 2026-06-28) ────────────────
+
+def test_kling_sets_cfg_scale(monkeypatch, tmp_path):
+    """cfg_scale (prompt-adherence, схема fal v3/pro: число 0..1) теперь задаётся
+    явно константой, а не оставляется на дефолт 0.5."""
+    import fal_media
+    captured = {}
+    fake_fal = types.SimpleNamespace(
+        subscribe=lambda endpoint, **kw: (captured.update(kw.get("arguments", {})),
+                                          {"video": {"url": "http://x/v.mp4"}})[1])
+    monkeypatch.setitem(sys.modules, "fal_client", fake_fal)
+    monkeypatch.setattr(fal_media, "_is_configured", lambda: True)
+    monkeypatch.setattr(fal_media, "_download_timeout",
+                        lambda url, part: Path(part).write_bytes(b"x" * 60000))
+    out = fal_media.generate_kling_video("p", tmp_path / "c.mp4", duration=5)
+    assert out is not None
+    assert captured.get("cfg_scale") == fal_media.KLING_CFG_SCALE
+    assert 0.0 <= fal_media.KLING_CFG_SCALE <= 1.0, "вне валидного диапазона fal v3/pro [0,1]"
+
+
+def test_kling_uses_house_negative_when_none(monkeypatch, tmp_path):
+    """Если negative не передан — шлём СВОЙ дефолт (гасит текст/артефакты), а не
+    оставляем на слабый дефолт fal «blur, distort, and low quality»."""
+    import fal_media
+    captured = {}
+    fake_fal = types.SimpleNamespace(
+        subscribe=lambda endpoint, **kw: (captured.update(kw.get("arguments", {})),
+                                          {"video": {"url": "http://x/v.mp4"}})[1])
+    monkeypatch.setitem(sys.modules, "fal_client", fake_fal)
+    monkeypatch.setattr(fal_media, "_is_configured", lambda: True)
+    monkeypatch.setattr(fal_media, "_download_timeout",
+                        lambda url, part: Path(part).write_bytes(b"x" * 60000))
+    out = fal_media.generate_kling_video("p", tmp_path / "c.mp4", duration=5, negative_prompt=None)
+    assert out is not None
+    assert captured.get("negative_prompt") == fal_media._DEFAULT_NEGATIVE
+    assert "text" in (captured.get("negative_prompt") or "")
+
+
+def test_parse_clips_enforces_multiple_shots():
+    """Промпт без «Multiple shots.» допрепендится (контракт v2, правило #4),
+    а уже корректный — не задваивается."""
+    raw = ('{"clips":[{"beat":"a","prompt":"A man walks toward a bright window, slow '
+           'dolly-in shot","negative_prompt":"text"}]}')
+    clips = A._parse_clips(raw, max_clips=4, min_clips=1)
+    assert clips[0]["prompt"].startswith("Multiple shots."), clips[0]["prompt"]
+
+    raw2 = ('{"clips":[{"beat":"b","prompt":"Multiple shots. A desk close-up, push-in",'
+            '"negative_prompt":"text"}]}')
+    clips2 = A._parse_clips(raw2, max_clips=4, min_clips=1)
+    assert clips2[0]["prompt"] == "Multiple shots. A desk close-up, push-in", "не задваивать"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

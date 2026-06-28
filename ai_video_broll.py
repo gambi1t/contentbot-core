@@ -164,6 +164,13 @@ def _parse_clips(raw: str, max_clips: int, min_clips: int) -> list[dict]:
     for c in clips:
         if not (isinstance(c, dict) and len((c.get("prompt") or "").strip()) >= MIN_PROMPT_LEN):
             continue
+        # Enforce мульти-шот-сигнал (контракт v2, правило #4): режиссёр иногда
+        # забывает «Multiple shots.» — допрепендим (дёшево; язык не валидируем,
+        # чтобы не зарубить валидный промпт). Уже корректный — не задваиваем.
+        prompt = (c.get("prompt") or "").strip()
+        if not prompt.lower().startswith("multiple shots"):
+            prompt = "Multiple shots. " + prompt
+        c["prompt"] = prompt
         # Контракт v2: каждый клип несёт negative_prompt; если режиссёр не дал —
         # подставляем HOUSE_NEGATIVE (жёсткий запрет текста/артефактов — soft-rule
         # в позитивном промпте режиссёр обходил, см. провал клипа 1).
