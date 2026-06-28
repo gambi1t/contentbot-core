@@ -18118,27 +18118,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     update_props["Дата публикации"] = {
                         "date": {"start": datetime.now().strftime("%Y-%m-%d")}
                     }
+
+                # Статус → «Опубликовано» на ПЕРВОЙ публикации (любая площадка),
+                # а не когда закрыты все площадки (Артём 28.06: «иногда не
+                # переносит»). Brand-aware (_status_property_value: Максим=select,
+                # Артём=status — иначе Notion 400). Пишем статус в том же
+                # update_props, одним вызовом.
+                _brand_now = _get_active_brand_name()
+                update_props["Status"] = _status_property_value("Опубликовано", _brand_now)
                 notion.pages.update(page_id=notion_id, properties=update_props)
 
-                # Check if all target platforms are published
+                # «Должок» — что по плану «Площадки» ещё не опубликовано
+                # (статус уже «Опубликовано», но план не закрыт).
                 target_platforms = set()
                 plat_prop = props.get("Площадки", {})
                 if plat_prop.get("type") == "multi_select":
                     target_platforms = {opt["name"] for opt in plat_prop.get("multi_select", [])}
-
-                if target_platforms and target_platforms.issubset(all_published):
-                    # All platforms done — move to "Опубликовано"
-                    notion.pages.update(
-                        page_id=notion_id,
-                        properties={"Status": _status_property_value("Опубликовано")}
-                    )
-                    results.append("\n✅ Все площадки опубликованы — статус → Опубликовано")
+                remaining = sorted(target_platforms - all_published)
+                if remaining:
+                    results.append(
+                        f"\n✅ Статус → Опубликовано. ⏳ По плану осталось: {', '.join(remaining)}")
                 else:
-                    remaining = target_platforms - all_published
-                    if remaining:
-                        results.append(f"\n⏳ Осталось опубликовать: {', '.join(remaining)}")
+                    results.append("\n✅ Статус → Опубликовано.")
             except Exception as e:
-                logger.warning(f"Failed to update Опубликовано на: {e}")
+                # НЕ глотаем молча — Артём не видел, что статус не обновился.
+                logger.error(f"[crosspost] Notion-статус не обновлён для {notion_id}: {e}", exc_info=True)
+                results.append("\n⚠️ Статус в Notion не обновился (см. лог).")
 
         card_prefix = data.get("crosspost_card_id", "")
         buttons = []
