@@ -9229,6 +9229,24 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await handle_script_edit_message(update, context):
             return
 
+    # Part B: правка раскладки ИИ-монтажа текстом → сохранить + кнопка пересборки.
+    if user_id in pending and pending[user_id].get("state") == "montage_edit_waiting":
+        instr = (update.message.text or "").strip()
+        cid = pending[user_id].get("montage_edit_cid", "")
+        if not instr:
+            await update.message.reply_text("Напиши текстом, как поправить раскладку.")
+            return
+        pending[user_id]["montage_instruction"] = instr
+        pending[user_id]["state"] = None
+        _save_pending(pending)
+        await update.message.reply_text(
+            f"✂️ Принял правку: «{instr}»\n\nЖми — пересоберу ИИ-монтаж с ней:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 Пересобрать с правкой", callback_data=f"card_asm_go:a:1:{cid}")],
+            ]),
+        )
+        return
+
     # Pipeline 2 — приём текста обложки (гейт 4, инкремент 4).
     if user_id in pending and pending[user_id].get("state") == "broll2_cover_text":
         from broll.handlers import handle_broll_cover_text_message
@@ -15175,6 +15193,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    if query.data.startswith("card_montage_edit:"):
+        # Part B: ручная правка раскладки ИИ-монтажа — ловим инструкцию текстом.
+        cid = query.data.split(":", 1)[1]
+        uid = query.from_user.id
+        st = pending.setdefault(uid, {})
+        st["state"] = "montage_edit_waiting"
+        st["montage_edit_cid"] = cid
+        _save_pending(pending)
+        await query.message.reply_text(
+            "✂️ Напиши словами, как поправить раскладку ИИ-монтажа.\n\n"
+            "Например: «финал 3с, больше B-roll на весь экран, меньше сплитов» "
+            "или «3с аватар в начале, потом весь B-roll фуллскрином».\n\n"
+            "Пересоберу ролик с этой правкой (она в приоритете над общими правилами)."
+        )
+        return
+
     if query.data.startswith("card_asm_go:"):
         # Format: card_asm_go:LAYOUT:SUBS:CARD_ID
         parts = query.data.split(":", 3)
@@ -15317,9 +15351,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # решает раскладку посегментно (avatar_full / split /
                     # broll_full разной длины). Дороже (+1 вызов Claude), но
                     # умнее для разнотипного B-roll.
+                    # Ручная правка раскладки (Part B): инструкция через
+                    # «✂️ Поправить раскладку» вшивается в промпт с приоритетом
+                    # и потребляется одноразово.
+                    _uid = query.from_user.id
+                    _montage_instr = (pending.get(_uid) or {}).pop("montage_instruction", "")
+                    if _montage_instr:
+                        _save_pending(pending)
+                        logger.info(f"[card_asm_go] ИИ-монтаж с правкой раскладки: {_montage_instr[:80]}")
                     montage_plan = await asyncio.to_thread(
                         generate_montage_plan,
                         script_text, broll_descriptions, audio_duration,
+                        user_instruction=_montage_instr,
                     )
                 else:
                     # Детерминированный план — одобренный формат роликов
@@ -15552,6 +15595,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("📢 Кросс-постинг", callback_data=f"crosspost:{card['id'][:20]}")],
                 [_music_btn],
                 [InlineKeyboardButton("🔄 Пересобрать", callback_data=f"card_assemble:{card['id'][:20]}")],
+                [InlineKeyboardButton("✂️ Поправить раскладку (ИИ-монтаж)", callback_data=f"card_montage_edit:{card['id'][:20]}")],
                 [InlineKeyboardButton("◀️ К карточке", callback_data=f"notion_card:{card['id'][:20]}")],
             ]
 
