@@ -13545,6 +13545,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_broll_reorder_move(update, context)
         return
 
+    if query.data == "b2up_pickbroll":
+        from broll.handlers import handle_broll_pickup_telethon
+        await handle_broll_pickup_telethon(update, context)
+        return
+
     if query.data == "b2up_cancel":
         try:
             await query.answer()

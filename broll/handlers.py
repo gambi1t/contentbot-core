@@ -547,12 +547,14 @@ async def handle_broll_source(
         _bot_save_pending(_bot_pending)
         await context.bot.send_message(
             chat_id,
-            "📤 Пришли свои фото/видео (можно несколько). Когда закончишь — "
-            "жми «✅ Готово».",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Готово", callback_data="b2up_done")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="b2up_cancel")],
-            ]),
+            "📤 Пришли свои фото/видео (можно несколько, по порядку 1→2→3).\n\n"
+            "🎬 Большие файлы (>20 МБ): открой «Избранное», пришли каждый клип "
+            "<b>Файлом</b> с подписью <code>#broll 1</code>, <code>#broll 2</code> … "
+            "(номер = порядок по сценарию), дождись «✅ B-roll получен», потом жми "
+            "«🔄 Забрать большие файлы».\n\n"
+            "Когда всё загрузил — «✅ Готово».",
+            parse_mode="HTML",
+            reply_markup=_broll_upload_keyboard(),
         )
         return
 
@@ -2002,12 +2004,105 @@ async def handle_broll2_upload_message(update: Update, context: ContextTypes.DEF
     await msg.reply_text(
         f"✅ Принял клип #{len(draft.source_items)}. "
         f"Пришли следующий по порядку или жми «Готово».",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Готово", callback_data="b2up_done")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="b2up_cancel")],
-        ]),
+        reply_markup=_broll_upload_keyboard(),
     )
     return True
+
+
+def _reload_broll_inbox(uid: int) -> list:
+    """Перечитать pending.json с диска и вернуть broll_inbox для uid: telethon
+    пишет туда #broll-клипы (>20МБ из «Избранного»), а бот держит pending в
+    памяти и этих записей не видит без перечитки."""
+    try:
+        import json as _json
+        from bot_state import PENDING_FILE as _PF
+        if _PF.exists():
+            disk = _json.loads(_PF.read_text(encoding="utf-8")) or {}
+            inbox = (disk.get(str(uid)) or {}).get("broll_inbox") or []
+            if inbox:
+                st = _bot_pending.setdefault(uid, {})
+                st["broll_inbox"] = inbox
+                return inbox
+    except Exception as e:
+        logger.warning(f"[broll] reload inbox failed: {e}")
+    return (_bot_pending.get(uid) or {}).get("broll_inbox") or []
+
+
+def _ingest_broll_inbox(draft, inbox: list) -> int:
+    """Перенести #broll-клипы из telethon-инбокса в draft.work_dir ПО ПОРЯДКУ
+    (поле order). Возвращает число добавленных. Битые/пропавшие — пропускает."""
+    if not inbox:
+        return 0
+    work = Path(draft.work_dir)
+    work.mkdir(parents=True, exist_ok=True)
+    added = 0
+    for entry in sorted(inbox, key=lambda e: e.get("order", 0)):
+        src = Path(entry.get("path", ""))
+        if not src.exists():
+            continue
+        n = len(draft.source_items)
+        dest = work / f"up_{n + 1:03d}.mp4"
+        try:
+            shutil.move(str(src), str(dest))
+        except Exception:
+            continue
+        ok, _reason = validate_upload_media(dest, "video")
+        if not ok:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+            continue
+        draft.source_items.append(BrollItem(
+            kind="video", origin="upload", path=str(dest),
+            label=f"upload/{dest.name}"))
+        added += 1
+    return added
+
+
+def _broll_upload_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура экрана загрузки своего B-roll (с забором больших файлов)."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="b2up_pickbroll")],
+        [InlineKeyboardButton("✅ Готово", callback_data="b2up_done")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="b2up_cancel")],
+    ])
+
+
+async def handle_broll_pickup_telethon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """«🔄 Забрать большие файлы (#broll)»: забрать клипы, скачанные telethon'ом
+    через «Избранное» (>20МБ), в draft по их порядку (#broll 1/2/3)."""
+    q = update.callback_query
+    uid = q.from_user.id
+    d = _bot_pending.get(uid) or {}
+    draft = load_draft(d.get("broll2_draft_id"), DRAFTS_DIR) if d.get("broll2_draft_id") else None
+    if draft is None:
+        await q.answer("Черновик потерян — запусти B-roll заново")
+        return
+    added = _ingest_broll_inbox(draft, _reload_broll_inbox(uid))
+    if added:
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+        st = _bot_pending.setdefault(uid, {})
+        st.pop("broll_inbox", None)
+        _bot_save_pending(_bot_pending)
+    await q.answer(f"Забрал {added}" if added else "Пока нет #broll-файлов")
+    if added:
+        await context.bot.send_message(
+            q.message.chat_id,
+            f"✅ Забрал больших файлов: {added}. Всего клипов: {len(draft.source_items)}.\n"
+            f"Ещё файл или жми «Готово».",
+            reply_markup=_broll_upload_keyboard(),
+        )
+    else:
+        await context.bot.send_message(
+            q.message.chat_id,
+            "Пока не вижу #broll-файлов. Пришли клип в «Избранное» Файлом с подписью "
+            "<code>#broll 1</code>, <code>#broll 2</code> …, дождись «✅ B-roll получен», "
+            "потом нажми снова.",
+            parse_mode="HTML",
+            reply_markup=_broll_upload_keyboard(),
+        )
 
 
 def _broll_reorder_text(draft) -> str:
@@ -2046,7 +2141,17 @@ async def show_broll_reorder(update: Update, context: ContextTypes.DEFAULT_TYPE,
     uid = q.from_user.id
     d = _bot_pending.get(uid) or {}
     draft = load_draft(d.get("broll2_draft_id"), DRAFTS_DIR) if d.get("broll2_draft_id") else None
-    if draft is None or not draft.source_items:
+    if draft is None:
+        await context.bot.send_message(q.message.chat_id, "⚠️ Черновик потерян — запусти B-roll заново.")
+        return
+    # Подхватить большие файлы (#broll), если пользователь не нажал «Забрать».
+    if _ingest_broll_inbox(draft, _reload_broll_inbox(uid)):
+        st = _bot_pending.setdefault(uid, {})
+        st.pop("broll_inbox", None)
+        _bot_save_pending(_bot_pending)
+        draft.touch(time.time())
+        save_draft(draft, DRAFTS_DIR)
+    if not draft.source_items:
         await context.bot.send_message(q.message.chat_id, "⚠️ Ничего не загружено — пришли фото/видео.")
         return
     if len(draft.source_items) == 1:

@@ -44,6 +44,14 @@ LIB_TAG_RE = re.compile(
 SELFIE_TAG = "#selfie"
 SELFIE_INBOX = BOT_DIR / "selfie_inbox"
 
+# #broll [N] → скачать БОЛЬШОЙ B-roll-клип (>20МБ) в broll_inbox для активной
+# загрузки своего B-roll (state broll2_uploading). N — порядковый номер клипа
+# по сценарию (#broll 1 / #broll 2 …); без N — порядок прихода. Бот забирает
+# их в проект по этому порядку. Отдельный поток от #selfie/#crosspost/#lib.
+BROLL_TAG_RE = re.compile(r'^#broll\b(?:\s+(\d+))?', re.IGNORECASE)
+BROLL_INBOX = BOT_DIR / "broll_inbox"
+_BROLL_UPLOAD_STATE = "broll2_uploading"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -121,6 +129,21 @@ def _find_active_selfie(pending: dict, owner_id: "int | None" = None) -> "tuple[
         return None
     for uid, data in pending.items():
         if data.get("state") == "selfie_waiting_video":
+            return uid, data
+    return None
+
+
+def _find_active_broll(pending: dict, owner_id: "int | None" = None) -> "tuple[str, dict] | None":
+    """Юзер, грузящий свой B-roll (state 'broll2_uploading'). Owner-match как у
+    #selfie: Saved Messages принадлежат владельцу → его uid (не «первый ждущий»).
+    Отдельный поток от #selfie/#crosspost, чтобы не перехватывать чужие файлы."""
+    if owner_id is not None:
+        d = pending.get(str(owner_id))
+        if d and d.get("state") == _BROLL_UPLOAD_STATE:
+            return str(owner_id), d
+        return None
+    for uid, data in pending.items():
+        if data.get("state") == _BROLL_UPLOAD_STATE:
             return uid, data
     return None
 
@@ -208,6 +231,75 @@ async def handle_saved(event):
         except Exception as e:
             logger.error(f"#lib download failed: {e}", exc_info=True)
             await status.edit(f"❌ Ошибка сохранения: {e}")
+        return
+
+    # --- #broll [N]: скачать большой B-roll-клип для активной загрузки своего
+    # B-roll. N задаёт порядок по сценарию; бот забирает по этому порядку. ---
+    broll_match = BROLL_TAG_RE.match(caption)
+    if broll_match:
+        try:
+            pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"#broll: failed to read pending.json: {e}")
+            await event.reply("❌ Не удалось прочитать состояние бота. Попробуй ещё раз.")
+            return
+        active = _find_active_broll(pending, OWNER_ID)
+        if not active:
+            await event.reply(
+                "⚠️ Бот сейчас не ждёт B-roll.\n\n"
+                "Сначала в @panferovai_contentbot зайди в B-roll → «Загрузить свой», "
+                "потом пришли сюда видео ДОКУМЕНТОМ с подписью #broll 1 / #broll 2 …"
+            )
+            return
+        uid, _data = active
+        order = int(broll_match.group(1)) if broll_match.group(1) else None
+        BROLL_INBOX.mkdir(parents=True, exist_ok=True)
+        seq = len((pending.get(uid, {}).get("broll_inbox") or [])) + 1
+        target = BROLL_INBOX / f"broll_{uid}_{seq:03d}.mp4"
+        part = target.with_suffix(target.suffix + ".part")
+        logger.info(f"#broll download: uid={uid}, order={order}, seq={seq}, size={size_mb:.1f} MB")
+        status = await event.reply(f"📥 Скачиваю B-roll {size_mb:.1f} MB (оригинал)...")
+
+        last_pct = [0]
+
+        def progress(current, total):
+            if total:
+                pct = int(current * 100 / total)
+                if pct >= last_pct[0] + 10:
+                    last_pct[0] = pct
+                    logger.info(f"#broll download progress: {pct}%")
+
+        try:
+            await msg.download_media(file=str(part), progress_callback=progress)
+            os.replace(part, target)
+        except Exception as e:
+            logger.error(f"#broll download failed: {e}", exc_info=True)
+            try:
+                part.unlink()
+            except OSError:
+                pass
+            await status.edit(f"❌ Ошибка скачивания: {e}")
+            return
+
+        # Перечитать pending (мог измениться за долгую скачку) и дописать клип
+        # в broll_inbox — бот заберёт по «Готово»/«Забрать большие файлы».
+        try:
+            pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+            if uid in pending and pending[uid].get("state") == _BROLL_UPLOAD_STATE:
+                lst = pending[uid].setdefault("broll_inbox", [])
+                lst.append({"path": str(target), "order": order if order is not None else seq})
+                _atomic_write_pending(pending)
+            else:
+                logger.warning(f"#broll: uid={uid} no longer uploading, saved anyway")
+        except Exception as e:
+            logger.error(f"#broll: failed to update pending: {e}")
+
+        actual = target.stat().st_size / 1024 / 1024
+        logger.info(f"#broll saved {actual:.1f} MB to {target}")
+        await status.edit(
+            f"✅ B-roll #{order if order is not None else seq} получен ({actual:.1f} MB).\n\n"
+            f"Пришли ещё (#broll N) или вернись в бота и жми «🔄 Забрать большие файлы»."
+        )
         return
 
     # --- #selfie: скачать большой оригинал selfie для selfie-пайплайна бота ---
