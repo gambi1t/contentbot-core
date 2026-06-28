@@ -90,9 +90,14 @@ def _kb_type_picker(brand: str = "default") -> InlineKeyboardMarkup:
     ])
 
 
-def _kb_review() -> InlineKeyboardMarkup:
+def _kb_review(photos_count: int = 0) -> InlineKeyboardMarkup:
+    photo_label = (
+        f"📷 Фото к посту ({photos_count} выбрано)" if photos_count
+        else "📷 Прикрепить фото"
+    )
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Опубликовать в канал", callback_data="tgpost:publish")],
+        [InlineKeyboardButton(photo_label, callback_data="tgpost_vanilla_photos")],
         [
             InlineKeyboardButton("🔄 Перегенерировать", callback_data="tgpost:regen"),
             InlineKeyboardButton("🎙️ Правки", callback_data="tgpost:voice_edit"),
@@ -317,7 +322,7 @@ async def handle_tgpost_callback(update: Update, context: ContextTypes.DEFAULT_T
 
     # Публикация в канал
     if action == "publish":
-        await _publish_to_channel(query, context, tg)
+        await _publish_to_channel(query, context, tg, data.get("selfie_tg_photos") or [])
         return
 
     # Сохранение в Notion
@@ -440,7 +445,7 @@ async def _generate_and_show(message, user_id: int, *, via_callback: bool,
         shown = _safe_preview(post_text)
         await status.edit_text(
             f"📝 <b>Готовый пост:</b>\n\n{shown}",
-            reply_markup=_kb_review(),
+            reply_markup=_kb_review(len(data.get("selfie_tg_photos") or [])),
             parse_mode="HTML",
         )
     except Exception as e:
@@ -467,10 +472,29 @@ def _safe_preview(text: str) -> str:
 
 # ═══ Публикация в канал ══════════════════════════════════════════════════════
 
-async def _publish_to_channel(query, context, tg: dict):
+async def _publish_to_channel(query, context, tg: dict, photos: list | None = None):
     text = tg.get("last_post", "")
     if not text:
         await query.edit_message_text("Нет текста для публикации.")
+        return
+
+    # ── С прикреплёнными фото: реюз telegram_post_to_channel (тот же путь,
+    # что у idea→tgpost и селфи-пайплайна). Caption там рендерится parse_mode
+    # HTML, поэтому markdown-жирный (**...**) конвертируем в <b>...</b>. ──
+    if photos:
+        from crosspost import telegram_post_to_channel
+        _esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html_text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", _esc)
+        res = await telegram_post_to_channel(context.bot, html_text, photos=photos)
+        if res:
+            await query.edit_message_text(
+                f"✅ Опубликовано в канал ({len(photos)} фото)."
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Не опубликовалось (с фото). Проверь TELEGRAM_CHANNEL_ID "
+                "и что бот — админ канала."
+            )
         return
 
     channel_id = _ext.get("channel_id") or os.getenv("TELEGRAM_CHANNEL_ID")
@@ -609,7 +633,7 @@ async def _rewrite_for_telegram_from_description(query, context, data: dict):
         shown = _safe_preview(post_text)
         await query.edit_message_text(
             f"📝 <b>Telegram-версия (длинная):</b>\n\n{shown}",
-            reply_markup=_kb_review(),
+            reply_markup=_kb_review(len(data.get("selfie_tg_photos") or [])),
             parse_mode="HTML",
         )
     except Exception as e:

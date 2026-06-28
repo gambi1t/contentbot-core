@@ -11675,7 +11675,8 @@ async def _render_tgphoto_menu(query, context, data: dict) -> None:
         )])
     # Подпись кнопки возврата зависит от того, какой флоу открыл меню:
     # сценарный TG-пост / idea→tgpost → «к посту»; крос-пост → «к кросс-постингу».
-    if data.get("tgphoto_return_script") or data.get("tgphoto_return_idea_idx") is not None:
+    if (data.get("tgphoto_return_script") or data.get("tgphoto_return_idea_idx") is not None
+            or data.get("tgphoto_return_tgpost")):
         _back_label = "◀️ Назад к посту"
     else:
         _back_label = "◀️ Назад к кросс-постингу"
@@ -12984,6 +12985,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         # Re-use existing _render_tgphoto_menu helper (single source of
         # truth for the photo menu rendering).
+        await _render_tgphoto_menu(query, context, session_data)
+        return
+
+    # ─── Entry to photo menu from vanilla /tgpost review screen ───
+    # Маркер возврата tgphoto_return_tgpost → tgphoto_done перерисует экран
+    # «📝 Готовый пост» с обновлённым счётчиком фото на кнопке. Пост лежит в
+    # data["tgpost"]["last_post"] (vanilla-флоу). Реюз _render_tgphoto_menu.
+    if query.data == "tgpost_vanilla_photos":
+        session_data = pending.get(user_id) or {}
+        session_data["tgphoto_return_tgpost"] = True
+        session_data.pop("tgphoto_return_idea_idx", None)  # mutually exclusive
+        session_data.pop("tgphoto_return_script", None)
+        pending[user_id] = session_data
+        _save_pending(pending)
+        await query.answer()
         await _render_tgphoto_menu(query, context, session_data)
         return
 
@@ -17306,6 +17322,32 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         #   * Idea→tgpost flow → return to the post screen with the
         #     refreshed photo counter on the button.
         tg_photos = data.get("selfie_tg_photos", []) or []
+
+        # ── Vanilla /tgpost return: перерисовать экран «📝 Готовый пост» со
+        # свежим счётчиком фото на кнопке. Vanilla-флоу — state-driven,
+        # поэтому восстанавливаем state="tgpost_review" (в отличие от
+        # stateless idea-флоу ниже). Клавиатура/превью — реюз tg_post_handlers. ──
+        if data.get("tgphoto_return_tgpost"):
+            data.pop("tgphoto_return_tgpost", None)
+            data["state"] = "tgpost_review"
+            _save_pending(pending)
+            tg_block = data.get("tgpost") or {}
+            last_post = tg_block.get("last_post") or ""
+            if not last_post:
+                await query.edit_message_text(
+                    f"✅ Прикреплено: *{len(tg_photos)}* фото.\n\n"
+                    "Текст поста потерян — сгенерируй заново через /tgpost.",
+                    parse_mode="Markdown",
+                )
+                return
+            import tg_post_handlers as _tgph
+            shown = _tgph._safe_preview(last_post)
+            await query.edit_message_text(
+                f"📝 <b>Готовый пост:</b>\n\n{shown}",
+                reply_markup=_tgph._kb_review(len(tg_photos)),
+                parse_mode="HTML",
+            )
+            return
 
         # ── Селфи script→tgpost return: перерисовать экран TG-поста по
         # сценарию со свежим счётчиком фото на кнопке. ──
