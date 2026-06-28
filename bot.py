@@ -119,14 +119,14 @@ NOTION_GUIDES_PUBLIC_HOST = os.getenv(
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # --- AI disclosure footer (appended to all crosspost descriptions) ---
-# YouTube requires synthetic media disclosure since July 2025; Instagram and
-# TikTok don't enforce it yet, but adding it everywhere is safer and builds
-# trust with the audience.  Change the text here — it auto-applies everywhere.
-AI_DISCLOSURE = (
-    "\n\n—\n"
-    "В производстве использованы AI-инструменты. "
-    "Сценарий и идеи — авторские."
-)
+# AI-disclosure ОТКЛЮЧЁН (Артём 28.06: «не нравится подпись в каждом описании»).
+# Раньше на все 4 площадки при кросс-постинге клеился текст «В производстве
+# использованы AI-инструменты. Сценарий и идеи — авторские». Пустая строка =
+# раскрытие нигде не добавляется (`+= AI_DISCLOSURE` становятся no-op).
+# ⚠️ YouTube Data API синтетик-флаг НЕ ставит (только madeForKids) → на YT
+# теперь раскрытия нет совсем; при желании галка «изменённый контент» —
+# вручную в Studio. Вернуть — впиши текст обратно сюда (применится везде).
+AI_DISCLOSURE = ""
 
 # --- Instagram comment-to-DM default fallback ---
 # Link sent in auto-reply DM when the project has no post-specific URL.
