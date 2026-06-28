@@ -1807,10 +1807,57 @@ def _broll_ready_kb(proj) -> InlineKeyboardMarkup:
     total = v + p
     done_label = f"✅ Готово ({total} материалов)" if total else "✅ Готово"
     rows = [[InlineKeyboardButton(done_label, callback_data="broll_ready_done")]]
-    if v >= 2:
-        rows.append([InlineKeyboardButton(f"🔢 Порядок клипов ({v})", callback_data="broll_ready_reorder")])
+    if total:
+        rows.append([InlineKeyboardButton(f"📋 Мои материалы ({total})", callback_data="broll_ready_manage")])
     rows.append([InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="broll_ready_pickbroll")])
     rows.append([InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _broll_ready_materials(proj) -> list:
+    """Все материалы проекта в порядке монтажа: [(kind, Path), …] — видео
+    broll_NN.mp4 (по номеру), затем фото photos/ (по имени)."""
+    if not proj or not proj.exists():
+        return []
+    vids = _broll_ready_video_list(proj)
+    photos = []
+    pdir = proj / "photos"
+    if pdir.exists():
+        photos = sorted(
+            (p for p in pdir.iterdir()
+             if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")),
+            key=lambda p: p.name)
+    return [("video", p) for p in vids] + [("image", p) for p in photos]
+
+
+def _broll_ready_manage_text(proj) -> str:
+    mats = _broll_ready_materials(proj)
+    if not mats:
+        return "📋 Пока ничего не загружено."
+    lines = [f"📋 <b>Мои материалы ({len(mats)})</b> — порядок в монтаже:", ""]
+    for i, (kind, p) in enumerate(mats, 1):
+        emoji = "🎬" if kind == "video" else "🖼"
+        lines.append(f"<b>{i})</b> {emoji} {p.name}")
+    lines.append("")
+    lines.append("🗑 — убрать материал. Видео можно переставить — «🔢 Порядок клипов».")
+    return "\n".join(lines)
+
+
+def _broll_ready_manage_kb(proj) -> InlineKeyboardMarkup:
+    mats = _broll_ready_materials(proj)
+    rows = []
+    rm_row = []
+    for i in range(1, len(mats) + 1):
+        rm_row.append(InlineKeyboardButton(f"🗑 {i}", callback_data=f"broll_ready_rm:{i}"))
+        if len(rm_row) == 4:
+            rows.append(rm_row)
+            rm_row = []
+    if rm_row:
+        rows.append(rm_row)
+    if len(_broll_ready_video_list(proj)) >= 2:
+        rows.append([InlineKeyboardButton("🔢 Порядок клипов", callback_data="broll_ready_reorder")])
+    rows.append([InlineKeyboardButton("➕ Загрузить ещё", callback_data="broll_ready_back")])
+    rows.append([InlineKeyboardButton("✅ Готово", callback_data="broll_ready_done")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1842,7 +1889,7 @@ def _broll_ready_reorder_kb(proj) -> InlineKeyboardMarkup:
             InlineKeyboardButton(f"{i} ⬆", callback_data=f"broll_ready_move:u:{i}"),
             InlineKeyboardButton(f"{i} ⬇", callback_data=f"broll_ready_move:d:{i}"),
         ])
-    rows.append([InlineKeyboardButton("◀️ К материалам", callback_data="broll_ready_back")])
+    rows.append([InlineKeyboardButton("◀️ К материалам", callback_data="broll_ready_manage")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -19257,6 +19304,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Edit может упасть если сообщение совпадает — это OK
             logger.debug(f"[broll_ready_cat] edit skipped: {e}")
         await query.answer(f"✓ {cat_label}", show_alert=False)
+        return
+
+    if query.data == "broll_ready_manage":
+        proj = _project_dir(data) if data else None
+        if not _broll_ready_materials(proj):
+            await query.answer("Пока ничего не загружено")
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                _broll_ready_manage_text(proj), parse_mode="HTML",
+                reply_markup=_broll_ready_manage_kb(proj))
+        except Exception:
+            await context.bot.send_message(
+                query.message.chat_id, _broll_ready_manage_text(proj),
+                parse_mode="HTML", reply_markup=_broll_ready_manage_kb(proj))
+        return
+
+    if query.data.startswith("broll_ready_rm:"):
+        proj = _project_dir(data) if data else None
+        mats = _broll_ready_materials(proj)
+        try:
+            idx = int(query.data.split(":")[1]) - 1
+        except (ValueError, IndexError):
+            await query.answer()
+            return
+        if 0 <= idx < len(mats):
+            try:
+                mats[idx][1].unlink()
+            except OSError:
+                pass
+            await query.answer("Убрал")
+        else:
+            await query.answer()
+        try:
+            await query.edit_message_text(
+                _broll_ready_manage_text(proj), parse_mode="HTML",
+                reply_markup=_broll_ready_manage_kb(proj))
+        except Exception:
+            pass
         return
 
     if query.data == "broll_ready_reorder":

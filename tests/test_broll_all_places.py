@@ -46,16 +46,16 @@ def test_renumber_applies_desired_order(tmp_path):
     assert not list(tmp_path.glob("broll_tmp_*"))
 
 
-def test_ready_kb_shows_reorder_when_two_videos(tmp_path):
+def test_manage_kb_shows_reorder_when_two_videos(tmp_path):
     (tmp_path / "broll_01.mp4").write_text("a")
     (tmp_path / "broll_02.mp4").write_text("b")
-    cbs = [b.callback_data for r in bot._broll_ready_kb(tmp_path).inline_keyboard for b in r]
-    assert "broll_ready_reorder" in cbs
+    cbs = [b.callback_data for r in bot._broll_ready_manage_kb(tmp_path).inline_keyboard for b in r]
+    assert "broll_ready_reorder" in cbs, "реордер должен быть в экране управления при ≥2 видео"
 
 
-def test_ready_kb_hides_reorder_for_one_video(tmp_path):
+def test_manage_kb_hides_reorder_for_one_video(tmp_path):
     (tmp_path / "broll_01.mp4").write_text("a")
-    cbs = [b.callback_data for r in bot._broll_ready_kb(tmp_path).inline_keyboard for b in r]
+    cbs = [b.callback_data for r in bot._broll_ready_manage_kb(tmp_path).inline_keyboard for b in r]
     assert "broll_ready_reorder" not in cbs, "реордер не нужен при 1 клипе"
 
 
@@ -86,6 +86,43 @@ def test_lib_admin_20mb_redirect_to_lib():
     src = (ROOT / "library_manager.py").read_text(encoding="utf-8")
     assert "20 * 1024 * 1024" in src, "нет пре-чека >20МБ в lib_admin"
     assert "#lib" in src, "нет редиректа на #lib-маршрут"
+
+
+# ── Fix1b: экран управления «Мои материалы» (посмотреть/убрать/порядок) ────
+
+def test_ready_materials_videos_then_photos(tmp_path):
+    (tmp_path / "photos").mkdir()
+    (tmp_path / "broll_02.mp4").write_text("v2")
+    (tmp_path / "broll_01.mp4").write_text("v1")
+    (tmp_path / "photos" / "ready_01.jpg").write_text("p")
+    mats = bot._broll_ready_materials(tmp_path)
+    assert [k for k, _ in mats] == ["video", "video", "image"], "порядок видео→фото"
+    assert [p.name for _, p in mats] == ["broll_01.mp4", "broll_02.mp4", "ready_01.jpg"]
+
+
+def test_ready_manage_kb_trash_per_material(tmp_path):
+    (tmp_path / "photos").mkdir()
+    (tmp_path / "broll_01.mp4").write_text("a")
+    (tmp_path / "broll_02.mp4").write_text("b")
+    (tmp_path / "photos" / "ready_01.jpg").write_text("p")
+    cbs = [b.callback_data for r in bot._broll_ready_manage_kb(tmp_path).inline_keyboard for b in r]
+    for i in (1, 2, 3):
+        assert f"broll_ready_rm:{i}" in cbs, f"нет корзины на материал {i}"
+    assert "broll_ready_reorder" in cbs, "нет порядка клипов (≥2 видео)"
+    assert "broll_ready_back" in cbs, "нет «загрузить ещё»"
+    assert "broll_ready_done" in cbs
+
+
+def test_ready_kb_has_manage_button(tmp_path):
+    (tmp_path / "broll_01.mp4").write_text("a")
+    cbs = [b.callback_data for r in bot._broll_ready_kb(tmp_path).inline_keyboard for b in r]
+    assert "broll_ready_manage" in cbs, "нет входа в «Мои материалы»"
+
+
+def test_bot_has_manage_callbacks():
+    src = (ROOT / "bot.py").read_text(encoding="utf-8")
+    assert 'query.data == "broll_ready_manage"' in src
+    assert 'query.data.startswith("broll_ready_rm:")' in src
 
 
 if __name__ == "__main__":
