@@ -50,7 +50,7 @@ SELFIE_INBOX = BOT_DIR / "selfie_inbox"
 # их в проект по этому порядку. Отдельный поток от #selfie/#crosspost/#lib.
 BROLL_TAG_RE = re.compile(r'^#broll\b(?:\s+(\d+))?', re.IGNORECASE)
 BROLL_INBOX = BOT_DIR / "broll_inbox"
-_BROLL_UPLOAD_STATES = {"broll2_uploading", "broll_ready_material"}
+_BROLL_UPLOAD_STATES = {"broll2_uploading", "broll_ready_material", "selfie_broll_uploading_video"}
 
 logging.basicConfig(
     level=logging.INFO,

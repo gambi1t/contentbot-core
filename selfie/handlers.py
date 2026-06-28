@@ -1283,6 +1283,53 @@ def _store_item(data: dict, item) -> None:
     })
 
 
+def _reload_broll_inbox_selfie(user_id: int) -> list:
+    """Перечитать pending.json с диска → broll_inbox для uid: telethon пишет туда
+    #broll-клипы (>20МБ из «Избранного»), бот держит pending в памяти."""
+    try:
+        import json as _json
+        from bot_state import PENDING_FILE as _PF
+        if _PF.exists():
+            disk = _json.loads(_PF.read_text(encoding="utf-8")) or {}
+            return (disk.get(str(user_id)) or {}).get("broll_inbox") or []
+    except Exception:
+        pass
+    return (_PENDING.get(user_id) or {}).get("broll_inbox") or []
+
+
+async def _ingest_selfie_broll_inbox(user_id: int, data: dict) -> int:
+    """Забрать #broll-клипы (>20МБ) в селфи-пикер ПО ПОРЯДКУ (поле order).
+    Уважает лимит набора (validate_added). Возвращает число добавленных."""
+    import shutil as _sh
+    inbox = _reload_broll_inbox_selfie(user_id)
+    if not inbox:
+        return 0
+    selfie_tmp = Path(data["selfie_tmp_dir"])
+    uploads_dir = selfie_tmp / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    added = 0
+    for entry in sorted(inbox, key=lambda e: e.get("order", 0)):
+        src = Path(entry.get("path", ""))
+        if not src.exists():
+            continue
+        n = len([p for p in uploads_dir.iterdir()
+                 if p.suffix.lower() in (".mp4", ".mov", ".m4v")])
+        dest = uploads_dir / f"upload_video_{n + 1:03d}.mp4"
+        try:
+            _sh.move(str(src), str(dest))
+        except Exception:
+            continue
+        new_item = selfie_broll.BrollItem(kind="video", source=dest, label=f"upload/{dest.name}")
+        if selfie_broll.validate_added(_items_from_pending(data), new_item):
+            break  # лимит набора достигнут
+        _store_item(data, new_item)
+        added += 1
+    if added:
+        data.pop("broll_inbox", None)
+        _SAVE_PENDING(_PENDING)
+    return added
+
+
 def _cleanup_selfie_gen_dirs(data: dict) -> None:
     """Удалить временные папки Remotion-генерации (selfie_gen_*).
 
@@ -1944,11 +1991,25 @@ async def handle_broll_callback(
         await query.edit_message_text(
             "📤 Пришли видео-файл (короткий клип 2-5 сек идеально).\n\n"
             "Он будет вставлен как B-roll-сегмент (звук от видео отключается).\n\n"
+            "🎬 Файлы >20 МБ: в «Избранное» Файлом с подписью #broll 1, #broll 2 … "
+            "(номер = порядок), дождись «✅ B-roll получен», потом «🔄 Забрать большие файлы».\n\n"
             "Или жми «⬅️ Назад» чтобы вернуться к picker'у.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back"),
-            ]]),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="selfie_broll:pickbroll")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back")],
+            ]),
         )
+        return True
+
+    if action == "pickbroll":
+        added = await _ingest_selfie_broll_inbox(user_id, data)
+        if added:
+            await query.answer(f"Забрал больших файлов: {added}")
+        else:
+            await query.answer(
+                "Пока нет #broll-файлов. Пришли в «Избранное» Файлом с #broll 1, "
+                "дождись «✅ B-roll получен».", show_alert=True)
+        await _show_broll_picker_screen(query, user_id)
         return True
 
     if action == "done":
@@ -2035,6 +2096,20 @@ async def handle_broll_upload_video_message(
     )
     if not is_video:
         await update.message.reply_text("Это не видео. Пришли видеофайл (MP4).")
+        return True
+
+    # >20МБ Bot API не отдаёт боту → редирект на #broll через «Избранное».
+    _sz = getattr(video_file, "file_size", 0) or 0
+    if _sz > 20 * 1024 * 1024:
+        await update.message.reply_text(
+            f"🎬 Файл ~{_sz / 1024 / 1024:.0f} МБ — больше 20 МБ, Telegram не отдаёт боту напрямую.\n\n"
+            "Пришли его в «Избранное» Файлом с подписью #broll 1 (номер = порядок), "
+            "дождись «✅ B-roll получен», потом «🔄 Забрать большие файлы».",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="selfie_broll:pickbroll")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="selfie_broll:back")],
+            ]),
+        )
         return True
 
     selfie_tmp = Path(data["selfie_tmp_dir"])

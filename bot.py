@@ -1806,11 +1806,62 @@ def _broll_ready_kb(proj) -> InlineKeyboardMarkup:
     v, p = _broll_ready_counts(proj)
     total = v + p
     done_label = f"✅ Готово ({total} материалов)" if total else "✅ Готово"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(done_label, callback_data="broll_ready_done")],
-        [InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="broll_ready_pickbroll")],
-        [InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")],
-    ])
+    rows = [[InlineKeyboardButton(done_label, callback_data="broll_ready_done")]]
+    if v >= 2:
+        rows.append([InlineKeyboardButton(f"🔢 Порядок клипов ({v})", callback_data="broll_ready_reorder")])
+    rows.append([InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="broll_ready_pickbroll")])
+    rows.append([InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _broll_ready_video_list(proj) -> list:
+    """Видео-клипы проекта broll_*.mp4 по номеру (= порядок в монтаже)."""
+    if not proj or not proj.exists():
+        return []
+    def _key(p):
+        m = re.match(r"broll_(\d+)", p.stem)
+        return int(m.group(1)) if m else 0
+    return sorted(proj.glob("broll_*.mp4"), key=_key)
+
+
+def _broll_ready_reorder_text(proj) -> str:
+    vids = _broll_ready_video_list(proj)
+    lines = ["🔢 <b>Порядок клипов</b> — как пойдут в монтаж:", ""]
+    for i, p in enumerate(vids, 1):
+        lines.append(f"<b>{i})</b> 🎬 {p.name}")
+    lines.append("")
+    lines.append("Стрелки ⬆⬇ — поменять местами. Готово — «◀️ К материалам».")
+    return "\n".join(lines)
+
+
+def _broll_ready_reorder_kb(proj) -> InlineKeyboardMarkup:
+    vids = _broll_ready_video_list(proj)
+    rows = []
+    for i in range(1, len(vids) + 1):
+        rows.append([
+            InlineKeyboardButton(f"{i} ⬆", callback_data=f"broll_ready_move:u:{i}"),
+            InlineKeyboardButton(f"{i} ⬇", callback_data=f"broll_ready_move:d:{i}"),
+        ])
+    rows.append([InlineKeyboardButton("◀️ К материалам", callback_data="broll_ready_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _renumber_broll_videos(proj, ordered_paths) -> None:
+    """Перенумеровать broll_*.mp4 под желаемый порядок (two-phase, без коллизий)."""
+    import shutil as _shutil
+    tmps = []
+    for i, src in enumerate(ordered_paths, 1):
+        tmp = proj / f"broll_tmp_{i:03d}.mp4"
+        try:
+            _shutil.move(str(src), str(tmp))
+            tmps.append(tmp)
+        except Exception as e:
+            logger.warning(f"[broll_ready] renumber phase1 failed: {e}")
+    for i, tmp in enumerate(tmps, 1):
+        try:
+            _shutil.move(str(tmp), str(proj / f"broll_{i:02d}.mp4"))
+        except Exception as e:
+            logger.warning(f"[broll_ready] renumber phase2 failed: {e}")
 
 
 def _reload_broll_inbox_disk(user_id) -> list:
@@ -19206,6 +19257,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Edit может упасть если сообщение совпадает — это OK
             logger.debug(f"[broll_ready_cat] edit skipped: {e}")
         await query.answer(f"✓ {cat_label}", show_alert=False)
+        return
+
+    if query.data == "broll_ready_reorder":
+        proj = _project_dir(data) if data else None
+        if len(_broll_ready_video_list(proj)) < 2:
+            await query.answer("Нужно ≥2 видео-клипа", show_alert=False)
+            return
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                _broll_ready_reorder_text(proj), parse_mode="HTML",
+                reply_markup=_broll_ready_reorder_kb(proj))
+        except Exception:
+            await context.bot.send_message(
+                query.message.chat_id, _broll_ready_reorder_text(proj),
+                parse_mode="HTML", reply_markup=_broll_ready_reorder_kb(proj))
+        return
+
+    if query.data.startswith("broll_ready_move:"):
+        proj = _project_dir(data) if data else None
+        vids = _broll_ready_video_list(proj)
+        try:
+            _, _dir, _idx = query.data.split(":")
+            i = int(_idx) - 1
+        except (ValueError, IndexError):
+            await query.answer()
+            return
+        if _dir == "u" and 0 < i < len(vids):
+            vids[i - 1], vids[i] = vids[i], vids[i - 1]
+        elif _dir == "d" and 0 <= i < len(vids) - 1:
+            vids[i + 1], vids[i] = vids[i], vids[i + 1]
+        else:
+            await query.answer("Уже с краю")
+            return
+        _renumber_broll_videos(proj, vids)
+        await query.answer("Поменял местами")
+        try:
+            await query.edit_message_text(
+                _broll_ready_reorder_text(proj), parse_mode="HTML",
+                reply_markup=_broll_ready_reorder_kb(proj))
+        except Exception:
+            pass
+        return
+
+    if query.data == "broll_ready_back":
+        await query.answer()
+        proj = _project_dir(data) if data else None
+        try:
+            await query.edit_message_text(
+                "📥 Готовые материалы — добавляй ещё фото/видео или «✅ Готово».",
+                reply_markup=_broll_ready_kb(proj))
+        except Exception:
+            pass
         return
 
     if query.data == "broll_ready_pickbroll":

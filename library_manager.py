@@ -417,6 +417,19 @@ async def handle_upload_message(update: Update, context: ContextTypes.DEFAULT_TY
             "Пришли " + ("фото." if kind == "image" else "видео-клип."))
         return True
 
+    # >20МБ Bot API не скачает (висло «Загружаю…» → ошибка) → редирект на готовый
+    # телетон-маршрут #lib (качает по MTProto без лимита, как и пополняет Артём).
+    _sz = getattr(file_obj, "file_size", 0) or 0
+    if kind == "video" and _sz > 20 * 1024 * 1024:
+        await msg.reply_text(
+            f"🎬 Клип ~{_sz / 1024 / 1024:.0f} МБ — больше 20 МБ, Telegram не отдаёт боту "
+            f"напрямую.\n\nПришли его в «Избранное» Файлом с подписью "
+            f"`#lib {category} имя_клипа` (имя латиницей/цифрами) — телетон скачает "
+            f"в полном качестве в категорию «{category}».",
+            parse_mode="Markdown",
+        )
+        return True
+
     status = await msg.reply_text("📥 Загружаю в библиотеку…")
     try:
         tg_file = await context.bot.get_file(
