@@ -561,16 +561,19 @@ def _plan_smart_mixed_montage(
 
     active_window = max(0.0, avatar_duration - intro_dur - outro_dur)
 
-    # Fit: drop clips from the end until body fits inside active_window.
-    # Never slice a clip — always drop it whole.
+    # Fit: длинные клипы НЕ выбрасываем целиком (Артём 28.06: длинный B-roll
+    # должен резаться, а не пропадать) — подрезаем длительности под окно
+    # пропорционально (trim), сохраняя порядок и наличие всех клипов.
     def _body_total(b: list[tuple[int, str, float]]) -> float:
         return sum(d for _, _, d in b)
 
-    while body and _body_total(body) > active_window:
-        body.pop()
+    total_body = _body_total(body)
+    if body and active_window > 0 and total_body > active_window:
+        scale = active_window / total_body
+        body = [(bi, layout, d * scale) for (bi, layout, d) in body]
 
     total_body = _body_total(body)
-    slack = active_window - total_body  # ≥ 0 after the loop above
+    slack = active_window - total_body  # ≥ 0 after fit
     final_outro = outro_dur + slack     # absorb slack into CTA
 
     # Build the actual plan with timestamps.
@@ -601,7 +604,7 @@ def _plan_fullscreen_only_montage(
     photo_clips: list[Path],
     photo_clip_dur: float,
     avatar_duration: float,
-    intro_dur: float = 2.0,
+    intro_dur: float = 3.0,
     outro_dur: float = 3.0,
 ) -> list[dict]:
     """Build a fullscreen-only montage plan: avatar shows ONLY at start
@@ -644,8 +647,14 @@ def _plan_fullscreen_only_montage(
     def _body_total(b: list[tuple[int, str, float]]) -> float:
         return sum(d for _, _, d in b)
 
-    while body and _body_total(body) > active_window:
-        body.pop()
+    # Длинный клип НЕ выбрасываем (Артём 28.06: «фуллскрин не собрался» —
+    # 30-сек B-roll выкидывался целиком, оставался один аватар). Подрезаем
+    # длительности под окно (trim первых N сек): 3с аватар → B-roll(окно) →
+    # 3с аватар.
+    total_body = _body_total(body)
+    if body and active_window > 0 and total_body > active_window:
+        scale = active_window / total_body
+        body = [(bi, layout, d * scale) for (bi, layout, d) in body]
 
     total_body = _body_total(body)
     slack = active_window - total_body
@@ -1309,56 +1318,54 @@ def _broll_fit_strategy(slot_dur: float, clip_dur: float | None) -> dict:
 
 
 def _pro_broll_full_seg_args(broll_clip, dur: float, seg_out,
-                             clip_dur: float | None = None) -> list[str]:
+                             clip_dur: float | None = None,
+                             broll_ss: float = 0.0) -> list[str]:
     """Full-screen B-roll pro segment. Fits clip to slot WITHOUT replay (B-фикс):
-    trim / stretch-PTS / stretch+freeze — см. _broll_fit_strategy. Раньше всегда
-    `stream_loop -1` → короткий клип в длинном слоте проигрывался дважды.
+    trim / stretch-PTS / stretch+freeze — см. _broll_fit_strategy.
+
+    broll_ss — смещение (сек) в клипе: нарезка длинного B-roll на РАЗНЫЕ окна
+    (Артём 28.06: 30-сек клип → несколько разных вставок, а не один кусок).
     """
     strat = _broll_fit_strategy(dur, clip_dur)
+    ss = ["-ss", f"{broll_ss:.3f}"] if broll_ss and broll_ss > 0.01 else []
     if strat["mode"] == "stretch":
-        # setpts*ratio = замедление видео до длины слота; короткий клип «дышит» вместо повтора
         return [
-            "ffmpeg", "-y",
+            "ffmpeg", "-y", *ss,
             "-i", str(broll_clip),
             "-filter:v", f"setpts={strat['stretch_ratio']:.4f}*PTS",
-            "-t", f"{dur:.3f}",
-            "-an",
+            "-t", f"{dur:.3f}", "-an",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
             str(seg_out),
         ]
     if strat["mode"] == "stretch_freeze":
-        # setpts растягивает + tpad клонирует последний кадр на остатке слота
         return [
-            "ffmpeg", "-y",
+            "ffmpeg", "-y", *ss,
             "-i", str(broll_clip),
             "-filter:v",
             f"setpts={strat['stretch_ratio']:.4f}*PTS,"
             f"tpad=stop_mode=clone:stop_duration={strat['freeze_dur']:.3f}",
-            "-t", f"{dur:.3f}",
-            "-an",
+            "-t", f"{dur:.3f}", "-an",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
             str(seg_out),
         ]
     if strat["mode"] == "trim":
-        # slot ≤ clip → просто берём начало клипа, без loop
+        # slot ≤ clip → берём окно [broll_ss, broll_ss+dur], без loop
         return [
-            "ffmpeg", "-y",
+            "ffmpeg", "-y", *ss,
             "-i", str(broll_clip),
-            "-t", f"{dur:.3f}",
-            "-an",
+            "-t", f"{dur:.3f}", "-an",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
             "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
             str(seg_out),
         ]
-    # mode == "loop" (clip_dur неизвестна) — старое поведение, чтобы ничего не сломать
+    # mode == "loop" (clip_dur неизвестна) — старое поведение
     return [
         "ffmpeg", "-y",
-        "-stream_loop", "-1",
+        "-stream_loop", "-1", *ss,
         "-i", str(broll_clip),
-        "-t", f"{dur:.3f}",
-        "-an",
+        "-t", f"{dur:.3f}", "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "15",
         "-pix_fmt", "yuv420p", *_SDR_COLOR_TAGS,
         str(seg_out),
@@ -1366,17 +1373,21 @@ def _pro_broll_full_seg_args(broll_clip, dur: float, seg_out,
 
 
 def _pro_split_seg_args(broll_clip, avatar_half, start: float, dur: float, seg_out,
-                        clip_dur: float | None = None) -> list[str]:
+                        clip_dur: float | None = None,
+                        broll_ss: float = 0.0) -> list[str]:
     """50/50 split pro segment: B-roll (top) + avatar (bottom).
 
     B-фикс симметрично _pro_broll_full_seg_args: вместо stream_loop (который
     давал «B-roll дважды» в slot > clip) — выбор по _broll_fit_strategy:
     trim / stretch / stretch+freeze. Аватар (input 1) seek'ается с `-ss start
     -t dur` как раньше (lip-sync, не меняется).
+
+    broll_ss — смещение (сек) в B-roll: нарезка длинного клипа на разные окна.
     """
     strat = _broll_fit_strategy(dur, clip_dur)
+    ss = ["-ss", f"{broll_ss:.3f}"] if broll_ss and broll_ss > 0.01 else []
     broll_filter = "[0:v]setpts=PTS-STARTPTS[b]"
-    broll_args = ["-i", str(broll_clip)]
+    broll_args = [*ss, "-i", str(broll_clip)]
     if strat["mode"] == "stretch":
         broll_filter = f"[0:v]setpts={strat['stretch_ratio']:.4f}*(PTS-STARTPTS)[b]"
     elif strat["mode"] == "stretch_freeze":
@@ -1385,7 +1396,7 @@ def _pro_split_seg_args(broll_clip, avatar_half, start: float, dur: float, seg_o
             f"tpad=stop_mode=clone:stop_duration={strat['freeze_dur']:.3f}[b]"
         )
     elif strat["mode"] == "loop":
-        broll_args = ["-stream_loop", "-1", "-i", str(broll_clip)]
+        broll_args = ["-stream_loop", "-1", *ss, "-i", str(broll_clip)]
     # mode == "trim": дефолт (setpts=PTS-STARTPTS), без stream_loop
     return [
         "ffmpeg", "-y",
@@ -1489,22 +1500,28 @@ def _assemble_pro(
     broll_full_clips = {}   # index -> path (1080x1920)
     broll_half_clips = {}   # index -> path (1080x960)
 
-    needed_full = {}   # bi -> max duration needed
-    needed_half = {}   # bi -> max duration needed
+    # Готовим клип под СУММУ всех сегментов с этим индексом (а не max одного):
+    # длинный B-roll нарезается на разные окна через offset-курсор, поэтому
+    # подготовленная версия должна покрывать суммарную длину всех вставок.
+    needed_total = {}  # bi -> сумма длительностей всех сегментов (full+split)
+    has_full = set()
+    has_half = set()
     for seg in montage_plan:
         bi = seg.get("broll_index")
         if bi is not None and bi < n_broll:
             seg_dur = seg["end"] - seg["start"]
+            needed_total[bi] = needed_total.get(bi, 0.0) + seg_dur
             if seg["layout"] == "broll_full":
-                needed_full[bi] = max(needed_full.get(bi, 0), seg_dur)
+                has_full.add(bi)
             elif seg["layout"] == "split":
-                needed_half[bi] = max(needed_half.get(bi, 0), seg_dur)
+                has_half.add(bi)
 
-    for bi, max_dur in needed_full.items():
+    for bi in sorted(has_full):
+        max_dur = needed_total[bi]
         clip = broll_paths[bi]
         out = tmp_dir / f"pro_broll_full_{bi:02d}.mp4"
-        # Only prepare enough duration (+ 2s buffer) instead of full avatar length
-        prep_dur = min(max_dur + 2.0, avatar_duration)
+        # Под сумму всех вставок (+ буфер), но не длиннее аватара.
+        prep_dur = min(max_dur + 1.0, avatar_duration)
 
         # Detect aspect ratio: if landscape → blur-bg pillarbox, else → crop
         try:
@@ -1551,10 +1568,11 @@ def _assemble_pro(
         )
         broll_full_clips[bi] = out
 
-    for bi, max_dur in needed_half.items():
+    for bi in sorted(has_half):
+        max_dur = needed_total[bi]
         clip = broll_paths[bi]
         out = tmp_dir / f"pro_broll_half_{bi:02d}.mp4"
-        prep_dur = min(max_dur + 2.0, avatar_duration)
+        prep_dur = min(max_dur + 1.0, avatar_duration)
 
         # Split crop strategy — parametric y-anchor (0.0 top … 1.0 bottom).
         #   0.5 (default) preserves the old centre-crop behaviour.
@@ -1642,6 +1660,9 @@ def _assemble_pro(
 
     # ── 4. Build segments as individual clips, then concat ──
     segment_files = []
+    # Offset-курсор по клипу: при переиспользовании одного клипа в нескольких
+    # сегментах читаем РАЗНЫЕ окна (нарезка длинного B-roll), а не начало снова.
+    broll_cursor: dict[int, float] = {}
     for si, seg in enumerate(montage_plan):
         start = seg["start"]
         end = seg["end"]
@@ -1682,9 +1703,13 @@ def _assemble_pro(
                 cdur = _probe_duration(broll_clip)
             except Exception as _e:
                 logger.warning(f"[assembler] probe failed for broll {bi}: {_e} → legacy loop")
+            off = broll_cursor.get(bi, 0.0)
+            if cdur and off + dur > cdur + 0.05:
+                off = 0.0  # клип исчерпан — wrap к началу
+            broll_cursor[bi] = off + dur
             _run(
-                _pro_broll_full_seg_args(broll_clip, dur, seg_out, clip_dur=cdur),
-                f"pro: seg {si} broll_full #{bi} ({dur:.1f}s, clip={cdur or '?'}s)",
+                _pro_broll_full_seg_args(broll_clip, dur, seg_out, clip_dur=cdur, broll_ss=off),
+                f"pro: seg {si} broll_full #{bi} ({dur:.1f}s, clip={cdur or '?'}s, ss={off:.1f})",
             )
 
         elif layout == "split" and bi is not None and bi in broll_half_clips:
@@ -1695,9 +1720,13 @@ def _assemble_pro(
                 cdur = _probe_duration(broll_clip)
             except Exception as _e:
                 logger.warning(f"[assembler] probe failed for split broll {bi}: {_e} → legacy loop")
+            off = broll_cursor.get(bi, 0.0)
+            if cdur and off + dur > cdur + 0.05:
+                off = 0.0  # клип исчерпан — wrap к началу
+            broll_cursor[bi] = off + dur
             _run(
-                _pro_split_seg_args(broll_clip, avatar_half, start, dur, seg_out, clip_dur=cdur),
-                f"pro: seg {si} split #{bi} ({dur:.1f}s, clip={cdur or '?'}s)",
+                _pro_split_seg_args(broll_clip, avatar_half, start, dur, seg_out, clip_dur=cdur, broll_ss=off),
+                f"pro: seg {si} split #{bi} ({dur:.1f}s, clip={cdur or '?'}s, ss={off:.1f})",
             )
 
         else:
@@ -2126,8 +2155,11 @@ def assemble_auto_montage(
     used_fullscreen = False
     if layout == "fullscreen":
         cfg = smart_mix_cfg or {}
-        fs_intro_dur = float(cfg.get("intro_dur", 2.0))
-        fs_outro_dur = float(cfg.get("outro_dur", 3.0))
+        # Fullscreen-интро/аутро = 3с (Артём 28.06: «3с аватар → B-roll → 3с
+        # аватар»). Свой ключ fs_intro_dur, чтобы не перекрывался smart-овым
+        # intro_dur=2.0 из бренд-конфига.
+        fs_intro_dur = float(cfg.get("fs_intro_dur", 3.0))
+        fs_outro_dur = float(cfg.get("fs_outro_dur", cfg.get("outro_dur", 3.0)))
         # Для full-screen фото может играть чуть быстрее (полный экран
         # удерживает внимание дольше), shrink-range шире чем у smart-mix.
         photo_dur_min = float(cfg.get("photo_dur_min", 1.5))

@@ -2536,27 +2536,33 @@ def generate_montage_plan(
                         seg["broll_index"] = 0  # fallback to first clip
                         logger.info("[montage_plan] Converted middle avatar_full → split (no unused broll, reusing 0)")
 
-        # Rule E: each broll_index used strictly once — reassign duplicates
-        used_indices = set()
-        all_indices = set(range(len(broll_descriptions)))
+        # Rule E: в идеале каждый клип 1 раз; но если B-roll-слотов БОЛЬШЕ, чем
+        # клипов (Артём 28.06: дал ОДИН длинный 30-сек B-roll), дубли/вне-
+        # диапазона ПЕРЕИСПОЛЬЗУЮТ существующие клипы (round-robin), а НЕ
+        # выбрасываются в avatar. Ассемблер нарежет длинный клип на РАЗНЫЕ окна
+        # (offset-курсор) → 5 вставок из одного клипа = 5 разных кусков.
+        n_clips = len(broll_descriptions)
+        used_indices: list[int] = []
+        _rr = 0
         for seg in validated:
             bi = seg.get("broll_index")
-            if bi is not None:
-                if bi in used_indices or bi >= len(broll_descriptions):
-                    # Find unused broll clip
-                    available = all_indices - used_indices
-                    if available:
-                        new_bi = available.pop()
-                        logger.info(f"[montage_plan] Replaced duplicate broll {bi} → {new_bi}")
-                        seg["broll_index"] = new_bi
-                        used_indices.add(new_bi)
-                    else:
-                        # No more clips available — convert to avatar_full
-                        seg["layout"] = "avatar_full"
-                        seg["broll_index"] = None
-                        logger.info(f"[montage_plan] No broll left, converted to avatar_full")
+            if bi is None:
+                continue
+            if n_clips == 0:
+                seg["layout"] = "avatar_full"
+                seg["broll_index"] = None
+                continue
+            if bi in used_indices or bi >= n_clips:
+                unused = [i for i in range(n_clips) if i not in used_indices]
+                if unused:
+                    seg["broll_index"] = unused[0]
+                    used_indices.append(unused[0])
                 else:
-                    used_indices.add(bi)
+                    seg["broll_index"] = _rr % n_clips
+                    _rr += 1
+                    logger.info(f"[montage_plan] Переиспользую broll {seg['broll_index']} (нарезка через offset)")
+            else:
+                used_indices.append(bi)
 
         # Rule F: final pass — merge any remaining short segments (created by earlier rules)
         final_merged = [validated[0]]
