@@ -2000,7 +2000,8 @@ async def handle_broll2_upload_message(update: Update, context: ContextTypes.DEF
     # Кнопки на КАЖДОМ ack (Telethon 13 июня): иначе «Готово» уезжает вверх
     # на первом сообщении и недоступно после загрузок.
     await msg.reply_text(
-        f"✅ Добавлено ({len(draft.source_items)}). Ещё файл или жми «Готово».",
+        f"✅ Принял клип #{len(draft.source_items)}. "
+        f"Пришли следующий по порядку или жми «Готово».",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Готово", callback_data="b2up_done")],
             [InlineKeyboardButton("❌ Отмена", callback_data="b2up_cancel")],
@@ -2009,9 +2010,110 @@ async def handle_broll2_upload_message(update: Update, context: ContextTypes.DEF
     return True
 
 
+def _broll_reorder_text(draft) -> str:
+    """Текст экрана порядка клипов перед сборкой (как пойдут в монтаж)."""
+    lines = ["📋 <b>Порядок клипов</b> — как пойдут в монтаж:", ""]
+    for i, it in enumerate(draft.source_items, start=1):
+        name = Path(it.path).name
+        kind = "🎬 видео" if it.kind == "video" else "🖼 фото"
+        lines.append(f"<b>{i})</b> {kind} · {name}")
+    lines.append("")
+    lines.append("Стрелки ⬆⬇ — поменять местами. Порядок верный — «✅ Собрать в этом порядке».")
+    return "\n".join(lines)
+
+
+def _broll_reorder_keyboard(draft) -> InlineKeyboardMarkup:
+    """Клавиатура реордера: на каждый клип ⬆/⬇, затем сборка/отмена."""
+    rows = []
+    for i in range(1, len(draft.source_items) + 1):
+        rows.append([
+            InlineKeyboardButton(f"{i} ⬆", callback_data=f"b2up_move:u:{i}"),
+            InlineKeyboardButton(f"{i} ⬇", callback_data=f"b2up_move:d:{i}"),
+        ])
+    rows.append([InlineKeyboardButton("✅ Собрать в этом порядке", callback_data="b2up_assemble")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="b2up_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_broll_reorder(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                             claude=None) -> None:
+    """«✅ Готово» загрузки → экран порядка клипов перед сборкой.
+
+    Гарантирует пользователю его последовательность 1→2→3 независимо от того,
+    как Telegram доставил альбом. Один клип — реордер не нужен, сразу в сборку.
+    Ядро — работает и у Артёма, и у Максима."""
+    q = update.callback_query
+    uid = q.from_user.id
+    d = _bot_pending.get(uid) or {}
+    draft = load_draft(d.get("broll2_draft_id"), DRAFTS_DIR) if d.get("broll2_draft_id") else None
+    if draft is None or not draft.source_items:
+        await context.bot.send_message(q.message.chat_id, "⚠️ Ничего не загружено — пришли фото/видео.")
+        return
+    if len(draft.source_items) == 1:
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await finish_broll_upload(update, context, claude)
+        return
+    try:
+        await q.edit_message_text(
+            _broll_reorder_text(draft), parse_mode="HTML",
+            reply_markup=_broll_reorder_keyboard(draft),
+        )
+    except Exception:
+        await context.bot.send_message(
+            q.message.chat_id, _broll_reorder_text(draft), parse_mode="HTML",
+            reply_markup=_broll_reorder_keyboard(draft),
+        )
+
+
+def _reorder_swap(items: list, direction: str, idx_1based: int) -> bool:
+    """Меняет местами соседние элементы списка. idx — 1-based. True если поменяли,
+    False если у края/нет хода. Чистая функция (тестируется отдельно)."""
+    i = idx_1based - 1
+    if direction == "u" and 0 < i < len(items):
+        items[i - 1], items[i] = items[i], items[i - 1]
+        return True
+    if direction == "d" and 0 <= i < len(items) - 1:
+        items[i + 1], items[i] = items[i], items[i + 1]
+        return True
+    return False
+
+
+async def handle_broll_reorder_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """⬆/⬇ на экране порядка: меняет местами соседние клипы в source_items."""
+    q = update.callback_query
+    uid = q.from_user.id
+    d = _bot_pending.get(uid) or {}
+    draft = load_draft(d.get("broll2_draft_id"), DRAFTS_DIR) if d.get("broll2_draft_id") else None
+    if draft is None or not draft.source_items:
+        await q.answer("Черновик потерян")
+        return
+    try:
+        _, direction, idx_s = q.data.split(":")
+        idx = int(idx_s)
+    except (ValueError, IndexError):
+        await q.answer()
+        return
+    if not _reorder_swap(draft.source_items, direction, idx):
+        await q.answer("Уже с краю")
+        return
+    draft.touch(time.time())
+    save_draft(draft, DRAFTS_DIR)
+    await q.answer("Поменял местами")
+    try:
+        await q.edit_message_text(
+            _broll_reorder_text(draft), parse_mode="HTML",
+            reply_markup=_broll_reorder_keyboard(draft),
+        )
+    except Exception:
+        pass
+
+
 async def finish_broll_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
                               claude=None) -> None:
-    """«✅ Готово» загрузки: materialize items → превью → существующая сборка."""
+    """«✅ Собрать в этом порядке»: materialize items → превью → существующая сборка."""
     q = update.callback_query
     uid = q.from_user.id
     chat_id = q.message.chat_id

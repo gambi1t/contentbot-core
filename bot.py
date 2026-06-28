@@ -13524,11 +13524,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "b2up_done":
         try:
             await query.answer()
+        except Exception:
+            pass
+        from broll.handlers import show_broll_reorder
+        await show_broll_reorder(update, context, claude)
+        return
+
+    if query.data == "b2up_assemble":
+        try:
+            await query.answer()
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
         from broll.handlers import finish_broll_upload
         await finish_broll_upload(update, context, claude)
+        return
+
+    if query.data.startswith("b2up_move:"):
+        from broll.handlers import handle_broll_reorder_move
+        await handle_broll_reorder_move(update, context)
         return
 
     if query.data == "b2up_cancel":
