@@ -426,8 +426,8 @@ async def main():
     me = await client.get_me()
     global OWNER_ID
     OWNER_ID = me.id
-    logger.info(f"Logged in as {me.first_name} (@{me.username}) id={me.id} (owner for #selfie)")
-    logger.info(f"Listening on Saved Messages for videos with {TRIGGER_TAG} / #lib / {SELFIE_TAG} tags")
+    logger.info(f"Logged in as {me.first_name} (@{me.username}) id={me.id} (owner for #selfie/#broll)")
+    logger.info(f"Listening on Saved Messages for videos with {TRIGGER_TAG} / #lib / {SELFIE_TAG} / #broll tags")
     await client.run_until_disconnected()
 
 
