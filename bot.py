@@ -5770,6 +5770,13 @@ def _jina_text_is_garbage(text: str) -> bool:
     return False
 
 
+# Лимит длины статьи, скармливаемой модели для сценария. Opus держит ~200k токенов
+# → лонгрид влезает целиком в один вызов. Раньше резалось жёстко до 8000/6000 →
+# модель читала только верхушку. env-override для подстройки. Аудит 2026-06-28.
+ARTICLE_MAX_CHARS = int(os.getenv("ARTICLE_MAX_CHARS", "60000"))
+ARTICLE_PARA_LIMIT = int(os.getenv("ARTICLE_PARA_LIMIT", "80"))  # абзацев из HTML-фолбэка (было 15)
+
+
 def _extract_article_from_html(html: str) -> str:
     """Fallback article extraction from raw HTML when Jina fails.
 
@@ -5799,7 +5806,7 @@ def _extract_article_from_html(html: str) -> str:
                 if item.get("@type") == "Article" or "Article" in str(item.get("@type", "")):
                     body = item.get("articleBody", "")
                     if body and len(body) > 100:
-                        result_parts.append(body[:6000])
+                        result_parts.append(body[:ARTICLE_MAX_CHARS])
                     headline = item.get("headline", "")
                     if headline:
                         result_parts.insert(0, headline)
@@ -5824,12 +5831,12 @@ def _extract_article_from_html(html: str) -> str:
     article_m = re.search(r'<article[^>]*>(.*?)</article>', html, re.DOTALL)
     if article_m:
         paras = re.findall(r'<p[^>]*>(.*?)</p>', article_m.group(1), re.DOTALL)
-        for p in paras[:15]:
+        for p in paras[:ARTICLE_PARA_LIMIT]:
             clean = re.sub(r'<[^>]+>', '', p).strip()
             if len(clean) > 40 and clean not in " ".join(result_parts):
                 result_parts.append(clean)
 
-    return "\n\n".join(result_parts)[:6000]
+    return "\n\n".join(result_parts)[:ARTICLE_MAX_CHARS]
 
 
 def extract_youtube_urls(text: str) -> list[str]:
@@ -10840,10 +10847,18 @@ def _extract_target_chars(instruction: str) -> tuple[int, int] | None:
         if 200 <= lo <= 1500:
             return (lo, lo + 200)
 
-    # "около 500", "примерно 500"
-    m = re.search(r"(около|примерно)\s+(\d{3,4})", low)
+    # "около 500", "примерно 500", "в районе 500", "порядка 500"
+    m = re.search(r"(около|примерно|в районе|порядка)\s+(\d{3,4})", low)
     if m:
         target = int(m.group(2))
+        if 200 <= target <= 1500:
+            return (max(200, target - 50), target + 50)
+
+    # Голое "600 символов"/"600 знаков" (без около/до/более) — как точечная цель ±50.
+    # Последним, чтобы не перехватывать "до 500 символов"/"более 500 символов" выше.
+    m = re.search(r"(\d{3,4})\s*(символ|знак)", low)
+    if m:
+        target = int(m.group(1))
         if 200 <= target <= 1500:
             return (max(200, target - 50), target + 50)
 
@@ -11101,11 +11116,30 @@ async def _edit_script(
     if status_msg is None:
         status_msg = await update.message.reply_text("Правлю сценарий...")
 
+    # Реагируем на запрос длины в правке (реюз рецепта _apply_script_instruction):
+    # «длиннее» / «в районе N» / «N символов» → расширяем лимит, иначе база 420-500.
+    asks_longer = _user_asked_for_longer(edit_instruction)
+    explicit_range = _extract_target_chars(edit_instruction)
+    if explicit_range:
+        length_hint = (f"АВТОР УКАЗАЛ ДЛИНУ: {explicit_range[0]}-{explicit_range[1]} символов — "
+                       "уложись в этот диапазон, не больше и не меньше.")
+    elif asks_longer:
+        length_hint = ("Автор просит сделать длиннее — добавь содержание (примеры, детализация "
+                       "уже упомянутых фактов, эмоциональный градус), но НЕ воду. Целевой "
+                       "диапазон 500-650 символов.")
+    else:
+        length_hint = ("По длине держись базы 420-500 символов (~30 сек) — не растягивай без "
+                       "необходимости.")
+
     try:
         response = claude.messages.create(
             model="claude-opus-4-7",
             max_tokens=1024,
-            system="Ты редактор сценариев для коротких вертикальных роликов. Тебе дают готовый сценарий и правку от автора. Выполни правку полностью — если автор просит добавить аналогию, пример, сарказм или новый блок, смело добавляй и перестраивай текст вокруг этого. Сохрани общий посыл и длину (400-600 символов), но не бойся переписать абзацы ради качества. Верни только итоговый текст без пояснений.",
+            system=("Ты редактор сценариев для коротких вертикальных роликов. Тебе дают "
+                    "готовый сценарий и правку от автора. Выполни правку полностью — если автор "
+                    "просит добавить аналогию, пример, сарказм или новый блок, смело добавляй и "
+                    "перестраивай текст вокруг этого. Сохрани общий посыл.\n\n"
+                    f"{length_hint}\n\nВерни только итоговый текст без пояснений."),
             messages=[
                 {"role": "user", "content": f"Вот текущий сценарий:\n\n{data['script']}\n\nВнеси эту правку: {edit_instruction}"},
             ],
@@ -11114,8 +11148,15 @@ async def _edit_script(
         if new_script.upper().startswith("СЦЕНАРИЙ"):
             new_script = new_script.split("\n", 1)[-1].strip()
 
-        # Force shorten if over 500 chars
-        new_script = await _force_shorten(new_script)
+        # Обрезатель — расширяем ТОЛЬКО по просьбе (зеркало _apply_script_instruction).
+        if explicit_range:
+            lo, hi = explicit_range
+            if len(new_script) > hi + 50:
+                new_script = await _force_shorten(new_script, max_chars=hi + 50, target_lo=lo, target_hi=hi)
+        elif asks_longer:
+            new_script = await _force_shorten(new_script, max_chars=700, target_lo=500, target_hi=650)
+        elif len(new_script) > 500:
+            new_script = await _force_shorten(new_script)
 
         data["script"] = new_script
         _save_pending(pending)
@@ -11166,6 +11207,21 @@ async def _generate_script(
     user_id = update.effective_user.id
     logger.info(f"[user:{user_id}] Генерация сценария: {idea_text[:80]}...")
 
+    # Запрос длины может быть в самой идее («сделай подлиннее ~600»). Парсим из
+    # ИСХОДНОЙ идеи (до того, как ниже к idea_text допишется текст статьи), реюз
+    # рецепта _edit_script: нужен И hint в промпт (иначе модель не удлинит), И
+    # ослабление обрезателя.
+    _asks_longer = _user_asked_for_longer(idea_text)
+    _explicit_range = _extract_target_chars(idea_text)
+    if _explicit_range:
+        _len_hint = (f"\n\nАВТОР УКАЗАЛ ДЛИНУ: {_explicit_range[0]}-{_explicit_range[1]} символов "
+                     "(в пределах лимита) — уложись в этот диапазон.")
+    elif _asks_longer:
+        _len_hint = ("\n\nАвтор просит длиннее — раскрой содержание (примеры, детализация), "
+                     "целевой диапазон 500-650 символов (в пределах лимита 600).")
+    else:
+        _len_hint = ""
+
     # Show the active brand in the first status message so Artem always knows
     # which profile this session is recording for. For "default" we stay quiet
     # (it's the overwhelming majority of work — no need for noise).
@@ -11207,7 +11263,7 @@ async def _generate_script(
                                         resp_out = await client.get(jina_out, headers={"User-Agent": "Mozilla/5.0"})
                                         if resp_out.status_code == 200 and len(resp_out.text) > 300:
                                             if not _jina_text_is_garbage(resp_out.text):
-                                                article_text += f"\n\n--- СТАТЬЯ ИЗ ССЫЛКИ В ТВИТЕ ---\n{resp_out.text[:6000]}"
+                                                article_text += f"\n\n--- СТАТЬЯ ИЗ ССЫЛКИ В ТВИТЕ ---\n{resp_out.text[:ARTICLE_MAX_CHARS]}"
                                                 logger.info(f"Fetched linked article from tweet: {outbound}")
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch tweet outbound link {outbound}: {e}")
@@ -11233,7 +11289,7 @@ async def _generate_script(
                             if resp.status_code == 200 and len(resp.text) > 200:
                                 full_resp_text = resp.text
                                 if not _jina_text_is_garbage(resp.text):
-                                    article_text = resp.text[:8000]
+                                    article_text = resp.text[:ARTICLE_MAX_CHARS]
                                     logger.info(f"Fetched article via Jina: {url} ({len(article_text)} chars)")
                                 else:
                                     logger.warning(f"Jina returned nav-menu garbage for {url}, trying fallback")
@@ -11287,7 +11343,7 @@ async def _generate_script(
         script_response = claude.messages.create(
             model="claude-opus-4-7",
             max_tokens=1024,
-            system=_script_system,
+            system=_script_system + _len_hint,   # _len_hint пуст, если длину не просили
             messages=[{"role": "user", "content": idea_text}],
         )
         script_text = script_response.content[0].text.strip()
@@ -11296,8 +11352,15 @@ async def _generate_script(
         if script_text.upper().startswith("СЦЕНАРИЙ"):
             script_text = script_text.split("\n", 1)[-1].strip()
 
-        # Force shorten if over 500 chars
-        script_text = await _force_shorten(script_text)
+        # Обрезатель — расширяем по запросу длины из идеи (как _edit_script).
+        if _explicit_range:
+            _lo, _hi = _explicit_range
+            if len(script_text) > _hi + 50:
+                script_text = await _force_shorten(script_text, max_chars=_hi + 50, target_lo=_lo, target_hi=_hi)
+        elif _asks_longer:
+            script_text = await _force_shorten(script_text, max_chars=700, target_lo=500, target_hi=650)
+        elif len(script_text) > 500:
+            script_text = await _force_shorten(script_text)
 
         # Step 2: Structure for Notion card
         struct_response = claude.messages.create(
