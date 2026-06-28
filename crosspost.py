@@ -1392,77 +1392,96 @@ def vk_upload_clip(
 
     file_size = Path(video_path).stat().st_size
 
-    # Step 1: video.save with is_clip=1
-    try:
-        resp = requests.get(
-            "https://api.vk.com/method/video.save",
-            params={
-                "access_token": access_token,
-                "v": "5.199",
-                "name": (description[:120] or "Clip"),
-                "description": description[:2048],
-                "is_clip": 1,
-                "wallpost": 1,
-            },
-            timeout=30,
-        )
-    except Exception as e:
-        logger.error(f"VK video.save request failed: {e}")
-        return None
-
-    if resp.status_code != 200:
-        logger.error(f"VK video.save HTTP {resp.status_code}: {resp.text[:300]}")
-        return None
-
-    resp_json = resp.json()
-    if "error" in resp_json:
-        err = resp_json["error"]
-        logger.error(f"VK video.save error {err.get('error_code')}: {err.get('error_msg', '')}")
-        return None
-
-    response_data = resp_json.get("response", {})
-    upload_url = response_data.get("upload_url")
-    if not upload_url:
-        logger.error(f"VK video.save returned no upload_url: {resp_json}")
-        return None
-
-    video_id = response_data.get("video_id")
-    owner_id = response_data.get("owner_id")
-    logger.info(f"VK upload_url obtained (video_id={video_id}), uploading {file_size} bytes...")
-
-    # Step 2: Upload file via multipart
-    try:
-        with open(video_path, "rb") as f:
-            encoder = MultipartEncoder(
-                fields={
-                    "video_file": (
-                        Path(video_path).name,
-                        f,
-                        "video/mp4",
-                    ),
-                }
+    # Ретрай на ТРАНЗИЕНТНЫЕ ошибки VK (Артём 28.06: «VK Клипы — ошибка загрузки»
+    # = `video.save error 10: Internal server error`, VK-сторона; раньше падало с
+    # первой осечки). Коды 1/6/10 = Unknown/Too-many-requests/Internal-server →
+    # ретраим с бэкоффом. Код 5 (auth failed) и прочие — НЕ ретраим (нужна
+    # переавторизация / реальная ошибка, повтор не поможет).
+    VK_TRANSIENT_CODES = {1, 6, 10}
+    MAX_ATTEMPTS = 3
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        # Step 1: video.save с is_clip=1 → upload_url
+        try:
+            resp = requests.get(
+                "https://api.vk.com/method/video.save",
+                params={
+                    "access_token": access_token,
+                    "v": "5.199",
+                    "name": (description[:120] or "Clip"),
+                    "description": description[:2048],
+                    "is_clip": 1,
+                    "wallpost": 1,
+                },
+                timeout=30,
             )
-            upload_resp = requests.post(
-                upload_url,
-                data=encoder,
-                headers={"Content-Type": encoder.content_type},
-                timeout=600,
-            )
-    except Exception as e:
-        logger.error(f"VK clip upload request failed: {e}")
-        return None
+        except Exception as e:
+            logger.warning(f"VK video.save request failed (попытка {attempt}/{MAX_ATTEMPTS}): {e}")
+            if attempt < MAX_ATTEMPTS:
+                time.sleep(2.0 * attempt)
+                continue
+            return None
 
-    if upload_resp.status_code != 200:
-        logger.error(f"VK clip upload HTTP {upload_resp.status_code}: {upload_resp.text[:300]}")
-        return None
+        if resp.status_code != 200:
+            logger.warning(f"VK video.save HTTP {resp.status_code} (попытка {attempt}/{MAX_ATTEMPTS}): {resp.text[:200]}")
+            if attempt < MAX_ATTEMPTS:
+                time.sleep(2.0 * attempt)
+                continue
+            return None
 
-    logger.info(f"VK Clip uploaded: owner_id={owner_id}, video_id={video_id}")
+        resp_json = resp.json()
+        if "error" in resp_json:
+            err = resp_json["error"]
+            code = err.get("error_code")
+            logger.error(f"VK video.save error {code}: {err.get('error_msg', '')}")
+            if code in VK_TRANSIENT_CODES and attempt < MAX_ATTEMPTS:
+                time.sleep(2.0 * attempt)
+                continue
+            return None  # auth(5)/прочее — ретрай не поможет
 
-    return {
-        "platform": "vk",
-        "video_id": video_id,
-        "owner_id": owner_id,
-    }
+        response_data = resp_json.get("response", {})
+        upload_url = response_data.get("upload_url")
+        if not upload_url:
+            logger.error(f"VK video.save returned no upload_url: {resp_json}")
+            return None
+
+        video_id = response_data.get("video_id")
+        owner_id = response_data.get("owner_id")
+        logger.info(f"VK upload_url obtained (video_id={video_id}), uploading {file_size} bytes...")
+
+        # Step 2: заливка файла multipart
+        try:
+            with open(video_path, "rb") as f:
+                encoder = MultipartEncoder(
+                    fields={"video_file": (Path(video_path).name, f, "video/mp4")}
+                )
+                upload_resp = requests.post(
+                    upload_url,
+                    data=encoder,
+                    headers={"Content-Type": encoder.content_type},
+                    timeout=600,
+                )
+        except Exception as e:
+            logger.warning(f"VK clip upload request failed (попытка {attempt}/{MAX_ATTEMPTS}): {e}")
+            if attempt < MAX_ATTEMPTS:
+                time.sleep(2.0 * attempt)
+                continue
+            return None
+
+        if upload_resp.status_code != 200:
+            logger.warning(f"VK clip upload HTTP {upload_resp.status_code} (попытка {attempt}/{MAX_ATTEMPTS}): {upload_resp.text[:200]}")
+            if upload_resp.status_code >= 500 and attempt < MAX_ATTEMPTS:
+                time.sleep(2.0 * attempt)
+                continue
+            return None
+
+        logger.info(f"VK Clip uploaded: owner_id={owner_id}, video_id={video_id}")
+        return {
+            "platform": "vk",
+            "video_id": video_id,
+            "owner_id": owner_id,
+        }
+
+    return None
 
 
 # ══════════════════════════════════════════════
