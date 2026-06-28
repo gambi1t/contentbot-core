@@ -1130,6 +1130,7 @@ def _maksim_ready_kb(selected_category: str | None = None) -> InlineKeyboardMark
         f"{skip_mark}✋ Не класть в библиотеку",
         callback_data=f"broll_ready_cat:{_MAKSIM_READY_LIB_SKIP}",
     )])
+    rows.append([InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="broll_ready_pickbroll")])
     rows.append([InlineKeyboardButton("✅ Готово", callback_data="broll_ready_done")])
     rows.append([InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")])
     return InlineKeyboardMarkup(rows)
@@ -1660,7 +1661,11 @@ async def _save_ready_photo(
             if lib_copy:
                 cat_emoji = MAKSIM_CATEGORY_UI.get(chosen_cat, ("📁", chosen_cat))[0]
                 lib_note = f" • {cat_emoji} в библиотеке"
-    return True, f"✓ Фото {next_n} сохранено ({size_kb:.0f} КБ){lib_note}. Всего в проекте: {total_photos}"
+    _v, _p = _broll_ready_counts(proj)
+    return True, (
+        f"✓ Фото {next_n} сохранено ({size_kb:.0f} КБ){lib_note}. "
+        f"В проекте: 🎬 {_v} видео, 📸 {_p} фото."
+    )
 
 
 async def _save_ready_video(
@@ -1773,7 +1778,89 @@ async def _save_ready_video(
                 cat_emoji = MAKSIM_CATEGORY_UI.get(chosen_cat, ("📁", chosen_cat))[0]
                 lib_note = f" • {cat_emoji} в библиотеке"
 
-    return True, f"✓ Видео сохранено как {target_name} ({size_mb:.1f} МБ){trim_note}{lib_note}"
+    v, p = _broll_ready_counts(proj)
+    return True, (
+        f"✓ Видео сохранено как {target_name} ({size_mb:.1f} МБ){trim_note}{lib_note}. "
+        f"В проекте: 🎬 {v} видео, 📸 {p} фото."
+    )
+
+
+# ─── «Готовые материалы» (флоу B): счётчик + загрузка >20МБ через #broll ───
+def _broll_ready_counts(proj) -> tuple[int, int]:
+    """(видео broll_*.mp4, фото в photos/) проекта — для счётчика материалов."""
+    if not proj or not proj.exists():
+        return 0, 0
+    vids = len(list(proj.glob("broll_*.mp4")))
+    pdir = proj / "photos"
+    phs = (
+        sum(1 for p in pdir.iterdir()
+            if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"))
+        if pdir.exists() else 0
+    )
+    return vids, phs
+
+
+def _broll_ready_kb(proj) -> InlineKeyboardMarkup:
+    """Клавиатура «Готовых материалов»: счётчик на кнопке Готово + забор больших
+    файлов (#broll) + назад."""
+    v, p = _broll_ready_counts(proj)
+    total = v + p
+    done_label = f"✅ Готово ({total} материалов)" if total else "✅ Готово"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(done_label, callback_data="broll_ready_done")],
+        [InlineKeyboardButton("🔄 Забрать большие файлы (#broll)", callback_data="broll_ready_pickbroll")],
+        [InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")],
+    ])
+
+
+def _reload_broll_inbox_disk(user_id) -> list:
+    """Перечитать pending.json с диска → broll_inbox для uid (telethon пишет туда
+    #broll-клипы из «Избранного», бот держит pending в памяти и их не видит)."""
+    try:
+        from bot_state import PENDING_FILE as _PF
+        if _PF.exists():
+            disk = json.loads(_PF.read_text(encoding="utf-8")) or {}
+            return (disk.get(str(user_id)) or {}).get("broll_inbox") or []
+    except Exception as e:
+        logger.warning(f"[broll_ready] reload inbox failed: {e}")
+    return (pending.get(user_id) or {}).get("broll_inbox") or []
+
+
+def _ingest_broll_ready_inbox(user_id, data) -> int:
+    """Забрать #broll-клипы (>20МБ из «Избранного») в проект как broll_NN.mp4
+    ПО ПОРЯДКУ (поле order). Возвращает число добавленных, чистит broll_inbox."""
+    import shutil as _shutil
+    proj = _project_dir(data)
+    if not proj:
+        return 0
+    inbox = _reload_broll_inbox_disk(user_id)
+    if not inbox:
+        return 0
+    proj.mkdir(parents=True, exist_ok=True)
+    added = 0
+    for entry in sorted(inbox, key=lambda e: e.get("order", 0)):
+        src = Path(entry.get("path", ""))
+        if not src.exists():
+            continue
+        existing = set()
+        for p in proj.glob("broll_*.mp4"):
+            m = re.match(r"broll_(\d+)", p.stem)
+            if m:
+                existing.add(int(m.group(1)))
+        n = 1
+        while n in existing:
+            n += 1
+        dest = proj / f"broll_{n:02d}.mp4"
+        try:
+            _shutil.move(str(src), str(dest))
+            added += 1
+        except Exception as e:
+            logger.warning(f"[broll_ready] ingest move failed: {e}")
+    if added:
+        st = pending.setdefault(user_id, {})
+        st.pop("broll_inbox", None)
+        _save_pending(pending)
+    return added
 
 
 # --- Transliteration for ElevenLabs ---
@@ -8164,11 +8251,13 @@ async def process_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, reply_text = await _save_ready_photo(update, context, data)
     try:
         await msg.edit_text(
-            reply_text + "\n\n_Ещё фото/видео или «✅ Готово» из меню._",
+            reply_text + "\n\n_Ещё фото/видео или «✅ Готово»._",
             parse_mode="Markdown",
+            reply_markup=_broll_ready_kb(_project_dir(data)),
         )
     except Exception:
-        await update.message.reply_text(reply_text)
+        await update.message.reply_text(
+            reply_text, reply_markup=_broll_ready_kb(_project_dir(data)))
 
 
 def _render_tgpost_html(post_text: str) -> str:
@@ -8982,12 +9071,31 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.message.video
             or (video_file.mime_type and video_file.mime_type.startswith("video/"))
         ):
+            _proj_now = _project_dir(pending[user_id])
+            # >20МБ Bot API не отдаёт боту → редирект на #broll через «Избранное».
+            _sz = getattr(video_file, "file_size", 0) or 0
+            if _sz > 20 * 1024 * 1024:
+                await update.message.reply_text(
+                    f"🎬 Этот файл ~{_sz / 1024 / 1024:.0f} МБ — больше 20 МБ, Telegram не "
+                    "отдаёт его боту напрямую.\n\n"
+                    "Пришли его в «Избранное» <b>Файлом</b> с подписью "
+                    "<code>#broll 1</code> (номер = порядок по сценарию), дождись "
+                    "«✅ B-roll получен», потом жми «🔄 Забрать большие файлы».",
+                    parse_mode="HTML",
+                    reply_markup=_broll_ready_kb(_proj_now),
+                )
+                return
             msg = await update.message.reply_text("📥 Сохраняю видео...")
             ok, reply_text = await _save_ready_video(update, context, pending[user_id])
-            await msg.edit_text(
-                reply_text + "\n\n_Ещё фото/видео или «✅ Готово» из меню выше._",
-                parse_mode="Markdown",
-            )
+            try:
+                await msg.edit_text(
+                    reply_text + "\n\n_Ещё фото/видео или «✅ Готово»._",
+                    parse_mode="Markdown",
+                    reply_markup=_broll_ready_kb(_project_dir(pending[user_id])),
+                )
+            except Exception:
+                await update.message.reply_text(
+                    reply_text, reply_markup=_broll_ready_kb(_project_dir(pending[user_id])))
             return
 
     # Selfie pipeline v2 — text-edit state goes through the selfie module.
@@ -19054,15 +19162,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text(
                 f"📥 Готовые материалы (бренд: *{_brand_now}*)\n\n"
-                "Скинь сюда **фото и/или видео** по одному или пачкой — сохраню в проект.\n\n"
+                "Скинь сюда **фото и/или видео** по одному (по порядку 1→2→3) — сохраню в проект.\n\n"
                 f"📸 Фото → в `projects/<id>/photos/`\n"
                 f"{trim_note}"
-                "Когда закончишь — нажми «✅ Готово».",
+                "🎬 Файлы **>20 МБ**: в «Избранное» **Файлом** с подписью `#broll 1`, `#broll 2` … "
+                "(номер = порядок), потом «🔄 Забрать большие файлы».\n\n"
+                "Когда закончишь — «✅ Готово».",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Готово", callback_data="broll_ready_done")],
-                    [InlineKeyboardButton("◀️ Назад к B-roll", callback_data="broll")],
-                ]),
+                reply_markup=_broll_ready_kb(_project_dir(data)),
             )
         return
 
@@ -19101,7 +19208,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"✓ {cat_label}", show_alert=False)
         return
 
+    if query.data == "broll_ready_pickbroll":
+        await query.answer()
+        added = _ingest_broll_ready_inbox(query.from_user.id, data) if data else 0
+        proj = _project_dir(data) if data else None
+        if added:
+            await context.bot.send_message(
+                query.message.chat_id,
+                f"✅ Забрал больших файлов: {added}.",
+                reply_markup=_broll_ready_kb(proj),
+            )
+        else:
+            await context.bot.send_message(
+                query.message.chat_id,
+                "Пока не вижу #broll-файлов. Пришли клип в «Избранное» Файлом с подписью "
+                "<code>#broll 1</code> …, дождись «✅ B-roll получен», потом нажми снова.",
+                parse_mode="HTML",
+                reply_markup=_broll_ready_kb(proj),
+            )
+        return
+
     if query.data == "broll_ready_done":
+        # Подхватить большие файлы (#broll), если не нажал «Забрать».
+        if data:
+            _ingest_broll_ready_inbox(query.from_user.id, data)
         # Exit the "ready materials" mode — back to the B-roll menu.
         if data and data.get("state") == "broll_ready_material":
             data["state"] = None

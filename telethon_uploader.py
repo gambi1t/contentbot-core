@@ -50,7 +50,7 @@ SELFIE_INBOX = BOT_DIR / "selfie_inbox"
 # их в проект по этому порядку. Отдельный поток от #selfie/#crosspost/#lib.
 BROLL_TAG_RE = re.compile(r'^#broll\b(?:\s+(\d+))?', re.IGNORECASE)
 BROLL_INBOX = BOT_DIR / "broll_inbox"
-_BROLL_UPLOAD_STATE = "broll2_uploading"
+_BROLL_UPLOAD_STATES = {"broll2_uploading", "broll_ready_material"}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,11 +139,11 @@ def _find_active_broll(pending: dict, owner_id: "int | None" = None) -> "tuple[s
     Отдельный поток от #selfie/#crosspost, чтобы не перехватывать чужие файлы."""
     if owner_id is not None:
         d = pending.get(str(owner_id))
-        if d and d.get("state") == _BROLL_UPLOAD_STATE:
+        if d and d.get("state") in _BROLL_UPLOAD_STATES:
             return str(owner_id), d
         return None
     for uid, data in pending.items():
-        if data.get("state") == _BROLL_UPLOAD_STATE:
+        if data.get("state") in _BROLL_UPLOAD_STATES:
             return uid, data
     return None
 
@@ -285,7 +285,7 @@ async def handle_saved(event):
         # в broll_inbox — бот заберёт по «Готово»/«Забрать большие файлы».
         try:
             pending = json.loads(PENDING_FILE.read_text(encoding="utf-8"))
-            if uid in pending and pending[uid].get("state") == _BROLL_UPLOAD_STATE:
+            if uid in pending and pending[uid].get("state") in _BROLL_UPLOAD_STATES:
                 lst = pending[uid].setdefault("broll_inbox", [])
                 lst.append({"path": str(target), "order": order if order is not None else seq})
                 _atomic_write_pending(pending)
