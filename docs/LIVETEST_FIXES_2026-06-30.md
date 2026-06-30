@@ -25,7 +25,7 @@
 | 2 | Корень: гидрация сценария из Notion (P2b) | R2b ✅ гидрация на открытии карточки | ⬜ |
 | 3 | Корень: текст не утекает в «новую идею» (P2a) | рекомендация (без явного спора) | ⬜ |
 | 4 | Корень: мёртвая кнопка на фото (P3-краш) | R3 ✅ + все места | ⬜ |
-| 5 | P3-остальное: правка текста обложки + единый ключ | R3 ✅ + все места | ⬜ |
+| 5 | P3-остальное: правка текста обложки + единый ключ | R3 ✅ | ✅ ЗАДЕПЛОЕНО `1837b58` (без единого ключа selfie/broll — defer) |
 | 6 | P4: правка субтитров ДО прожига (реюз селфи) | R4 ✅ до ролика | ⬜ |
 | 7 | P5: превью ИИ-монтажа ДО сборки | ⏳ ждёт confirm | ⬜ |
 | 8 | P6: новый голос TG-поста во ВСЕ входы + точечная правка | live-test 30.06 | ⬜ |
@@ -74,6 +74,18 @@
 **ALL-PLACES:** все callsite `add_subtitles_to_video` с words=None: card_assemble→assemble_auto_montage (15485 / video_assembler 2347), avatar_publish (17192), standalone broll (broll/handlers 2362). Исключить dead-код (if False 9292). Полный список — из аудита.
 **Открытое:** транскрипт для аватара — известный сценарий vs Whisper-аудио (forced alignment = отдельная опция, high-risk, не сейчас).
 **Тест:** на аватар/broll-пути перед прожигом — экран правки транскрипта; правка отражается в субтитрах; прожиг один раз.
+
+## P4 — EXECUTION-READY СПЕКА (карта 30.06, строки актуальны)
+**3 burn-пути** (`add_subtitles_to_video`): (1) `card_asm_go:`→`assemble_auto_montage` — УЖЕ читает `proj/words.json` ([bot.py:15683](../bot.py)), нет → Whisper; (2) `avatar_publish` ([bot.py:17403](../bot.py)) — без words; (3) standalone broll ([broll/handlers.py:2360](../broll/handlers.py)) — без words.
+**Реюз (чистые, импортируемые):** `apply_user_edits(orig_words, new_text)→(new_words, warning)` (selfie/edit.py:17, word-count-lock); `build_review_message(transcript, edited)` / `detect_text_unchanged` (selfie/handlers.py:121/146); `transcribe_words(audio)` (subtitle_burner.py:314). words.json пишет селфи (bot.py:7959).
+**Дизайн (низкий риск, без рефактора сборки):** общий компонент `subrev:` (state `subrev_review`/`subrev_editing`).
+- Гейт в `card_asm_go` ПОСЛЕ proj_dir-резолва ([bot.py:15436](../bot.py)): `if with_subs and not (proj_dir/"words.json").exists(): if await _start_subtitle_review(query, context, proj_dir, resume_cb=query.data): return`.
+- `_start_subtitle_review`: найти `avatar_*.mp4` в proj_dir → статус «Расшифровываю…» → `transcribe_words` → нет аудио/слов → return False (обычная сборка). Иначе pending: `subrev={words, orig_transcript, proj, resume}`, state=`subrev_review`; показать `build_review_message` + кнопки «✏️ Редактировать»(subrev:edit)/«✅ Собрать с этими»(subrev:go)/«❌ Отмена». return True.
+- `subrev:edit`→state subrev_editing→«пришли текст (то же число слов)». Текст-ветка в process_idea (ДО catch-all): `apply_user_edits` → warning? показать, остаться; иначе words=new, state=subrev_review, re-show (edited=True). «отмена» → выход.
+- `subrev:go`: write `proj/words.json` из subrev['words'] → «✅ Субтитры приняты, собираю» + кнопка «▶️ Собрать ролик» = `resume` (исходный card_asm_go). Клик → words.json есть → сборка по правленым словам (Whisper не зовётся). Резюм по кнопке = БЕЗ рефактора сборки.
+- avatar_publish + broll: научить читать `proj/words.json` (передать `words=`) + тот же гейт. «one-line words=» (audit).
+- `subrev` + states → `_CARD_SCOPED_KEYS` (очистка при переключении карточки).
+**TDD:** `_words_to_transcript` (pure) + реюз apply_user_edits (уже покрыт) + source-проводка (гейт/callbacks/state). **Порядок:** card_asm_go (путь Артёма) → avatar_publish → broll.
 
 ## P5 — превью ИИ-монтажа ДО сборки (ждёт confirm Артёма)
 **Рекомендация:** для ИИ-монтажа (`card_asm_go:a`) вставить паузу-превью ДО рендера: показать план + «✅ Собрать так» / «✂️ Поправить раскладку». Правка пересчитывает ТОЛЬКО план (1 вызов Claude, без ffmpeg), показывает снова, по кругу; рендер — один раз по подтверждённому плану. Для детерминированного Про-монтажа паузу не делать.
