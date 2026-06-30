@@ -20868,7 +20868,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # per-file → сотни файлов в чат (инцидент 22 июня, 118 файлов). Резолверы
         # кросспоста реюзим (_resolve_download_materials).
         chat_id = query.message.chat_id
-        MAX_BOT_UPLOAD = 48 * 1024 * 1024  # лимит Telegram Bot API
         data_local = data if isinstance(data, dict) else {}
 
         # Биллинг (идемпотентный) — оставляем как было (тот же trigger).
@@ -20882,21 +20881,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mats = _resolve_download_materials(data_local)
         sent = 0
         try:
-            # 1. Готовый ролик
+            # 1. Готовый ролик — канон _broll_deliver: ≤48МБ документом, >48МБ
+            # nginx-ссылкой В ЧАТ. Файл в Notion не кладётся (file-upload в коде
+            # нет), поэтому старое «забери из Notion-карточки» врало — даём ссылку.
             video = mats.get("video")
             if video and Path(video).exists():
-                vsize = Path(video).stat().st_size
-                if vsize <= MAX_BOT_UPLOAD:
-                    with open(video, "rb") as fh:
-                        await context.bot.send_document(
-                            chat_id=chat_id, document=fh,
-                            filename=f"{safe_title}.mp4", caption="🎬 Готовый ролик")
+                delivered = await _broll_deliver(
+                    context.bot, chat_id, str(video), "🎬 Готовый ролик",
+                    filename=f"{safe_title}.mp4", parse_mode=None,
+                )
+                if delivered:
                     sent += 1
                 else:
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=f"🎬 Ролик {vsize / (1024 * 1024):.0f} МБ — больше лимита "
-                             "Telegram (48 МБ). Забери его из Notion-карточки.")
+                        text="🎬 Ролик не удалось отдать ни файлом, ни ссылкой. "
+                             "Он сохранён в проекте — напиши, пришлю другим способом.")
 
             # 2. Обложка
             cover = mats.get("cover")

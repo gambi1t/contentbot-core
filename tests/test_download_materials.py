@@ -85,10 +85,32 @@ def test_handler_no_zip_no_rglob(errors):
     _assert("_resolve_download_materials" in body, "хендлер зовёт _resolve_download_materials", errors)
 
 
+def test_oversize_video_delivers_link_not_notion(errors):
+    print("\n-- download_project: ролик отдаётся каноном _broll_deliver, без вранья про Notion --")
+    # P1 (live-test 30.06): при >48МБ хендлер писал «Забери его из Notion-карточки»,
+    # но файл туда не кладётся НИКОГДА (Notion file-upload в коде нет). Фикс: отдать
+    # ролик каноном _broll_deliver — ≤48МБ документом, >48МБ nginx-ссылкой В ЧАТ.
+    # Поведение «>48МБ → ссылка» уже зафиксировано в test_broll_delivery.py; тут —
+    # проверяем ВШИВАНИЕ канона в download_project и удаление ложного сообщения.
+    src = Path(bot.__file__).read_text(encoding="utf-8")
+    idx = src.find('if query.data == "download_project":')
+    _assert(idx != -1, "хендлер найден", errors)
+    if idx == -1:
+        return
+    nxt = src.find("if query.data ==", idx + 10)
+    body = src[idx: nxt if nxt != -1 else idx + 4000]
+    _assert("_broll_deliver(" in body,
+            "ролик отдаётся через канон _broll_deliver (ссылка в чат при >48МБ)", errors)
+    _assert("Забери его из Notion" not in body,
+            "убрано враньё «забери из Notion-карточки» (файла там нет)", errors)
+    _assert("MAX_BOT_UPLOAD" not in body,
+            "локальный порог MAX_BOT_UPLOAD убран (порог теперь внутри _broll_deliver)", errors)
+
+
 def main() -> int:
     errors: list = []
     for fn in (test_resolves_exactly_three, test_description_falls_back_to_file,
-               test_handler_no_zip_no_rglob):
+               test_handler_no_zip_no_rglob, test_oversize_video_delivers_link_not_notion):
         fn(errors)
     print("\n" + (f"FAIL ({len(errors)})" if errors else "OK all download-materials tests passed"))
     return 1 if errors else 0
