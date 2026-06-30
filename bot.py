@@ -10071,14 +10071,11 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Any other message = new idea (clear old pending if exists)
+    # Catch-all (P2a, Артём 30.06): новая идея ТОЛЬКО из чистого состояния/развилки.
+    # Текст в callback-only меню (cover/selfie/broll/tgpost_review и т.п.) больше
+    # НЕ утекает в «💡 Идея принята» — вежливый отказ. Гейт общий с process_voice.
     current_state = pending.get(user_id, {}).get("state")
-    if current_state:
-        logger.warning(f"[user:{user_id}] State '{current_state}' not handled, treating as new idea: {idea_text[:60]}")
-    # Свежая идея → развилка пайплайна (Артём 13 июня): AI-аватар ИЛИ
-    # B-roll монтаж без аватара (для SMM со своим сценарием). Раньше всегда
-    # шёл аватар напрямую.
-    await _show_pipeline_fork(update, context, idea_text)
+    await _route_fresh_idea_or_reject(update, context, idea_text, current_state)
 
 
 async def _ideas_batch_stale(query) -> None:
@@ -10861,8 +10858,9 @@ async def process_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.edit_text("Не удалось расшифровать. Напиши название текстом.")
 
         else:
-            # Any other voice = new idea → развилка пайплайна (как и текст).
-            await _show_pipeline_fork(update, context, idea_text, edit_msg=msg)
+            # Catch-all голоса (P2a): тот же гейт — идея только из чистого
+            # состояния, иначе голос в меню-экране не уходит в «💡 Идея принята».
+            await _route_fresh_idea_or_reject(update, context, idea_text, current_state, edit_msg=msg)
     finally:
         os.unlink(tmp_path)
 
@@ -11480,6 +11478,34 @@ async def _show_pipeline_fork(update, context, idea_text: str, edit_msg=None) ->
         await edit_msg.edit_text(text, reply_markup=kb)
     else:
         await update.message.reply_text(text, reply_markup=kb)
+
+
+# P2a (Артём 30.06): свободный текст/голос/видео в callback-only состоянии
+# сваливался в «💡 Идея принята» (catch-all process_idea/process_voice). Гейт:
+# новую идею стартуем ТОЛЬКО из чистого состояния (или экрана-развилки). Opt-in
+# (а не список меню-состояний) — новое callback-состояние по умолчанию отвергает
+# текст, а не утекает в idea-fork. Пустое сообщение (медиа без подписи) — тоже не идея.
+_IDEA_INPUT_STATES = frozenset({None, "", "pipeline_fork"})
+
+
+async def _route_fresh_idea_or_reject(update, context, idea_text, current_state, edit_msg=None) -> None:
+    """Единый гейт catch-all (текст И голос): создаём новую идею только из
+    _IDEA_INPUT_STATES и при непустом тексте; иначе вежливо отвергаем — иначе
+    свободный текст/голос/видео в callback-only меню сваливался в «Идея принята»
+    (P2a). Симметрично для текста и голоса (без дрейфа зеркал)."""
+    if current_state in _IDEA_INPUT_STATES and (idea_text or "").strip():
+        await _show_pipeline_fork(update, context, idea_text, edit_msg=edit_msg)
+        return
+    logger.info(f"[idea-gate] ввод в состоянии '{current_state}' — не идея, отклонён")
+    nudge = ("👆 Тут нужно нажать кнопку — этот текст не уйдёт в новую идею.\n"
+             "Чтобы начать заново, отправь «отмена» или /start.")
+    try:
+        if edit_msg is not None:
+            await edit_msg.edit_text(nudge)
+        else:
+            await update.message.reply_text(nudge)
+    except Exception:
+        pass
 
 
 async def _generate_script(
