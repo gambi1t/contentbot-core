@@ -21483,9 +21483,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Generate immediately
             await query.edit_message_text("Сохраняю в Notion + генерирую обложку...")
             try:
-                card_data = data["card_data"]
-                script_text = data["script"]
-                cover_text = data["cover_text"]
+                # card_data/script могут отсутствовать на карточке, открытой через
+                # notion_card: (P2b гидрирует script+title, не card_data) → .get с
+                # фолбэком на notion_edit_title, иначе KeyError 'card_data' (Артём 30.06).
+                card_data = data.get("card_data") or {"title": data.get("notion_edit_title", "")}
+                script_text = data.get("script", "")
+                cover_text = data.get("cover_text", "")
 
                 # Generate cover image with chosen avatar
                 cover_path = str(ASSETS_DIR / "last_cover.jpg")
@@ -21633,8 +21636,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
         try:
-            card_data = data["card_data"]
-            script_text = data["script"]
+            # Защита от KeyError на открытой через notion_card: карточке (нет card_data).
+            card_data = data.get("card_data") or {"title": data.get("notion_edit_title", "")}
+            script_text = data.get("script", "")
             cover_text = data.get("cover_text", "")
 
             # Save cover to permanent storage and get URL
