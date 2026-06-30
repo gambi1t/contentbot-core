@@ -52,10 +52,10 @@ def test_hydrates_script_from_notion(errors):
     body = _notion_card_body()
     _assert("fetch_notion_page_script" in body,
             "тянет сценарий из Notion при открытии карточки", errors)
-    _assert('["script"]' in body,
-            "пишет сценарий в pending[user_id]['script']", errors)
-    _assert('["notion_page_id"]' in body,
-            "ставит notion_page_id (save описания в ту же карточку)", errors)
+    # Гидрация (script+notion_page_id+card_data+...) делегирована хелперу
+    # _hydrate_card_context (рефактор Codex 30.06). Поведение — в test_card_context_switch.
+    _assert("_hydrate_card_context" in body,
+            "гидрация контекста карточки через _hydrate_card_context", errors)
 
 
 def test_does_not_block_menu_on_empty_script(errors):

@@ -8650,8 +8650,10 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"[tgpost_script surg] failed: {e}")
             try:
+                # Generic-сообщение юзеру (детали в логе) — exception может нести
+                # provider-payload (Codex low). Реальная ошибка уже залогирована выше.
                 await status_msg.edit_text(
-                    f"❌ Не смог применить правку: {e}\nПопробуй иначе или «Отмена».")
+                    "❌ Не смог применить правку. Попробуй иначе сформулировать или «Отмена».")
             except Exception:
                 pass
             return
@@ -11529,6 +11531,45 @@ async def _show_pipeline_fork(update, context, idea_text: str, edit_msg=None) ->
         await edit_msg.edit_text(text, reply_markup=kb)
     else:
         await update.message.reply_text(text, reply_markup=kb)
+
+
+# Поля pending, привязанные к КОНКРЕТНОЙ карточке/её пайплайну. При открытии ДРУГОЙ
+# карточки через notion_card: их надо очистить, иначе downstream работает с контентом
+# прошлой карточки (Codex review 30.06: project_dir берёт card_data['title'] в приоритете
+# → не та папка; cover/crosspost/tgpost — чужой контекст). card_data/notion_url/script/
+# idea сюда НЕ входят — они перезаписываются контекстом новой карточки.
+_CARD_SCOPED_KEYS = (
+    "source_urls", "youtube_urls",
+    "description", "description_draft", "description_variants", "description_cta_extracted",
+    "tg_post_from_script", "tgpost_script_surg_iters",
+    "crosspost_selected", "crosspost_card_id", "selfie_tg_photos",
+    "cover_text", "cover_options", "all_cover_options", "cover_path",
+    "cover_preview_sent", "selfie_cover_text", "selfie_cover", "chosen_avatar",
+    "voice_parts", "voice_approved", "voiceover_model", "voice_meta",
+    "shown_hooks",
+)
+
+
+def _hydrate_card_context(pu: dict, full_id: str, card: dict, hydrated_script: str,
+                          switching: bool) -> None:
+    """Привести pending-data к контексту ОТКРЫВАЕМОЙ карточки (notion_card:).
+
+    switching=True (открыли ДРУГУЮ карточку) → очистить card-scoped поля прошлой
+    (иначе B работает с контентом A — Codex 30.06). Всегда → выставить контекст ЭТОЙ
+    карточки (card_data/notion_url/page_id/script/idea). switching=False (та же
+    карточка / возврат «◀️ К карточке») → WIP сохраняется."""
+    if switching:
+        pu.pop("state", None)
+        for _k in _CARD_SCOPED_KEYS:
+            pu.pop(_k, None)
+    pu["notion_edit_card"] = full_id
+    pu["notion_edit_title"] = card.get("title", "")
+    pu["card_data"] = {"title": card.get("title", "")}
+    pu["notion_url"] = card.get("url", "")
+    pu["notion_page_id"] = full_id
+    pu["script"] = hydrated_script or ""
+    if hydrated_script:
+        pu["idea"] = hydrated_script[:200]
 
 
 # P2a (Артём 30.06): свободный текст/голос/видео в callback-only состоянии
@@ -15961,26 +16002,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             full_id = card["id"]
-            # Store for follow-up actions
+            # Открытие карточки = смена card-контекста (P2b + Codex review 30.06).
+            # Гидрируем сценарий из Notion (иначе gen_description/broll/озвучка ложно
+            # падают в «Нет сценария»), И приводим pending к контексту ИМЕННО этой
+            # карточки. Раньше notion_card: лишь дописывал script+page_id, не чистя
+            # card-поля прошлой карточки → при переходе A→B downstream (project_dir
+            # берёт card_data['title'] в приоритете → не та папка; cover/crosspost/
+            # tgpost — чужой контекст) тихо работал с A. Теперь: другая карточка →
+            # очистка card-scoped полей + гидрация контекста этой; та же → WIP сохраняем.
             pending[user_id] = pending.get(user_id) or {}
-            pending[user_id]["notion_edit_card"] = full_id
-            pending[user_id]["notion_edit_title"] = card["title"]
-            # P2b (Артём 30.06): гидрируем сценарий из Notion при ОТКРЫТИИ карточки —
-            # иначе gen_description/broll_shooting_list/озвучка читают пустой
-            # pending['script'] и ложно падают в «Нет сценария», хотя в Notion (под
-            # «Сценарий») он есть. Образец — card_continue (выше). Пишем БЕЗУСЛОВНО
-            # (вкл. ''), чтобы при переключении карточек не утёк сценарий предыдущей.
-            # Сбой Notion НЕ валит отрисовку карточки (в отличие от card_continue,
-            # меню показываем при любом статусе).
+            _prev_id = pending[user_id].get("notion_page_id") or pending[user_id].get("notion_edit_card")
+            _switching = bool(_prev_id) and _prev_id != full_id
             try:
                 _hydrated_script = await asyncio.to_thread(fetch_notion_page_script, full_id)
             except Exception as _e_hyd:
-                # Сбой Notion (транзиент) НЕ затираем сценарий в памяти на '' —
-                # сохраняем прежний (ревью batch-1). Меню всё равно не падает.
+                # Сбой Notion (транзиент): на ДРУГОЙ карточке старый сценарий НЕ тащим
+                # (иначе B рулится сценарием A — Codex); на ТОЙ ЖЕ — сохраняем прежний.
                 logger.warning(f"[notion_card] гидрация сценария из Notion не удалась: {_e_hyd}")
-                _hydrated_script = pending[user_id].get("script", "")
-            pending[user_id]["script"] = _hydrated_script or ""
-            pending[user_id]["notion_page_id"] = full_id
+                _hydrated_script = "" if _switching else pending[user_id].get("script", "")
+            _hydrate_card_context(pending[user_id], full_id, card, _hydrated_script, _switching)
             _save_pending(pending)
 
             buttons = []
