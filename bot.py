@@ -16395,7 +16395,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 max_tokens=1024,
                 system=_script_system,
                 messages=[
-                    {"role": "user", "content": data["idea"]},
+                    # idea не входит в набор, что ставит notion_card: (только script+
+                    # page_id). Потоково защищён (сюда выходят через card_continue), но
+                    # превентивно .get с фолбэком на script — без KeyError (аудит P2b-класса).
+                    {"role": "user", "content": data.get("idea") or data.get("script", "")},
                     {"role": "assistant", "content": data["script"]},
                     {"role": "user", "content": "Перепиши сценарий. Другой хук, другой ритм, другая подача. Сохрани ту же идею."},
                 ],
