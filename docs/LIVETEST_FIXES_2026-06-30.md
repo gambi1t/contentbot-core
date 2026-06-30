@@ -128,5 +128,25 @@
 
 **Defer-хардненинг (под сетью error_handler, не блокер):** `data['script']` по индексу в cover-ветках (21180/21287/21386/21532) → при пустом сценарии может дать мусор/KeyError; except-ветки cover (Ошибка:{e}) на фото. Сейчас покрыты сетью error_handler (юзер видит ответ). Добить точечно при желании.
 
+## Batch-2 прогресс (локально, НЕ задеплоено)
+- ✅ `f4a38f4` P7 — «Назад к выбору площадок» несёт card_id. TDD test_crosspost_back_button_p7.
+- ✅ `ad3e891` P6b — точечная правка TG-поста по сценарию (кнопка + state + реюз _apply_tgpost_surg_edit). TDD test_tgpost_script_surg_p6b.
+- 🟡 **P6a (старый формат TG-поста) — НЕ код-баг.** Прочитал код: пайплайн `tgpost_from_script` и standalone «Telegram-версия описания» идут через ИДЕНТИЧНЫЙ `generate_post(video_companion)` + `SYSTEM_PROMPT_ARTEM` (новый камертон 28.06). Кодовой разницы нет. Расхождение = стейл-кэш ИЛИ тип `video_companion` структурно ≠ ЭТАЛОН A. **Ждёт voice-решение Артёма** (промпт молча не меняю — его зона). Моя первичная греп-оценка была неверной, исправил чтением.
+- Регрессий нет (9 ключевых тестов зелёные).
+
+## Открытые решения (блокируют точечно, не весь батч)
+- **P6a voice** — хочет ли Артём, чтобы `video_companion` (пост-к-ролику) звучал как ЭТАЛОН A (личная подача)? Тогда подкручу шаблон tg_post_writer.py:508 + A/B. Или сначала пусть сравнит свежий пост (после 28.06) — возможно стейл.
+- **P3-обложка / selfie** — правка текста обложки в selfie (там текст = заголовок карточки). Lead-dev call: НЕ добавляю кнопку правки в selfie (разведёт обложку и заголовок), делаю для легаси/card + broll. Артём может возразить.
+
+## Регрессия-экспозиция P2b (аудит wf `wqv1n4cug`, 30.06)
+P2b-гидрация `notion_card:` (script+page_id) открыла пути к downstream-коду, читающему поля по индексу. Стрельнул `card_data` (cover_pick/cover_confirm) — починен `.get`+фолбэк. Аудит: класс **исчерпан**, ещё одно место `data["idea"]`@16398 защищено превентивно (`03dc92e`).
+**РЕШЕНИЕ: `notion_card:` НЕ добивать до полного набора `card_continue`** — высокий clobber-риск (срабатывает на каждом «◀️ К карточке»; безусловная установка card_data/state/voice_parts затрёт активный пайплайн).
+**🔒 ИНВАРИАНТ:** `notion_card:` ставит только notion_edit_card/notion_edit_title/script/notion_page_id. Эталон полного открытия = `card_continue`. Любой НОВЫЙ downstream, читающий delta-поля (card_data, notion_url, idea, source_urls, youtube_urls, voice_parts, voice_approved, state) по индексу `[]` и достижимый с `notion_card:`-карточки — обязан `.get` с фолбэком.
+**Давний край (вне класса, на будущее):** bot.py:16609 `voice_approved[idx]=False` → IndexError если короче voice_parts; выровнять при следующей правке озвучки.
+
+## Codex external review (по запросу Артёма 30.06)
+Codex (`codex exec -s read-only` на `e329efa..HEAD`) поймал то, что **in-house аудит пропустил**: не KeyError, а **stale-состояние между карточками** — `notion_card:` не чистил card-поля прошлой → `project_dir` берёт чужой `card_data.title` → не та папка. Фикс `_hydrate_card_context` (card-id-различие: другая карточка → очистка+гидрация, та же → WIP) — коммит `31836d7`. + P6b low (generic ошибка). Codex medium закрыты тем же фиксом; low (cover_approval отмена-trap) → #26. Память: [[feedback_external_codex_review_for_critical]].
+
 ## Текущая позиция
-> **Batch-1 (P1+P2b+P2a+P3-крах) готов и в состязательном ревью** (wf `w9g61fvrb`: баги/security/Максим). Дальше: по вердикту ревью → правки если надо → ДЕПЛОЙ batch-1 на Илон → тест Артёмом. Затем batch-2: P3-обложка → P4 → P5(если confirm).
+> **ВСЁ ЗАДЕПЛОЕНО на Илон + запушено. HEAD `31836d7`, NRestarts=0, логи чистые.** Сессия 30.06: P1, P2b, P2a, P3-крах (+review-фиксы), P7, P6b, card_data KeyError, idea-exposure, **context-switch (Codex)**. Бэкапы на сервере: bot.py.bak_predeploy_batch1/batch2.
+> **Открыто:** P3-обложка (#26, + cover_approval отмена-trap) · P4 субтитры (#27) · P5 превью ИИ-монтажа (ждёт confirm) · P6a (Артём оставил как есть, A/B доказал новый голос) · давний край voice_approved[idx] (при правке озвучки).
