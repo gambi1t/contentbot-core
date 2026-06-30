@@ -11497,8 +11497,13 @@ async def _route_fresh_idea_or_reject(update, context, idea_text, current_state,
         await _show_pipeline_fork(update, context, idea_text, edit_msg=edit_msg)
         return
     logger.info(f"[idea-gate] ввод в состоянии '{current_state}' — не идея, отклонён")
-    nudge = ("👆 Тут нужно нажать кнопку — этот текст не уйдёт в новую идею.\n"
-             "Чтобы начать заново, отправь «отмена» или /start.")
+    if current_state in _IDEA_INPUT_STATES:
+        # Чистое состояние, но ввод пустой (видео/фото без подписи, нераспознанный
+        # голос) — кнопки тут нет, подсказываем переотправить (ревью batch-1).
+        nudge = "Не уловил идею. Продиктуй ещё раз или напиши текстом 🙏"
+    else:
+        nudge = ("👆 Тут нужно нажать кнопку — этот текст не уйдёт в новую идею.\n"
+                 "Чтобы начать заново, отправь «отмена» или /start.")
     try:
         if edit_msg is not None:
             await edit_msg.edit_text(nudge)
@@ -15880,8 +15885,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 _hydrated_script = await asyncio.to_thread(fetch_notion_page_script, full_id)
             except Exception as _e_hyd:
+                # Сбой Notion (транзиент) НЕ затираем сценарий в памяти на '' —
+                # сохраняем прежний (ревью batch-1). Меню всё равно не падает.
                 logger.warning(f"[notion_card] гидрация сценария из Notion не удалась: {_e_hyd}")
-                _hydrated_script = ""
+                _hydrated_script = pending[user_id].get("script", "")
             pending[user_id]["script"] = _hydrated_script or ""
             pending[user_id]["notion_page_id"] = full_id
             _save_pending(pending)
@@ -21957,6 +21964,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     всё под try/except — error_handler не должен сам падать."""
     logger.error(f"Необработанная ошибка: {context.error}", exc_info=context.error)
     try:
+        # Транзиентные сетевые ошибки PTB не уведомляем — иначе спам на нестабильной
+        # сети (ревью batch-1). TimedOut ⊂ NetworkError, проверки одного хватает.
+        from telegram.error import NetworkError as _NetErr
+        if isinstance(context.error, _NetErr):
+            return
         chat = getattr(update, "effective_chat", None)
         if chat is not None and getattr(chat, "id", None) is not None:
             await context.bot.send_message(
