@@ -17859,7 +17859,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons = [
                 [InlineKeyboardButton("🪄 Сгенерировать описание сейчас", callback_data="gen_description")],
                 [InlineKeyboardButton("➡️ Опубликовать без (обрезка сценария)", callback_data="crosspost_force_publish")],
-                [InlineKeyboardButton("⬅️ Назад к выбору площадок", callback_data="crosspost")],
+                # P7: голый "crosspost" не матчил startswith("crosspost:") → мёртвая
+                # кнопка. Несём card_id, чтобы вернуться на платформ-пикер.
+                [InlineKeyboardButton("⬅️ Назад к выбору площадок", callback_data=f"crosspost:{data.get('crosspost_card_id', '')}")],
             ]
             await query.edit_message_text(
                 "📝 У карточки нет описания для публикации.\n\n"
