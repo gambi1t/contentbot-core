@@ -8438,6 +8438,9 @@ def _tgpost_script_keyboard(photos_count: int = 0) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ Опубликовать в TG-канал", callback_data="tgpost_from_script:publish")],
         [InlineKeyboardButton(photo_label, callback_data="tgpost_script_photos")],
         [InlineKeyboardButton("🔄 Перегенерировать", callback_data="tgpost_from_script")],
+        # P6b: точечная правка вместо полной регенерации (Артём 30.06). Реюз
+        # generic _apply_tgpost_surg_edit, источник — data['tg_post_from_script'].
+        [InlineKeyboardButton("✏️ Точечная правка (Sonnet)", callback_data="tgpost_script_surg:start")],
     ])
 
 
@@ -8614,6 +8617,54 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✖️ Точечная правка отменена.")
             return
         await _handle_tgpost_surg_edit_instruction(update, context, idea_text.strip())
+        return
+
+    # ─── Точечная правка TG-поста ПО СЦЕНАРИЮ (пайплайн, P6b) ───
+    # Параллель idea_post_surg_edit, но источник — data['tg_post_from_script'] и
+    # рендер — _tgpost_script_keyboard. Реюз generic _apply_tgpost_surg_edit
+    # (brand-aware). Одношаговая правка: state сбрасывается, для ещё одной —
+    # кнопка снова. Ветка ДО catch-all, поэтому в idea-fork (P2a) не утекает.
+    if state == "tgpost_script_surg_wait" and idea_text and not idea_text.startswith("/"):
+        data = pending.get(user_id) or {}
+        if idea_text.strip().lower() in ("отмена", "отменить", "выйти", "стоп"):
+            data["state"] = None
+            pending[user_id] = data
+            _save_pending(pending)
+            await update.message.reply_text("✖️ Точечная правка отменена.")
+            return
+        cur = (data.get("tg_post_from_script") or "").strip()
+        if not cur:
+            data["state"] = None
+            pending[user_id] = data
+            _save_pending(pending)
+            await update.message.reply_text("⚠️ Нет поста для правки — сгенерируй заново.")
+            return
+        iters = int(data.get("tgpost_script_surg_iters", 0) or 0)
+        if iters >= 10:
+            await update.message.reply_text(
+                "⚠️ Лимит точечных правок (10). Опубликуй или перегенерируй.")
+            return
+        status_msg = await update.message.reply_text(f"✏️ Применяю точечную правку #{iters + 1}…")
+        try:
+            new_text = await asyncio.to_thread(_apply_tgpost_surg_edit, cur, idea_text.strip())
+        except Exception as e:
+            logger.warning(f"[tgpost_script surg] failed: {e}")
+            try:
+                await status_msg.edit_text(
+                    f"❌ Не смог применить правку: {e}\nПопробуй иначе или «Отмена».")
+            except Exception:
+                pass
+            return
+        data["tg_post_from_script"] = new_text
+        data["tgpost_script_surg_iters"] = iters + 1
+        data["state"] = None
+        pending[user_id] = data
+        _save_pending(pending)
+        photos_count = len(data.get("selfie_tg_photos") or [])
+        await update.message.reply_text(
+            f"📰 TG-пост по сценарию:\n\n{new_text}",
+            reply_markup=_tgpost_script_keyboard(photos_count),
+        )
         return
 
     # ─── AI-видео: правка промпта сцены текстом (альтернатива голосу) ───
@@ -13246,6 +13297,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # the instructed part. State `idea_post_surg_edit` runs in parallel
     # to Артёмов `tgpost_review` (preserved in data["tgpost"]) so user
     # can mix surgical and regenerate without state collision.
+    # ─── Точечная правка TG-поста ПО СЦЕНАРИЮ (пайплайн, P6b) ───
+    if query.data == "tgpost_script_surg:start":
+        sd = pending.get(user_id) or {}
+        if not (sd.get("tg_post_from_script") or "").strip():
+            await query.answer("⚠️ Нет текста для правки", show_alert=True)
+            return
+        sd["state"] = "tgpost_script_surg_wait"
+        pending[user_id] = sd
+        _save_pending(pending)
+        iters = int(sd.get("tgpost_script_surg_iters", 0) or 0)
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=(
+                f"✏️ <b>Жду точечную правку</b> (#{iters + 1})\n\n"
+                "Напиши <b>текстом</b>, что поменять — остальное останется как есть.\n\n"
+                "<i>Примеры:</i>\n"
+                "• <code>убери первый абзац</code>\n"
+                "• <code>сделай хук резче</code>\n"
+                "• <code>короче на треть</code>\n"
+                "• <code>добавь юмор в финал</code>\n\n"
+                "<i>«Отмена» в чате — выход.</i>"
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✖️ Отменить", callback_data="tgpost_script_surg:cancel")],
+            ]),
+        )
+        await query.answer()
+        return
+
+    if query.data == "tgpost_script_surg:cancel":
+        sd = pending.get(user_id) or {}
+        if sd.get("state") == "tgpost_script_surg_wait":
+            sd["state"] = None
+            pending[user_id] = sd
+            _save_pending(pending)
+        await query.answer("Отменено")
+        return
+
     if query.data.startswith("tgpost_surg_edit_start:"):
         try:
             idx = int(query.data.split(":", 1)[1])
