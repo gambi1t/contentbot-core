@@ -9934,7 +9934,34 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # If user is in cover approval state
+    # ✏️ Явная правка текста обложки (cover_write_text → cover_edit_waiting): чистый
+    # ввод без substring-trap — ЛЮБОЙ текст = новый текст обложки (P3, Артём 30.06).
+    if user_id in pending and pending[user_id].get("state") == "cover_edit_waiting":
+        if idea_text.strip().lower() in ("отмена", "отмени", "отменить", "стоп", "cancel"):
+            pending[user_id]["state"] = "cover_approval"
+            _save_pending(pending)
+            await update.message.reply_text("✖️ Правка отменена. Жми кнопку под превью.")
+            return
+        pending[user_id]["cover_text"] = idea_text.strip()
+        pending[user_id]["state"] = "cover_approval"
+        _save_pending(pending)
+        await update.message.reply_text(
+            f"🖼 Текст обложки:\n\n«{idea_text.strip()}»\n\nЖми «✅ Ок, генерируй».",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Ок, генерируй", callback_data="cover_ok")],
+                [InlineKeyboardButton("✏️ Написать ещё раз", callback_data="cover_write_text")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+            ]),
+        )
+        return
+
     if user_id in pending and pending[user_id].get("state") == "cover_approval":
+        # «Отмена» текстом — выход, а не текст обложки (Codex review 30.06).
+        if idea_text.strip().lower() in ("отмена", "отмени", "отменить", "стоп", "cancel"):
+            pending[user_id]["state"] = None
+            _save_pending(pending)
+            await update.message.reply_text("✖️ Отменено.")
+            return
         # Check if user wants to generate options or set custom text
         lower = idea_text.lower()
         if any(w in lower for w in ["вариант", "предлож", "придумай", "генерируй", "ещё", "еще", "другой", "другие", "нравится"]):
@@ -11570,6 +11597,14 @@ def _hydrate_card_context(pu: dict, full_id: str, card: dict, hydrated_script: s
     pu["script"] = hydrated_script or ""
     if hydrated_script:
         pu["idea"] = hydrated_script[:200]
+
+
+def _cover_caption(title: str | None) -> str:
+    """Единая подпись превью/финала обложки (P3, Артём 30.06). Пустой текст →
+    явное «без текста (само фото)» вместо пустых кавычек «🖼 Обложка: «»»."""
+    if (title or "").strip():
+        return f"🖼 Обложка: «{title}»"
+    return "🖼 Обложка: без текста (само фото)"
 
 
 # P2a (Артём 30.06): свободный текст/голос/видео в callback-only состоянии
@@ -21550,6 +21585,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Send preview with buttons below the photo
                 buttons = [
                     [InlineKeyboardButton("✅ Сохранить в Notion", callback_data="cover_confirm")],
+                    [InlineKeyboardButton("✏️ Написать свой текст", callback_data="cover_write_text")],
                     [InlineKeyboardButton("🔄 Другой текст обложки", callback_data="cover_redo_text")],
                     [InlineKeyboardButton("📷 Другое фото", callback_data="change_avatar")],
                     [InlineKeyboardButton("📤 Загрузить своё фото в библиотеку", callback_data="cover_pool_upload")],
@@ -21563,7 +21599,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.get_bot().send_photo(
                         chat_id=query.message.chat_id,
                         photo=cover_file,
-                        caption=f"🖼 Обложка: «{cover_text}»\n\nНравится? Сохраняю или переделать?",
+                        caption=f"{_cover_caption(cover_text)}\n\nНравится? Сохраняю или переделать?",
                         reply_markup=InlineKeyboardMarkup(buttons),
                     )
 
@@ -21594,7 +21630,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"Cover save-to-project failed: {_e}")
             buttons = [
                 [InlineKeyboardButton("✅ Сохранить в Notion", callback_data="cover_confirm")],
-                [InlineKeyboardButton("✏️ Добавить текст", callback_data="cover_redo_text")],
+                [InlineKeyboardButton("✏️ Добавить текст", callback_data="cover_write_text")],
                 [InlineKeyboardButton("📷 Другое фото", callback_data="change_avatar")],
                 [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
             ]
@@ -21614,6 +21650,22 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"cover_notext error: {e}", exc_info=True)
             await query.edit_message_text(f"Ошибка: {e}")
+        return
+
+    if query.data == "cover_write_text":
+        # Явная правка/ввод текста обложки (P3, Артём 30.06). Чистое состояние
+        # cover_edit_waiting — без substring-trap cover_approval; ЛЮБОЙ текст = новый
+        # текст обложки. Реюз desc_edit-паттерна (показать текущий → принять замену).
+        sd = pending.get(user_id) or {}
+        _cur = sd.get("cover_text", "")
+        sd["state"] = "cover_edit_waiting"
+        pending[user_id] = sd
+        _save_pending(pending)
+        _cur_line = f"Текущий текст: «{_cur}»\n\n" if _cur else ""
+        await query.message.reply_text(
+            f"✏️ {_cur_line}Пришли текст обложки одним сообщением — поставлю его (любой текст).\n"
+            "«Отмена» — выход.")
+        await query.answer()
         return
 
     if query.data == "cover_redo_text":
@@ -21797,7 +21849,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success_caption = (
                 f"✅ Карточка {action_word}!\n\n"
                 f"📋 Notion: {notion_url}\n"
-                f"🖼 Обложка: «{cover_text}»\n"
+                f"{_cover_caption(cover_text)}\n"
                 f"📊 Статус: Сценарий | озвучка"
             )
             try:
@@ -22070,6 +22122,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             buttons = [
                 [InlineKeyboardButton("✅ Сохранить в Notion", callback_data="cover_confirm")],
+                [InlineKeyboardButton("✏️ Написать свой текст", callback_data="cover_write_text")],
                 [InlineKeyboardButton("🔄 Другой текст обложки", callback_data="cover_redo_text")],
                 [InlineKeyboardButton("📷 Другое фото", callback_data="change_avatar")],
                 [InlineKeyboardButton("📤 Загрузить своё фото в библиотеку", callback_data="cover_pool_upload")],
@@ -22083,7 +22136,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.get_bot().send_photo(
                     chat_id=query.message.chat_id,
                     photo=cover_file,
-                    caption=f"🖼 Обложка: «{cover_text}»\n\nНравится? Сохраняю или переделать?",
+                    caption=f"{_cover_caption(cover_text)}\n\nНравится? Сохраняю или переделать?",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
 
