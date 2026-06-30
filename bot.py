@@ -21271,7 +21271,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _save_pending(pending)
 
         # Now generate cover text options
-        await query.edit_message_text("🖼 Генерирую варианты обложки...")
+        # P3: статус на ФОТО-сообщении (явный avatar_pick:<файл>) → _send_or_edit
+        # (edit→фолбэк send_message при «no text»), иначе кнопка «мёртвая».
+        await _send_or_edit(query, context, "🖼 Генерирую варианты обложки...")
         try:
             prev_options = data.get("all_cover_options", [])
             exclude_text = ""
@@ -21434,7 +21436,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # «🚫 Без текста».
         data["cover_text"] = ""
         _save_pending(pending)
-        await query.edit_message_text("Готовлю обложку без текста…")
+        # P3: cover-превью может быть ФОТО → _send_or_edit (фолбэк send_message).
+        await _send_or_edit(query, context, "Готовлю обложку без текста…")
         try:
             cover_path = str(ASSETS_DIR / "last_cover.jpg")
             chosen_avatar = data.get("chosen_avatar")
@@ -21472,7 +21475,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Go back to cover text selection with current avatar
         data.pop("cover_text", None)
         _save_pending(pending)
-        await query.edit_message_text("🖼 Генерирую новые варианты обложки...")
+        # P3 (доминанта): кнопка висит на cover-превью ФОТО → сырой
+        # edit_message_text падал BadRequest «no text» → «мёртвая кнопка».
+        # _send_or_edit делает фолбэк на send_message.
+        await _send_or_edit(query, context, "🖼 Генерирую новые варианты обложки...")
         try:
             prev_options = data.get("all_cover_options", [])
             exclude_text = ""
@@ -21907,7 +21913,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cover_ok":
         # Generate cover preview (custom text from user)
-        await query.edit_message_text("🖼 Генерирую обложку...")
+        # P3: статус может быть на ФОТО → _send_or_edit (фолбэк send_message).
+        await _send_or_edit(query, context, "🖼 Генерирую обложку...")
 
         try:
             cover_text = data.get("cover_text", "")
@@ -21941,8 +21948,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Log unhandled errors."""
+    """Log unhandled errors + уведомить пользователя (P3, Артём 30.06).
+
+    Раньше любое непойманное исключение в хендлере только логировалось → кнопка
+    выглядела «мёртвой» (особенно edit_message_text на фото-сообщении). Теперь
+    юзер получает явный ответ даже на НЕПОКРЫТЫХ точках входа — страховочная сеть
+    поверх точечных фиксов edit-on-photo. Duck-typing по effective_chat (тестируемо),
+    всё под try/except — error_handler не должен сам падать."""
     logger.error(f"Необработанная ошибка: {context.error}", exc_info=context.error)
+    try:
+        chat = getattr(update, "effective_chat", None)
+        if chat is not None and getattr(chat, "id", None) is not None:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text="⚠️ Что-то пошло не так, попробуй ещё раз. Если повторяется — напиши.",
+            )
+    except Exception:
+        pass
 
 
 async def post_init(application):
