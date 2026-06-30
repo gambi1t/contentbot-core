@@ -15844,6 +15844,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending[user_id] = pending.get(user_id) or {}
             pending[user_id]["notion_edit_card"] = full_id
             pending[user_id]["notion_edit_title"] = card["title"]
+            # P2b (Артём 30.06): гидрируем сценарий из Notion при ОТКРЫТИИ карточки —
+            # иначе gen_description/broll_shooting_list/озвучка читают пустой
+            # pending['script'] и ложно падают в «Нет сценария», хотя в Notion (под
+            # «Сценарий») он есть. Образец — card_continue (выше). Пишем БЕЗУСЛОВНО
+            # (вкл. ''), чтобы при переключении карточек не утёк сценарий предыдущей.
+            # Сбой Notion НЕ валит отрисовку карточки (в отличие от card_continue,
+            # меню показываем при любом статусе).
+            try:
+                _hydrated_script = await asyncio.to_thread(fetch_notion_page_script, full_id)
+            except Exception as _e_hyd:
+                logger.warning(f"[notion_card] гидрация сценария из Notion не удалась: {_e_hyd}")
+                _hydrated_script = ""
+            pending[user_id]["script"] = _hydrated_script or ""
+            pending[user_id]["notion_page_id"] = full_id
             _save_pending(pending)
 
             buttons = []
