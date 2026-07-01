@@ -9934,6 +9934,37 @@ async def process_idea(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # If user is in cover approval state
+    # P4: правка транскрипта субтитров (subrev_editing) — реюз apply_user_edits
+    # (word-count-lock: только орфография, то же число слов). Артём 30.06.
+    if user_id in pending and pending[user_id].get("state") == "subrev_editing":
+        sd = pending[user_id]
+        sr = sd.get("subrev") or {}
+        if idea_text.strip().lower() in ("отмена", "отмени", "отменить", "стоп", "cancel"):
+            sd["state"] = "subrev_review"
+            _save_pending(pending)
+            await update.message.reply_text("✖️ Оставил как есть. Жми «✅ Использовать как есть».")
+            return
+        from selfie.edit import apply_user_edits
+        new_words, warning = apply_user_edits(sr.get("words") or [], idea_text)
+        if warning:
+            await update.message.reply_text(warning)
+            return  # остаёмся в subrev_editing
+        sr["words"] = new_words
+        sr["orig_transcript"] = _words_to_transcript(new_words)
+        sd["subrev"] = sr
+        sd["state"] = "subrev_review"
+        _save_pending(pending)
+        from selfie.handlers import build_review_message
+        await update.message.reply_text(
+            build_review_message(sr["orig_transcript"], edited=True),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Редактировать ещё", callback_data="subrev:edit")],
+                [InlineKeyboardButton("✅ Использовать как есть", callback_data="subrev:go")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="subrev:cancel")],
+            ]))
+        return
+
     # ✏️ Явная правка текста обложки (cover_write_text → cover_edit_waiting): чистый
     # ввод без substring-trap — ЛЮБОЙ текст = новый текст обложки (P3, Артём 30.06).
     if user_id in pending and pending[user_id].get("state") == "cover_edit_waiting":
@@ -11573,7 +11604,7 @@ _CARD_SCOPED_KEYS = (
     "cover_text", "cover_options", "all_cover_options", "cover_path",
     "cover_preview_sent", "selfie_cover_text", "selfie_cover", "chosen_avatar",
     "voice_parts", "voice_approved", "voiceover_model", "voice_meta",
-    "shown_hooks",
+    "shown_hooks", "subrev",
 )
 
 
@@ -11605,6 +11636,54 @@ def _cover_caption(title: str | None) -> str:
     if (title or "").strip():
         return f"🖼 Обложка: «{title}»"
     return "🖼 Обложка: без текста (само фото)"
+
+
+def _words_to_transcript(words) -> str:
+    """Слова Whisper [{word,start,end}] → строка-транскрипт (P4)."""
+    return " ".join((w.get("word") or "") for w in (words or [])).strip()
+
+
+async def _start_subtitle_review(query, context, proj_dir, resume_cb: str) -> bool:
+    """P4 (Артём 30.06): перед прожигом субтитров на аватар/broll-пути даём поправить
+    транскрипт (реюз селфи-правки — apply_user_edits/build_review_message). Расшифровываем
+    аватар-аудио (источник речи), показываем транскрипт с кнопками. True — ушли в ревью
+    (вызывающий делает return); False — расшифровать нечего (обычная сборка, Whisper
+    внутри ассемблера)."""
+    user_id = query.from_user.id
+    avatars = sorted(proj_dir.glob("avatar_*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not avatars:
+        return False
+    try:
+        await query.edit_message_text("📝 Расшифровываю речь для субтитров… ~20-40 сек")
+    except Exception:
+        pass
+    try:
+        from subtitle_burner import transcribe_words
+        words = await asyncio.to_thread(transcribe_words, str(avatars[0]))
+    except Exception as e:
+        logger.warning(f"[subrev] transcribe failed: {e}")
+        return False
+    if not words:
+        return False
+    transcript = _words_to_transcript(words)
+    sd = pending.get(user_id) or {}
+    sd["subrev"] = {"words": words, "orig_transcript": transcript,
+                    "proj": str(proj_dir), "resume": resume_cb}
+    sd["state"] = "subrev_review"
+    pending[user_id] = sd
+    _save_pending(pending)
+    from selfie.handlers import build_review_message
+    await query.get_bot().send_message(
+        chat_id=query.message.chat_id,
+        text=build_review_message(transcript),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Редактировать", callback_data="subrev:edit")],
+            [InlineKeyboardButton("✅ Использовать как есть", callback_data="subrev:go")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="subrev:cancel")],
+        ]),
+    )
+    return True
 
 
 # P2a (Артём 30.06): свободный текст/голос/видео в callback-only состоянии
@@ -15435,6 +15514,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # P4 (Артём 30.06): субтитры ДО прожига. Если просили субтитры, но готового
+        # words.json нет (аватар/HeyGen-карточка — ассемблер ре-транскрибирует Whisper),
+        # даём поправить транскрипт ПЕРЕД долгой сборкой (реюз селфи-правки). После
+        # подтверждения пишем words.json → повторный card_asm_go (та же кнопка) соберёт
+        # по нему без ре-транскрибации. Селфи-карточки имеют words.json → гейт молчит.
+        if with_subs and not (proj_dir / "words.json").exists():
+            if await _start_subtitle_review(query, context, proj_dir, resume_cb=query.data):
+                return
+
         # Выбор источника B-roll по namespace (фикс бага C1: план монтажа и
         # клипы для сборки ОБЯЗАНЫ браться из одного источника). Приоритет:
         # HyperFrames > AI-видео(Seedance) > Remotion > SMM-реал > mix. Это же
@@ -17395,6 +17483,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("В проекте нет аватара", show_alert=True)
             return
         avatar = _avs[0]
+        # P4: субтитры ДО прожига. Нет готового words.json → даём поправить транскрипт
+        # (реюз селфи-правки); повторный avatar_publish жжёт по нему без ре-транскрибации.
+        if not (proj / "words.json").exists():
+            if await _start_subtitle_review(query, context, proj, resume_cb="avatar_publish"):
+                return
+        _apw = None
+        try:
+            _wj = proj / "words.json"
+            if _wj.exists():
+                import json as _jw2
+                _apw = _jw2.loads(_wj.read_text(encoding="utf-8"))
+        except Exception:
+            _apw = None
         try:
             await query.edit_message_text("✏️ Накладываю субтитры на аватар… ~30-60 сек.")
         except Exception:
@@ -17408,6 +17509,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 str(avatar),
                 output_path=str(_final),
                 font_dir=(str(_FD) if _FD.exists() else None),
+                words=_apw,
             )
         except Exception as e:
             logger.error(f"[avatar_publish] subtitles failed: {e}", exc_info=True)
@@ -21650,6 +21752,57 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"cover_notext error: {e}", exc_info=True)
             await query.edit_message_text(f"Ошибка: {e}")
+        return
+
+    if query.data == "subrev:edit":
+        sd = pending.get(user_id) or {}
+        sr = sd.get("subrev")
+        if not sr:
+            await query.answer("Нет активной правки субтитров", show_alert=True)
+            return
+        sd["state"] = "subrev_editing"
+        pending[user_id] = sd
+        _save_pending(pending)
+        await query.message.reply_text(
+            f"✏️ Текущая расшифровка:\n\n{sr.get('orig_transcript', '')}\n\n"
+            "Пришли исправленный текст ЦЕЛИКОМ с тем же числом слов (правь орфографию "
+            "названий, напр. «Джеминай»→«Gemini»). «Отмена» — выход.")
+        await query.answer()
+        return
+
+    if query.data == "subrev:go":
+        sd = pending.get(user_id) or {}
+        sr = sd.get("subrev")
+        if not sr:
+            await query.answer("Нет активной правки субтитров", show_alert=True)
+            return
+        try:
+            import json as _js_sr
+            (Path(sr["proj"]) / "words.json").write_text(
+                _js_sr.dumps(sr["words"], ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"[subrev] words.json save failed: {e}")
+        sd.pop("subrev", None)
+        sd["state"] = None
+        pending[user_id] = sd
+        _save_pending(pending)
+        await query.message.reply_text(
+            "✅ Субтитры приняты. Жми «Собрать ролик» — соберу с ними (без повторной расшифровки).",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶️ Собрать ролик", callback_data=sr["resume"])],
+            ]))
+        await query.answer()
+        return
+
+    if query.data == "subrev:cancel":
+        sd = pending.get(user_id) or {}
+        sd.pop("subrev", None)
+        if sd.get("state") in ("subrev_review", "subrev_editing"):
+            sd["state"] = None
+        pending[user_id] = sd
+        _save_pending(pending)
+        await query.answer("Отменено")
+        await query.message.reply_text("✖️ Правка субтитров отменена.")
         return
 
     if query.data == "cover_write_text":
