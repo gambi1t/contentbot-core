@@ -26,7 +26,7 @@
 | 3 | Корень: текст не утекает в «новую идею» (P2a) | рекомендация (без явного спора) | ⬜ |
 | 4 | Корень: мёртвая кнопка на фото (P3-краш) | R3 ✅ + все места | ⬜ |
 | 5 | P3-остальное: правка текста обложки + единый ключ | R3 ✅ | ✅ ЗАДЕПЛОЕНО `1837b58` (без единого ключа selfie/broll — defer) |
-| 6 | P4: правка субтитров ДО прожига (реюз селфи) | R4 ✅ до ролика | ⬜ |
+| 6 | P4: правка субтитров ДО прожига (реюз селфи) | R4 ✅ до ролика | ✅ ЗАДЕПЛОЕНО `6d6dbf0` (card_asm_go+avatar_publish; standalone broll — defer, рек Б) |
 | 7 | P5: превью ИИ-монтажа ДО сборки | ⏳ ждёт confirm | ⬜ |
 | 8 | P6: новый голос TG-поста во ВСЕ входы + точечная правка | live-test 30.06 | ⬜ |
 | 9 | P7: «Назад к выбору площадок» мёртвая (crosspost) | live-test 30.06 | ⬜ |
@@ -159,6 +159,8 @@ P2b-гидрация `notion_card:` (script+page_id) открыла пути к 
 ## Codex external review (по запросу Артёма 30.06)
 Codex (`codex exec -s read-only` на `e329efa..HEAD`) поймал то, что **in-house аудит пропустил**: не KeyError, а **stale-состояние между карточками** — `notion_card:` не чистил card-поля прошлой → `project_dir` берёт чужой `card_data.title` → не та папка. Фикс `_hydrate_card_context` (card-id-различие: другая карточка → очистка+гидрация, та же → WIP) — коммит `31836d7`. + P6b low (generic ошибка). Codex medium закрыты тем же фиксом; low (cover_approval отмена-trap) → #26. Память: [[feedback_external_codex_review_for_critical]].
 
-## Текущая позиция
-> **ВСЁ ЗАДЕПЛОЕНО на Илон + запушено. HEAD `31836d7`, NRestarts=0, логи чистые.** Сессия 30.06: P1, P2b, P2a, P3-крах (+review-фиксы), P7, P6b, card_data KeyError, idea-exposure, **context-switch (Codex)**. Бэкапы на сервере: bot.py.bak_predeploy_batch1/batch2.
-> **Открыто:** P3-обложка (#26, + cover_approval отмена-trap) · P4 субтитры (#27) · P5 превью ИИ-монтажа (ждёт confirm) · P6a (Артём оставил как есть, A/B доказал новый голос) · давний край voice_approved[idx] (при правке озвучки).
+## Текущая позиция (обновлено 01.07 — SSOT = handoff)
+> **ВСЁ по этому плану ЗАДЕПЛОЕНО на Илон + запушено.** Код на проде = `6d6dbf0` (P4), git-HEAD = `ff43b1a` (+conftest), NRestarts=0. Задеплоено: P1, P2b, P2a, P3-крах (+review), P7, P6b, card_data, idea-exposure, context-switch (Codex), P3-обложка, **P4 (субтитры до прожига, 01.07 12:15 UTC)**. Бэкапы: bak_predeploy_batch1/2/3 + bak_predeploy_p4.
+> **Открыто:** P5 превью ИИ-монтажа (ждёт да/нет Артёма) · P4 standalone-broll (рек Б, отдельно) · voice_approved[idx] (16775/17028) · P3-обложка единый ключ (defer) · download-hint (>48МБ).
+> **Вне git:** IG-DM «игра» (dm_keywords.json на сервере, media 18001067585771057 → t.me/artempanferov_ai/40).
+> ⚠️ Тело плана выше (таблица, file:line, «EXECUTION-READY спека») — снимок СЕРЕДИНЫ, местами устарел. **Актуальное состояние — только в handoff** (`branches/content-bot/handoff.md`, шапка «Последняя сессия: 2026-07-01»).
